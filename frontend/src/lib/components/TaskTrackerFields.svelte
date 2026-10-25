@@ -249,8 +249,7 @@
               maxlength="10000"
               value={String(values[field.id] ?? '')}
               {disabled}
-              oninput={(event) => (values[field.id] = event.currentTarget.value)}
-            ></textarea>
+              oninput={(event) => (values[field.id] = event.currentTarget.value)}></textarea>
           {:else if field.type === 'select'}
             <select
               id={`field-${field.id}`}

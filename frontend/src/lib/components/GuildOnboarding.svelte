@@ -253,8 +253,7 @@
               value={rule}
               oninput={(event) => (config.rules[index] = event.currentTarget.value)}
               maxlength="1000"
-              rows="2"
-            ></textarea><button
+              rows="2"></textarea><button
               aria-label={`Remove rule ${index + 1}`}
               onclick={() => config.rules.splice(index, 1)}>×</button
             >
@@ -608,7 +607,7 @@
                 {#if item.channel_id && channels.find((channel) => entityRef(channel) === item.channel_id)}{@const channel =
                     channels.find((channel) => entityRef(channel) === item.channel_id)!}<a
                     href={resolve(
-                      `/g/${encodeURIComponent(entityRef(guild))}/${encodeURIComponent(entityRef(channel))}`
+                      `g/${encodeURIComponent(entityRef(guild))}/${encodeURIComponent(entityRef(channel))}`
                     )}
                     onclick={async (event) => {
                       event.preventDefault();
@@ -617,7 +616,7 @@
                       if (!error)
                         await goto(
                           resolve(
-                            `/g/${encodeURIComponent(entityRef(guild))}/${encodeURIComponent(entityRef(channel))}`
+                            `g/${encodeURIComponent(entityRef(guild))}/${encodeURIComponent(entityRef(channel))}`
                           )
                         );
                     }}>Open channel →</a

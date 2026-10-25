@@ -73,15 +73,15 @@
 
 <main class="landing-page cl-page">
   <header class="landing-nav cl-nav">
-    <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
+    <a class="wordmark" href={resolve('')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
     <nav aria-label={$t('ui_page_0a30a815')}>
       <a href="#features">{$t('ui_features_5697d03d')}</a>
       <a href="#how-we-run">{$t('ui_what_to_know_8248a6c6')}</a>
       <a href="#downloads">Download</a>
       <a href="#hosting">{$t('ui_hosting_b4ec9bba')}</a>
-      <a href={resolve('/support')}>Support</a>
-      <a class="cl-signin" href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
-      <a class="secondary-button" href={resolve('/register')}>{$t('ui_create_account_798ca2ce')}</a>
+      <a href={resolve('support')}>Support</a>
+      <a class="cl-signin" href={resolve('login')}>{$t('ui_sign_in_bfd402b2')}</a>
+      <a class="secondary-button" href={resolve('register')}>{$t('ui_create_account_798ca2ce')}</a>
     </nav>
   </header>
 
@@ -90,11 +90,11 @@
     <h1>{$t('ui_a_place_for_a8c902c5')} <em>our</em> conversations.</h1>
     <p>{$t('ui_kaede_brings_text_channels_direct_messages_fi_d2c15c22')}</p>
     <div class="welcome-actions cl-cta">
-      <a class="primary-button large-button" href={resolve('/register')}>
+      <a class="primary-button large-button" href={resolve('register')}>
         {$t('ui_create_an_account_86033f75')}
         <Icon name="chevron-right" size={18} />
       </a>
-      <a class="secondary-button large-button" href={resolve('/login')}
+      <a class="secondary-button large-button" href={resolve('login')}
         >{$t('ui_sign_in_bfd402b2')}</a
       >
     </div>
@@ -209,11 +209,11 @@
     <h2>{$t('ui_come_say_hello_c43cf6b7')}</h2>
     <p>{$t('ui_create_an_account_on_this_instance_or_sign_in_abde1861')}</p>
     <div class="welcome-actions cl-cta">
-      <a class="primary-button large-button" href={resolve('/register')}>
+      <a class="primary-button large-button" href={resolve('register')}>
         {$t('ui_create_an_account_86033f75')}
         <Icon name="chevron-right" size={18} />
       </a>
-      <a class="secondary-button large-button" href={resolve('/login')}
+      <a class="secondary-button large-button" href={resolve('login')}
         >{$t('ui_sign_in_bfd402b2')}</a
       >
     </div>
@@ -221,7 +221,7 @@
 
   <footer class="cl-footer">
     <div class="cl-footer-brand">
-      <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
+      <a class="wordmark" href={resolve('')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
       <p>
         {$t('ui_federated_community_chat_operated_by_value0_565b3b7e', {
           value0: String(operatorLegalConfig?.operatorName ?? 'this instance’s operator')
@@ -229,11 +229,11 @@
       </p>
     </div>
     <nav class="cl-footer-links" aria-label={$t('ui_footer_26c87bb5')}>
-      <a href={resolve('/support')}>Support</a>
-      <a href={resolve('/terms')}>{$t('ui_terms_of_service_e69e0614')}</a>
-      <a href={resolve('/privacy')}>{$t('ui_privacy_policy_ba445cff')}</a>
-      <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
-      <a href={resolve('/register')}>{$t('ui_create_account_798ca2ce')}</a>
+      <a href={resolve('support')}>Support</a>
+      <a href={resolve('terms')}>{$t('ui_terms_of_service_e69e0614')}</a>
+      <a href={resolve('privacy')}>{$t('ui_privacy_policy_ba445cff')}</a>
+      <a href={resolve('login')}>{$t('ui_sign_in_bfd402b2')}</a>
+      <a href={resolve('register')}>{$t('ui_create_account_798ca2ce')}</a>
     </nav>
     <p class="cl-footer-note">
       {$t('ui_value0_review_the_terms_and_privacy_policy_fo_cdc785d5', { value0: String(year) })}

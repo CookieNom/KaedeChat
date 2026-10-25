@@ -167,7 +167,7 @@
         Jump into the conversation from your browser. No download needed, on your computer, phone,
         or tablet.
       </p>
-      <a class="primary-button" href={resolve('/login')}
+      <a class="primary-button" href={resolve('login')}
         >Open web app <Icon name="chevron-right" size={18} /></a
       >
     </article>
@@ -213,7 +213,7 @@
           Use Kaede on your iPhone or iPad in the browser. Add it to your Home Screen for easy
           access.
         </p>
-        <a class="primary-button" href={resolve('/login')}
+        <a class="primary-button" href={resolve('login')}
           >Open Kaede on iOS <Icon name="chevron-right" size={18} /></a
         >
         <details>
@@ -227,7 +227,7 @@
       </article>
     </div>
   </div>
-  <a class="secondary-button download-web" href={resolve('/login')}
+  <a class="secondary-button download-web" href={resolve('login')}
     ><Icon name="globe" size={18} /> Use Kaede on your phone (web)</a
   >
 </section>

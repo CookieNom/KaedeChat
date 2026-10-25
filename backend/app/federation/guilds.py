@@ -1006,6 +1006,7 @@ async def apply_guild_message_event(
     referenced_id: int | None = None
     referenced_domain: str | None = None
     wire_referenced_ref: tuple[int, str] | None = None
+    evicted_reference = False
     if referenced_id_raw is not None:
         candidate_id = database_snowflake(referenced_id_raw, "referenced message id")
         candidate_domain = normalize_domain(str(referenced_domain_raw))
@@ -1013,9 +1014,12 @@ async def apply_guild_message_event(
         if candidate_domain != guild.origin_domain:
             raise ValueError("guild message reference has a non-authoritative origin")
         referenced = await session.get(Message, (candidate_id, candidate_domain))
-        # Structural snapshots intentionally do not backfill pre-join history.
-        # Preserve the FK invariant by omitting an otherwise-valid unavailable
-        # historical reference; live references are retained normally.
+        # Authority-attested references inside the evicted prefix remain opaque.
+        evicted_reference = (
+            referenced is None
+            and guild.replica_evicted_through_id is not None
+            and candidate_id <= guild.replica_evicted_through_id
+        )
         if referenced is not None:
             if (referenced.channel_id, referenced.channel_domain) != (
                 channel.id,
@@ -1024,14 +1028,14 @@ async def apply_guild_message_event(
                 raise ValueError("guild message reference is outside the channel")
             referenced_id = candidate_id
             referenced_domain = candidate_domain
-        elif is_poll_result:
+        elif is_poll_result or evicted_reference:
             referenced_id = candidate_id
             referenced_domain = candidate_domain
     if message_type == 19 and referenced_id_raw is None:
         raise ValueError("guild reply message is missing its reference")
     if is_pin_notice and referenced_id_raw is None:
         raise ValueError("guild pin notice is missing its source message")
-    if is_pin_notice and referenced is None and not stale_replay:
+    if is_pin_notice and referenced is None and not stale_replay and not evicted_reference:
         raise ValueError("guild pin notice source binding is invalid")
     if is_pin_notice and referenced is not None and not message_is_pinnable(referenced):
         raise ValueError("guild pin notice source is not pinnable")
@@ -1166,6 +1170,12 @@ async def apply_guild_message_event(
             )
         ):
             raise ValueError("guild message create contains mutable poll results")
+    if (
+        stale_replay
+        and message_id <= (guild.replica_evicted_through_id or 0)
+        and await session.get(Message, (message_id, message_origin)) is None
+    ):
+        return None
     inserted = await session.scalar(
         pg_insert(Message)
         .values(

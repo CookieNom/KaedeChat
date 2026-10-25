@@ -11,7 +11,9 @@ import { isCanonicalFederationDomain, parseCanonicalEntityRef } from './refs';
 import { isCanonicalBase64url32 } from '$lib/e2ee/encoding';
 
 export type InteractionResponseEventName =
-  'INTERACTION_RESPONSE_CREATE' | 'INTERACTION_RESPONSE_UPDATE' | 'INTERACTION_RESPONSE_DELETE';
+  | 'INTERACTION_RESPONSE_CREATE'
+  | 'INTERACTION_RESPONSE_UPDATE'
+  | 'INTERACTION_RESPONSE_DELETE';
 
 interface ActiveModal {
   interactionRef: string;

@@ -15,8 +15,8 @@
 
 <div class="legal-page">
   <header class="legal-topbar">
-    <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
-    <a class="legal-back" href={resolve('/')}>
+    <a class="wordmark" href={resolve('')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
+    <a class="legal-back" href={resolve('')}>
       <Icon name="arrow-left" size={16} />
       {$t('ui_home_3a786953')}
     </a>
@@ -34,10 +34,10 @@
 
   <footer class="legal-footer">
     <nav class="legal-footer-links" aria-label={$t('ui_legal_4787eaf7')}>
-      <a href={resolve('/terms')}>{$t('ui_terms_of_service_e69e0614')}</a>
-      <a href={resolve('/privacy')}>{$t('ui_privacy_policy_ba445cff')}</a>
+      <a href={resolve('terms')}>{$t('ui_terms_of_service_e69e0614')}</a>
+      <a href={resolve('privacy')}>{$t('ui_privacy_policy_ba445cff')}</a>
     </nav>
-    <a class="legal-back" href={resolve('/')}>
+    <a class="legal-back" href={resolve('')}>
       <Icon name="arrow-left" size={16} />
       {$t('ui_back_to_home_76c5505f')}
     </a>

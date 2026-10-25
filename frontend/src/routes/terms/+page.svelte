@@ -58,7 +58,7 @@
       <h2>{$t('ui_5_storage_encryption_and_third_parties_fdff690a')}</h2>
       <p>
         {$t('ui_the_instance_stores_account_information_messa_40e093c9')}
-        <a href={resolve('/privacy')}>{$t('ui_privacy_policy_2b72811d')}</a>
+        <a href={resolve('privacy')}>{$t('ui_privacy_policy_2b72811d')}</a>
         {$t('ui_for_the_data_flows_and_choices_that_apply_3411e70d')}
       </p>
       <p>{$t('ui_if_you_use_end_to_end_encryption_keep_any_rec_372e2f9b')}</p>

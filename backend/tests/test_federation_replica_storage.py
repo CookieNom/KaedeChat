@@ -135,7 +135,11 @@ async def test_replica_admission_fences_origin_and_reads_trigger_ledger() -> Non
 
 
 @pytest.mark.asyncio
-async def test_replica_admission_rejects_the_atomic_batch_over_high_water() -> None:
+async def test_replica_admission_rejects_the_atomic_batch_over_high_water(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.federation.replica_storage.evict_replica_history_batch",
+        AsyncMock(return_value=False),
+    )
     guild = remote_guild()
     ledger = SimpleNamespace(total_rows=10_001, total_bytes=1)
     session = cast(
@@ -395,3 +399,106 @@ async def test_orphan_remote_identity_gc_deletes_only_the_locked_candidates() ->
     )
 
     session.delete.assert_awaited_once_with(candidate)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quota_scope", ["guild", "origin"])
+async def test_replica_quota_evicts_old_history_and_preserves_anchors(
+    postgres_schema,
+    migrate_to,
+    quota_scope,
+):
+    from sqlalchemy import text
+
+    from app.federation.replica_storage import replica_storage_usage
+
+    await migrate_to("head")
+    for statement in (
+        "INSERT INTO instances "
+        "(domain,is_self,current_key_id,encrypted_private_key,private_key_nonce) VALUES "
+        "('local.example',true,'main',decode(repeat('ab',32),'hex'),decode(repeat('cd',12),'hex')),"
+        "('remote.example',false,NULL,NULL,NULL)",
+        "INSERT INTO users "
+        "(id,origin_domain,username,is_local,federation_introduced_by_domain,account_type) "
+        "VALUES (99,'remote.example','owner',false,'remote.example','human'),"
+        "(7,'local.example','local',true,NULL,'bot')",
+        "INSERT INTO guilds (id,origin_domain,name,owner_id,owner_domain) "
+        "VALUES (42,'remote.example','Remote',99,'remote.example')",
+        "INSERT INTO channels (id,origin_domain,guild_id,guild_domain,type,name,created_floor_id) "
+        "VALUES (10,'remote.example',42,'remote.example',0,'general',1)",
+        "INSERT INTO messages "
+        "(id,origin_domain,channel_id,channel_domain,author_id,author_domain,content) "
+        "SELECT id,'remote.example',10,'remote.example',99,'remote.example','cached' "
+        "FROM generate_series(100,110) AS id",
+        "UPDATE channels SET last_message_id=110,last_message_domain='remote.example' WHERE id=10",
+        "UPDATE messages SET author_id=7,author_domain='local.example' WHERE id=103",
+        "INSERT INTO pins "
+        "(channel_id,channel_domain,message_id,message_domain,pinned_by_id,pinned_by_domain) "
+        "VALUES (10,'remote.example',104,'remote.example',99,'remote.example')",
+        "INSERT INTO message_bookmarks (user_id,user_domain,message_id,message_domain) VALUES "
+        "(7,'local.example',105,'remote.example')",
+        "INSERT INTO message_projections (message_id,message_domain,channel_id,channel_domain) "
+        "VALUES "
+        "(106,'remote.example',10,'remote.example'),(100,'remote.example',10,'remote.example')",
+        "UPDATE message_projections SET processed_at=now() WHERE message_id=100",
+        "INSERT INTO reactions (message_id,message_domain,user_id,user_domain,emoji_key) "
+        "VALUES (100,'remote.example',99,'remote.example','🔥')",
+        "INSERT INTO attachments (id,origin_domain,message_id,message_domain,uploader_id,"
+        "uploader_domain,filename,content_type,size,object_key) VALUES "
+        "(1,'local.example',107,'remote.example',7,'local.example','a','text/plain',1,'a'),"
+        "(2,'remote.example',100,'remote.example',99,'remote.example','b','text/plain',1,'b')",
+        "INSERT INTO guild_history_imports (export_id,export_domain,guild_id,guild_domain,"
+        "requester_user_id,requester_user_domain,requester_member_version,baseline_seq,"
+        "permission_generation,history_policy_generation) VALUES "
+        "(1,'remote.example',42,'remote.example',7,'local.example',1,0,1,1)",
+        "INSERT INTO guild_history_staged_messages (export_id,export_domain,message_id,"
+        "message_domain,channel_id,channel_domain,payload) VALUES "
+        "(1,'remote.example',90,'remote.example',10,'remote.example','{}')",
+        "INSERT INTO federated_history_messages "
+        "(message_id,message_domain,export_id,export_domain) "
+        "VALUES (100,'remote.example',1,'remote.example')",
+        "UPDATE search_index_state SET enabled=true WHERE id=1",
+    ):
+        await postgres_schema.execute(text(statement))
+    async with AsyncSession(bind=postgres_schema, expire_on_commit=False) as session:
+        guild = await session.get(Guild, (42, "remote.example"))
+        assert guild is not None
+        configured = quota_settings().model_copy(update={"domain": "local.example"})
+        before = await replica_storage_usage(session, guild)
+        configured = configured.model_copy(
+            update={
+                f"federation_replica_max_rows_per_{quota_scope}": before.guild_rows - 1,
+            }
+        )
+        guild.last_event_seq = 500
+        guild.next_event_seq = 501
+        usage = await admit_replica_storage(session, configured, guild)
+        assert replica_storage_quota_violation(configured, usage) is None
+        assert await session.scalar(text("SELECT count(*) FROM guild_history_staged_messages")) == 0
+        assert await session.scalar(text("SELECT count(*) FROM federated_history_messages")) == 0
+        assert list(await session.scalars(text("SELECT id FROM attachments"))) == [1]
+        assert guild.last_event_seq == 500
+        assert guild.replica_evicted_through_id == 109
+        assert list(await session.scalars(text("SELECT id FROM messages ORDER BY id"))) == [
+            103,
+            104,
+            105,
+            106,
+            107,
+            110,
+        ]
+        assert await session.scalar(text("SELECT count(*) FROM reactions")) == 0
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM message_projections WHERE message_id=100")
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM search_index_outbox WHERE message_id=100")
+            )
+            == 1
+        )
+        await reconcile_replica_storage(session, guild.id, guild.origin_domain)
+        assert await replica_storage_usage(session, guild) == usage

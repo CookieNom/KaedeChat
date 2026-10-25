@@ -238,7 +238,7 @@
       Join a call to select an audio device.
     </p>{/if}
   {#if error}<p class="device-status error" role="alert">{error}</p>{/if}
-  <a href={resolve('/settings#voice-devices')}
+  <a href={resolve('settings#voice-devices')}
     ><Icon name="settings" size={16} />Voice settings &amp; shortcuts<Icon
       name="chevron-right"
       size={16}

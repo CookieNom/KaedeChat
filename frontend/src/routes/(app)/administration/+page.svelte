@@ -15,7 +15,14 @@
   import { onMount } from 'svelte';
 
   type View =
-    'rtc' | 'overview' | 'users' | 'applications' | 'reports' | 'instances' | 'operators' | 'audit';
+    | 'rtc'
+    | 'overview'
+    | 'users'
+    | 'applications'
+    | 'reports'
+    | 'instances'
+    | 'operators'
+    | 'audit';
 
   interface AdminIdentity {
     roles: string[];
@@ -1015,7 +1022,7 @@
 <main class="admin-shell">
   <aside class="sidebar">
     <div class="sidebar-top">
-      <a class="back-link" href={resolve('/settings')}>
+      <a class="back-link" href={resolve('settings')}>
         <Icon name="arrow-left" size={18} />
         <span>{$t('ui_user_settings_2b363e87')}</span>
       </a>
@@ -1078,7 +1085,7 @@
           >
           <a
             class="icon-button"
-            href={resolve('/home')}
+            href={resolve('home')}
             aria-label={$t('ui_close_administration_d6def969')}>×</a
           >
         </div>
@@ -1727,8 +1734,7 @@
                             maxlength="500"
                             placeholder={$t(
                               'ui_required_visible_in_the_administrative_audit__d7cafec2'
-                            )}
-                          ></textarea>
+                            )}></textarea>
                         </label>
                         <button
                           type="button"
@@ -1774,8 +1780,7 @@
                         maxlength="2000"
                         placeholder={$t(
                           'ui_record_what_was_reviewed_and_any_action_taken_8c5f30ce'
-                        )}
-                      ></textarea></label
+                        )}></textarea></label
                     >
                     <button
                       type="button"

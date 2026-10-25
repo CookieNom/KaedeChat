@@ -494,7 +494,7 @@ make hooks
 
 The hook checks a temporary copy of staged files, preserving unstaged edits.
 Depending on the changed paths, it runs Dart formatting, backend Ruff lint and
-formatting, frontend ESLint/Prettier, Rust formatting, workflow syntax, and
+formatting, frontend Oxlint/ESLint/Oxfmt, Rust formatting, workflow syntax, and
 release metadata checks. Backend changes also run `uv run --locked pip-audit
 --skip-editable`; frontend changes run `pnpm audit --audit-level=moderate`.
 These audits require network access and block commits on vulnerabilities or
@@ -516,6 +516,20 @@ Run the standard code checks with:
 ```sh
 make check
 ```
+
+Scan the backend and Python SDK, frontend, desktop Rust, and mobile Dart
+lockfiles for known dependency vulnerabilities with:
+
+```sh
+make osv-audit
+```
+
+This runs a pinned OSV-Scanner container and requires Docker and network access;
+it does not compile or install application dependencies. CI runs the same target
+and fails on findings or scanner errors. `make audit` runs this scan before the
+existing Python and JavaScript audits in disposable k3d clusters. The lockfile
+scan does not cover iOS CocoaPods, Android native dependencies, SDKs, or container
+OS packages.
 
 The
 [operator guide](docs/operator.md#acceptance-checks) lists the focused acceptance

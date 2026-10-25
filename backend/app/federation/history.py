@@ -1835,6 +1835,14 @@ async def _stage_history_pages(
         elif channel_state.upper_bound_id != upper_bound:
             raise ValueError("historical channel grant changed while resuming")
         while not channel_state.complete:
+            cache_floor = guild.replica_evicted_through_id
+            if cache_floor is not None and (
+                upper_bound <= cache_floor
+                or (recent_first and channel_state.next_before_id <= cache_floor)
+            ):
+                channel_state.complete = True
+                await session.commit()
+                break
             if time.monotonic() >= deadline:
                 raise FederatedHistoryLimitExceeded("duration")
             if history_import.pages_downloaded >= settings.federation_history_max_pages:
@@ -1844,15 +1852,9 @@ async def _stage_history_pages(
             if recent_first:
                 query = {"before": str(channel_state.next_before_id)}
             else:
-                after = int(
-                    await session.scalar(
-                        select(func.max(GuildHistoryStagedMessage.message_id)).where(
-                            GuildHistoryStagedMessage.export_id == history_import.export_id,
-                            GuildHistoryStagedMessage.export_domain == history_import.export_domain,
-                            GuildHistoryStagedMessage.channel_id == channel_id,
-                        )
-                    )
-                    or 0
+                after = max(
+                    int(channel_state.next_after_id or 0),
+                    int(guild.replica_evicted_through_id or 0),
                 )
                 query = {"after": str(after)}
             response = await signed_request(
@@ -1950,27 +1952,28 @@ async def _stage_history_pages(
                     timestamp_upper_bound_ms=_history_timestamp_ceiling(settings),
                     attachment_max_bytes=settings.media_max_attachment_bytes,
                 )
-                await session.execute(
-                    pg_insert(GuildHistoryStagedMessage)
-                    .values(
-                        export_id=history_import.export_id,
-                        export_domain=history_import.export_domain,
-                        message_id=message_id,
-                        message_domain=guild.origin_domain,
-                        channel_id=channel_id,
-                        channel_domain=guild.origin_domain,
-                        payload=message_payload,
+                if message_id > (guild.replica_evicted_through_id or 0):
+                    await session.execute(
+                        pg_insert(GuildHistoryStagedMessage)
+                        .values(
+                            export_id=history_import.export_id,
+                            export_domain=history_import.export_domain,
+                            message_id=message_id,
+                            message_domain=guild.origin_domain,
+                            channel_id=channel_id,
+                            channel_domain=guild.origin_domain,
+                            payload=message_payload,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=[
+                                "export_id",
+                                "export_domain",
+                                "message_id",
+                                "message_domain",
+                            ],
+                            set_={"payload": message_payload},
+                        )
                     )
-                    .on_conflict_do_update(
-                        index_elements=[
-                            "export_id",
-                            "export_domain",
-                            "message_id",
-                            "message_domain",
-                        ],
-                        set_={"payload": message_payload},
-                    )
-                )
                 if recent_first:
                     previous_id = message_id
                 else:
@@ -2009,6 +2012,10 @@ async def _stage_history_pages(
             channel_state.pages_downloaded += 1
             channel_state.messages_downloaded += len(raw_messages)
             channel_state.bytes_downloaded += response_bytes
+            if not recent_first:
+                channel_state.next_after_id = last
+            if recent_first and parsed_next is not None:
+                complete = complete or parsed_next <= (guild.replica_evicted_through_id or 0)
             if complete:
                 channel_state.complete = True
                 await admit_replica_storage(session, settings, guild)
@@ -2545,6 +2552,8 @@ async def _merge_history_import_batch(
     imported = 0
     latest_by_channel: dict[tuple[int, str], int] = {}
     for staged in staged_rows:
+        if staged.message_id <= (guild.replica_evicted_through_id or 0):
+            continue
         raw = await _revalidate_staged_history_message(
             session,
             settings,

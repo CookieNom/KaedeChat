@@ -1361,3 +1361,81 @@ async def test_history_merge_batch_fences_live_events_after_delta(
         )
 
     assert raised.value.required_seq == 12
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recent_first", [False, True])
+async def test_history_page_cursor_survives_staged_cache_eviction(monkeypatch, recent_first):
+    import time
+
+    from app.db.models import Channel
+
+    guild = SimpleNamespace(id=1, origin_domain="home.example", replica_evicted_through_id=95)
+    history_import = SimpleNamespace(
+        export_id=7,
+        export_domain="home.example",
+        pages_downloaded=0,
+        messages_downloaded=0,
+        bytes_downloaded=0,
+        reactions_downloaded=0,
+    )
+    state = SimpleNamespace(
+        upper_bound_id=200,
+        next_before_id=200,
+        next_after_id=0,
+        complete=False,
+        pages_downloaded=0,
+        messages_downloaded=0,
+        bytes_downloaded=0,
+    )
+    channel = SimpleNamespace(unavailable=False, type=0)
+    session = AsyncMock()
+    session.get.side_effect = lambda model, *a, **kw: channel if model is Channel else state
+    monkeypatch.setattr(
+        history_module,
+        "_lock_live_history_import",
+        AsyncMock(side_effect=lambda *a: (guild, history_import)),
+    )
+    queries = []
+
+    async def request(*args, **kwargs):
+        queries.append(kwargs["query"])
+        complete = len(queries) > 1
+        payload = {
+            "export_id": "7",
+            "channel_id": "10",
+            "channel_domain": "home.example",
+            "upper_bound_id": "200",
+            "messages": [{"id": 101 if complete else 100}],
+            "page_bytes": 10,
+            "order": "recent_first" if recent_first else "oldest_first",
+            "complete": complete,
+            "next_before": "99" if recent_first and not complete else None,
+            "next_after": "100" if not recent_first and not complete else None,
+        }
+        return SimpleNamespace(status_code=200, content=b"page", payload=payload)
+
+    async def admit(*args):
+        # The current page no longer exists in staging after quota admission.
+        guild.replica_evicted_through_id = 100
+
+    monkeypatch.setattr(history_module, "signed_request", request)
+    monkeypatch.setattr(
+        history_module, "decode_federation_response_json", lambda response: response.payload
+    )
+    monkeypatch.setattr(
+        history_module, "_validate_history_message", lambda raw, **kw: (raw["id"], raw)
+    )
+    monkeypatch.setattr(history_module, "admit_replica_storage", admit)
+    await history_module._stage_history_pages(
+        session,
+        history_settings(federation_history_page_messages=100, media_max_attachment_bytes=1024),
+        guild,
+        history_import,
+        [(10, 200)],
+        recent_first=recent_first,
+        deadline=time.monotonic() + 10,
+    )
+    assert state.complete
+    assert queries == ([{"before": "200"}] if recent_first else [{"after": "95"}, {"after": "100"}])
+    assert state.next_after_id == (0 if recent_first else 101)

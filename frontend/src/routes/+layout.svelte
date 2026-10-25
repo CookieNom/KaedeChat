@@ -1,8 +1,8 @@
 <script lang="ts">
   import '../styles.css';
-  import '@fontsource-variable/bricolage-grotesque';
-  import '@fontsource-variable/inter';
-  import '@fontsource-variable/jetbrains-mono';
+  import '@fontsource-variable/bricolage-grotesque/index.css';
+  import '@fontsource-variable/inter/index.css';
+  import '@fontsource-variable/jetbrains-mono/index.css';
   import { page } from '$app/state';
   import { afterNavigate, goto } from '$app/navigation';
   import { resolve } from '$app/paths';
@@ -41,13 +41,12 @@
         if (page.url.searchParams.has('add-account')) return;
         const current = window.location.pathname;
         if (
-          current === resolve('/') ||
-          current === resolve('/login') ||
-          current === resolve('/register') ||
-          current === resolve('/forgot-password')
+          current === resolve('') ||
+          current === resolve('login') ||
+          current === resolve('register') ||
+          current === resolve('forgot-password')
         ) {
-          // eslint-disable-next-line svelte/no-navigation-without-resolve -- storedNativeRoute accepts only validated in-app paths and the fallback is resolved.
-          void goto(storedNativeRoute() ?? resolve('/home'), { replaceState: true });
+          void goto(storedNativeRoute() ?? resolve('home'), { replace: true });
         }
       })
       .catch(() => {
@@ -79,7 +78,7 @@
       // IndexedDB is not guaranteed to finish once navigation tears down this
       // document. Remove the password-derived vault key and MLS state first,
       // then leave the protected route even if local storage itself is broken.
-      void clearActiveE2EEState().finally(() => window.location.replace(resolve('/login')));
+      void clearActiveE2EEState().finally(() => window.location.replace(resolve('login')));
     };
     const pageRestored = (event: PageTransitionEvent) => {
       // Never reveal a protected in-memory view restored from the back-forward

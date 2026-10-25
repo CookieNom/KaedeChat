@@ -26,6 +26,7 @@ from app.db.models import (
     Pin,
     Poll,
     PollAnswer,
+    Reaction,
     SearchIndexOutbox,
     SearchIndexState,
     User,
@@ -51,6 +52,7 @@ FILTERABLE_ATTRIBUTES = [
     "attachment_filenames",
     "attachment_extensions",
     "pinned",
+    "reaction_emojis",
     "author_type",
     "nsfw",
     "message_id",
@@ -384,6 +386,19 @@ async def build_document(session: AsyncSession, message: Message) -> dict[str, o
                 )
             ).all()
         ]
+    reaction_emojis = list(
+        (
+            await session.scalars(
+                select(Reaction.emoji_key)
+                .where(
+                    Reaction.message_id == message.id,
+                    Reaction.message_domain == message.origin_domain,
+                )
+                .distinct()
+                .order_by(Reaction.emoji_key)
+            )
+        ).all()
+    )
     pinned = bool(
         await session.scalar(
             select(
@@ -452,6 +467,7 @@ async def build_document(session: AsyncSession, message: Message) -> dict[str, o
         "attachment_filenames": attachment_filenames,
         "attachment_extensions": attachment_extensions,
         "pinned": pinned,
+        "reaction_emojis": reaction_emojis,
         "author_type": message_author_type(message, author),
         "nsfw": effective_nsfw,
         # Keep the numeric snowflake alongside its authority-qualified ref so

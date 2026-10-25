@@ -27,7 +27,7 @@
   import { resolve } from '$app/paths';
   import { onDestroy } from 'svelte';
 
-  let { data } = $props<{ data: { applicationRef: string } }>();
+  let { data }: { data: { applicationRef: string } } = $props();
   const ref = $derived(data.applicationRef);
   interface Application {
     origin_domain: string;
@@ -43,7 +43,13 @@
     directory_approved: boolean;
     directory_summary: string | null;
     directory_category:
-      'entertainment' | 'games' | 'moderation' | 'productivity' | 'social' | 'utilities' | null;
+      | 'entertainment'
+      | 'games'
+      | 'moderation'
+      | 'productivity'
+      | 'social'
+      | 'utilities'
+      | null;
     directory_tags: string[];
     directory_media: DirectoryMediaInput[];
     directory_external_links: DirectoryExternalLink[];
@@ -887,7 +893,7 @@
 >
 <main class="page">
   <header class="top">
-    <a class="back-link" href={resolve('/developers')}>{$t('ui_all_applications_18f901c8')}</a>
+    <a class="back-link" href={resolve('developers')}>{$t('ui_all_applications_18f901c8')}</a>
     <div class="app-heading">
       <div class="app-monogram" aria-hidden="true">
         {#if application?.icon_hash}<img
@@ -1047,8 +1053,7 @@
               >{$t('ui_description_526e0087')}<textarea
                 bind:value={application.description}
                 rows="3"
-                maxlength="1000"
-              ></textarea></label
+                maxlength="1000"></textarea></label
             >
           </section>
           <section aria-labelledby="bot-reference-heading">

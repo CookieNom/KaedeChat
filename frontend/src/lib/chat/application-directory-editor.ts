@@ -6,7 +6,12 @@ import type {
 } from './application-directory';
 
 export type ApplicationAssetKind =
-  'icon' | 'cover' | 'store' | 'achievement' | 'activity' | 'other';
+  | 'icon'
+  | 'cover'
+  | 'store'
+  | 'achievement'
+  | 'activity'
+  | 'other';
 
 export interface ApplicationAsset {
   id: string;

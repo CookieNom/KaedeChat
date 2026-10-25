@@ -81,7 +81,7 @@
       <div bind:this={successPanel} role="status" tabindex="-1" class="support-success">
         <h2>Request received</h2>
         <p>Your request has been submitted. Any reply will go to the email address you provided.</p>
-        <a class="secondary-button" href={resolve('/')}>Back to home</a>
+        <a class="secondary-button" href={resolve('')}>Back to home</a>
       </div>
     {:else}
       <form
@@ -119,12 +119,11 @@
             maxlength="5000"
             required
             disabled={busy}
-            aria-describedby="support-note"
-          ></textarea>
+            aria-describedby="support-note"></textarea>
         </label>
         <p id="support-note" class="support-note">
           Include relevant details, but never passwords or recovery codes. Your email address and
-          message will be sent to this instance’s operator. <a href={resolve('/privacy')}
+          message will be sent to this instance’s operator. <a href={resolve('privacy')}
             >Privacy policy</a
           >
         </p>

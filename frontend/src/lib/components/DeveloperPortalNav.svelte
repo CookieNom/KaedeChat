@@ -7,7 +7,7 @@
 </script>
 
 <aside class="developer-nav">
-  <a class="back" href={resolve('/settings')}>{$t('ui_back_to_kaede_bfbafc02')}</a>
+  <a class="back" href={resolve('settings')}>{$t('ui_back_to_kaede_bfbafc02')}</a>
   <div class="brand">
     <span class="brand-mark" aria-hidden="true">K</span>
     <div>
@@ -16,7 +16,7 @@
     </div>
   </div>
   <nav aria-label={$t('ui_developer_portal_1eb68022')}>
-    <a class:active={active === 'applications'} href={resolve('/developers')}>
+    <a class:active={active === 'applications'} href={resolve('developers')}>
       <span aria-hidden="true">▦</span>
       <span
         ><strong>{$t('ui_applications_98e33b0f')}</strong><small
@@ -24,7 +24,7 @@
         ></span
       >
     </a>
-    <a class:active={active === 'teams'} href={resolve('/developers/teams')}>
+    <a class:active={active === 'teams'} href={resolve('developers/teams')}>
       <span aria-hidden="true">♟</span>
       <span
         ><strong>{$t('ui_teams_1e1a1c07')}</strong><small

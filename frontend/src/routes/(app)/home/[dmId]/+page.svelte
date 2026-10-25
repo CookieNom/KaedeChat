@@ -316,7 +316,7 @@
 
   function guildLandingPath(guild: Guild): string {
     const target = firstNavigableChannel(guild.channels);
-    return target ? guildChannelPath(guild, target) : resolve('/home');
+    return target ? guildChannelPath(guild, target) : resolve('home');
   }
 
   async function openMobileNavigation() {
@@ -1263,7 +1263,7 @@
             'conversation'
           )
         ) {
-          window.location.assign(resolve('/home'));
+          window.location.assign(resolve('home'));
           return;
         }
         const client = await initializeE2EE(loadedCurrentUser);
@@ -2113,7 +2113,7 @@
         method: 'POST'
       });
       groupDialog?.close();
-      window.location.assign(resolve('/home'));
+      window.location.assign(resolve('home'));
     } catch (caught) {
       groupError = userErrorMessage(caught, $t('ui_could_not_leave_this_group_try_again_0845f089'));
       groupBusy = false;
@@ -2801,7 +2801,7 @@
 <main class="chat-app">
   <GuildRail
     {guilds}
-    homeHref={resolve('/home')}
+    homeHref={resolve('home')}
     homeActive
     {homeUnreadCount}
     guildHref={guildLandingPath}
@@ -2834,10 +2834,10 @@
       </button>
     </header>
     <nav class="home-nav" aria-label={$t('ui_home_3a786953')}>
-      <a href={resolve('/home')} onclick={() => closeMobileNavigation(false)}
+      <a href={resolve('home')} onclick={() => closeMobileNavigation(false)}
         ><Icon name="home" size={18} />{$t('ui_overview_d4b1ea57')}</a
       >
-      <a href={resolve('/home/friends')} onclick={() => closeMobileNavigation(false)}
+      <a href={resolve('home/friends')} onclick={() => closeMobileNavigation(false)}
         ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}
         {#if pendingRequests > 0}
           <small class="unread-badge">{pendingRequests > 99 ? '99+' : pendingRequests}</small>
@@ -2902,7 +2902,7 @@
       />
       <a
         class="icon-button"
-        href={resolve('/settings')}
+        href={resolve('settings')}
         aria-label={$t('ui_user_settings_2b363e87')}
       >
         <Icon name="settings" size={18} />
@@ -3027,6 +3027,7 @@
           onclick={togglePins}>📌</button
         >
         <MessageSearch
+          customEmojis={pickerEmojis}
           bind:open={messageSearchOpen}
           scope="channel"
           scopeRef={channel ? entityRef(channel) : dmId}
@@ -3370,8 +3371,7 @@
               aria-label={$t('ui_direct_message_cd3e1605')}
               placeholder={`Message ${conversationTitle}`}
               rows="1"
-              maxlength="3000"
-            ></textarea>
+              maxlength="3000"></textarea>
           {/if}
           {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !selectedApplicationCommand}
             <button

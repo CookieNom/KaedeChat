@@ -179,7 +179,7 @@
   <div class="body">
     <a
       class="avatar avatar-large profile-avatar"
-      href={resolve('/settings#profile')}
+      href={resolve('settings#profile')}
       aria-label="Change your profile picture"
     >
       {#if displayed?.avatar_hash}<img
@@ -238,17 +238,17 @@
       >
     {/if}
     <div class="actions">
-      <a href={resolve('/settings#profile')}
+      <a href={resolve('settings#profile')}
         ><Icon name="edit" size={18} />Edit profile / change avatar</a
       >
       <div class="presence"><PresencePicker value={preference} onChange={changePresence} /></div>
     </div>
     <div class="actions">
-      {#if isNativeDesktop()}<a href={resolve('/accounts')}
+      {#if isNativeDesktop()}<a href={resolve('accounts')}
           ><Icon name="users" size={18} />Switch accounts <span class="chevron">›</span></a
         >{/if}
       <button onclick={copyId}><span class="id-icon">ID</span>Copy user ID</button>
-      <a href={resolve('/settings')}><Icon name="settings" size={18} />Account settings</a>
+      <a href={resolve('settings')}><Icon name="settings" size={18} />Account settings</a>
     </div>
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
     {#if notice}<p class="feedback" role="status">{notice}</p>{/if}

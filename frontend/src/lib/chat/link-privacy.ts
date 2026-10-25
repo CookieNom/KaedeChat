@@ -10,12 +10,14 @@ export function stripLinkTracking(content: string): string {
       return match;
     }
     const host = url.hostname.toLowerCase();
-    if (!(
-      host === 'youtu.be' ||
-      host === 'youtube.com' ||
-      host.endsWith('.youtube.com') ||
-      host === 'open.spotify.com'
-    ))
+    if (
+      !(
+        host === 'youtu.be' ||
+        host === 'youtube.com' ||
+        host.endsWith('.youtube.com') ||
+        host === 'open.spotify.com'
+      )
+    )
       return match;
     const question = raw.indexOf('?');
     const hash = raw.indexOf('#');

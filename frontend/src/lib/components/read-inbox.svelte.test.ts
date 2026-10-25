@@ -4,7 +4,7 @@ import { mount, unmount } from 'svelte';
 import ReadInbox from './ReadInbox.svelte';
 const network = vi.hoisted(() => ({ api: vi.fn(), goto: vi.fn() }));
 vi.mock('$app/navigation', () => ({ goto: network.goto }));
-vi.mock('$app/paths', () => ({ resolve: (path: string) => path }));
+vi.mock('$app/paths', () => ({ resolve: (path: string) => `/${path}` }));
 vi.mock('$lib/api/client', async (original) => ({
   ...(await original<typeof import('$lib/api/client')>()),
   api: network.api

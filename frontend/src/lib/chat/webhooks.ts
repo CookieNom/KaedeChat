@@ -35,7 +35,8 @@ export interface WebhookSummary {
 }
 
 export type WebhookAvatarCommit =
-  WebhookSummary | { status?: string; attachment: { scan_status: string } };
+  | WebhookSummary
+  | { status?: string; attachment: { scan_status: string } };
 
 export const CHANNEL_FOLLOWER_WEBHOOK_TYPE = 2;
 

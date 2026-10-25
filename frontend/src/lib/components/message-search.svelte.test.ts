@@ -88,3 +88,124 @@ it('defaults to the current channel and allows another channel or all channels',
     cursor: null
   });
 });
+
+it('searches by reaction and dismisses its picker without closing advanced filters', async () => {
+  vi.mocked(api).mockClear();
+  vi.mocked(api).mockResolvedValue({
+    results: [],
+    next_cursor: null,
+    coverage: {},
+    encrypted_channel_refs: []
+  });
+  component = mount(MessageSearch, {
+    target: document.body,
+    props: {
+      open: false,
+      placement: 'header',
+      scope: 'dms',
+      scopeRef: null,
+      accountRef: null,
+      customEmojis: [
+        {
+          id: '12',
+          origin_domain: 'home.example',
+          guild_id: '1',
+          guild_domain: 'home.example',
+          name: 'wave',
+          url: '/wave.png',
+          value: '<:wave:12@home.example>'
+        }
+      ]
+    }
+  });
+  flushSync();
+  flushSync(() => document.querySelector('input')!.dispatchEvent(new FocusEvent('focus')));
+  flushSync(() =>
+    [...document.querySelectorAll<HTMLButtonElement>('.search-start button')].at(-1)!.click()
+  );
+  const panel = document.querySelector<HTMLDivElement>('.reaction-popover')!;
+  const toggle = (newState: string) => {
+    const event = new Event('toggle');
+    Object.defineProperty(event, 'newState', { value: newState });
+    panel.dispatchEvent(event);
+  };
+  // happy-dom does not implement the browser's top-layer popover lifecycle.
+  panel.hidePopover = () => toggle('closed');
+  const openPicker = () => flushSync(() => toggle('open'));
+  openPicker();
+  expect(document.querySelector('.emoji-picker')).not.toBeNull();
+  flushSync(() => panel.click());
+  expect(document.querySelector('.emoji-picker')).toBeNull();
+  expect(document.querySelector('.advanced-filters')).not.toBeNull();
+  openPicker();
+  flushSync(() =>
+    panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  );
+  expect(document.querySelector('.emoji-picker')).toBeNull();
+  expect(document.querySelector('.advanced-filters')).not.toBeNull();
+  openPicker();
+  flushSync(() => document.querySelector<HTMLButtonElement>('.custom-emojis button')!.click());
+  expect(document.querySelector('.emoji-picker')).toBeNull();
+  expect(document.querySelector<HTMLButtonElement>('.advanced-filters .submit')!.disabled).toBe(
+    false
+  );
+  flushSync(() =>
+    document
+      .querySelector<HTMLFormElement>('.advanced-filters')!
+      .dispatchEvent(new Event('submit', { cancelable: true }))
+  );
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
+  expect(JSON.parse(vi.mocked(api).mock.calls[0][1]!.body as string)).toMatchObject({
+    query: '',
+    filters: { reaction: '<:wave:12@home.example>' }
+  });
+  flushSync();
+  flushSync(() => document.querySelector<HTMLButtonElement>('.advanced-toggle')!.click());
+  flushSync(() =>
+    document.querySelector<HTMLButtonElement>('[aria-label="Remove reaction filter"]')!.click()
+  );
+  expect(document.querySelector<HTMLButtonElement>('.advanced-filters .submit')!.disabled).toBe(
+    true
+  );
+});
+
+it('shows partial coverage and allows continuing past an empty remote page', async () => {
+  vi.mocked(api).mockClear();
+  vi.mocked(api).mockResolvedValue({
+    results: [],
+    next_cursor: 'next-page',
+    coverage: { local: 'cached', authority: 'partial' },
+    encrypted_channel_refs: []
+  });
+  component = mount(MessageSearch, {
+    target: document.body,
+    props: {
+      open: false,
+      placement: 'header',
+      scope: 'guild',
+      scopeRef: '1@home.example',
+      accountRef: null,
+      channels: [],
+      channel: { id: '7', origin_domain: 'home.example', name: 'general' } as Channel
+    }
+  });
+  flushSync();
+  const input = document.querySelector('input')!;
+  flushSync(() => input.dispatchEvent(new FocusEvent('focus')));
+  input.value = 'hello';
+  flushSync(() => input.dispatchEvent(new Event('input', { bubbles: true })));
+  flushSync(() =>
+    document.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true }))
+  );
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
+  flushSync();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(document.querySelector('.partial')?.textContent).toContain('locally cached matches');
+  });
+  const more = document.querySelector<HTMLButtonElement>('.more')!;
+  expect(more.disabled).toBe(false);
+  flushSync(() => more.click());
+  await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(vi.mocked(api).mock.calls[1][1]!.body as string).cursor).toBe('next-page');
+});

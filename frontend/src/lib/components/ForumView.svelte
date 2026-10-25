@@ -350,8 +350,7 @@
             maxlength={FORUM_POST_CONTENT_MAX_LENGTH}
             rows="5"
             placeholder={$t('ui_enter_a_message_4d0244c7')}
-            aria-label={$t('ui_post_message_f5290c63')}
-          ></textarea>
+            aria-label={$t('ui_post_message_f5290c63')}></textarea>
         </div>
         <input
           bind:this={fileInput}

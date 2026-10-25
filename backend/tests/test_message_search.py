@@ -92,6 +92,29 @@ def test_search_request_is_structured_and_bounded() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "emoji, canonical",
+    [("❤️", "❤"), ("👍🏽", "👍🏽"), ("<:wave:12@beta.localhost>", "<:wave:12@beta.localhost>")],
+)
+def test_reaction_only_search_is_canonical_and_filterable(emoji: str, canonical: str) -> None:
+    request = MessageSearchRequest.model_validate({"scope": "dms", "filters": {"reaction": emoji}})
+    assert request.filters.reaction == canonical
+    actor = SimpleNamespace(
+        id=1, origin_domain="alpha.localhost", account_type="human", age_assurance_state="unknown"
+    )
+    assert (
+        f"reaction_emojis = {search_service.filter_value(canonical)}"
+        in search_service.meili_filters(request, actor, settings())
+    )
+    assert "reaction_emojis" in FILTERABLE_ATTRIBUTES
+
+
+@pytest.mark.parametrize("emoji", ["", "hello", '" OR pinned = true', "😀" * 513])
+def test_reaction_search_rejects_invalid_emoji(emoji: str) -> None:
+    with pytest.raises(ValidationError):
+        MessageSearchRequest.model_validate({"scope": "dms", "filters": {"reaction": emoji}})
+
+
 def test_search_request_supports_current_discord_filter_surface() -> None:
     request = MessageSearchRequest.model_validate(
         {
@@ -791,3 +814,109 @@ async def test_search_claim_is_held_until_external_writes_finish(monkeypatch):
         == 1
     )
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_ids", [{100}, {100, 101}])
+async def test_remote_guild_search_skips_uncached_hits_and_preserves_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_ids: set[int],
+) -> None:
+    from app.db.models import Instance, Message
+
+    channel = SimpleNamespace(
+        id=10,
+        origin_domain="remote.example",
+        guild_id=42,
+        guild_domain="remote.example",
+        encryption_mode="plaintext",
+    )
+    guild = SimpleNamespace(id=42, origin_domain="remote.example")
+    actor = SimpleNamespace(id=7, origin_domain="alpha.localhost", account_type="human")
+    request = MessageSearchRequest(scope="guild", scope_ref="42@remote.example", query="hello")
+    cursor = search_service.encode_cursor(2)
+    remote = {
+        "results": [
+            {
+                "message_ref": f"{identifier}@remote.example",
+                "channel_ref": "10@remote.example",
+                "guild_ref": "42@remote.example",
+                "author_ref": "8@remote.example",
+                "snippet": "hello",
+                "created_at": "2026-08-28T00:00:00Z",
+                "ranking_score": 0.5,
+                "cursor_after": search_service.encode_cursor(position),
+            }
+            for position, identifier in enumerate((100, 101), 1)
+        ],
+        "next_cursor": cursor,
+        "encrypted_channel_refs": [],
+        "indexing": False,
+    }
+
+    async def get(model, key):
+        if model is Instance:
+            return SimpleNamespace(capabilities=["message-search/1"])
+        if model is Channel:
+            return channel
+        if model is Message and key[0] not in missing_ids:
+            return SimpleNamespace(
+                id=key[0],
+                channel_id=10,
+                channel_domain="remote.example",
+                author_id=8,
+                author_domain="remote.example",
+                deleted_at=None,
+                e2ee=None,
+                content="hello locally stored",
+            )
+        return None
+
+    monkeypatch.setattr(
+        search_service, "authorize_scope", AsyncMock(return_value=("remote.example", []))
+    )
+    monkeypatch.setattr(
+        search_service,
+        "local_search",
+        AsyncMock(
+            return_value={
+                "results": [{"message": {"id": "99", "origin_domain": "remote.example"}}],
+                "next_cursor": None,
+                "coverage": {"local": "cached", "authority": "not_queried"},
+                "encrypted_channel_refs": [],
+                "indexing": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        search_service, "signed_request", AsyncMock(return_value=SimpleNamespace(status_code=200))
+    )
+    monkeypatch.setattr(search_service, "decode_federation_response_json", lambda *a, **kw: remote)
+    monkeypatch.setattr(search_service, "effective_channel_nsfw", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        search_service, "load_channel_access", AsyncMock(return_value=SimpleNamespace(guild=guild))
+    )
+    permissions = AsyncMock()
+    monkeypatch.setattr(search_service, "require_permissions", permissions)
+    monkeypatch.setattr(
+        search_service,
+        "render_message_payload",
+        AsyncMock(return_value={"id": "101", "origin_domain": "remote.example"}),
+    )
+    monkeypatch.setattr(search_service, "channel_payload", lambda _: {})
+    monkeypatch.setattr(search_service, "guild_payload", lambda _: {})
+    session = cast(Any, SimpleNamespace(get=get))
+    result = await search_service.search_with_authority(
+        session, cast(Any, object()), settings(), cast(Any, actor), request
+    )
+    assert result["coverage"] == {"local": "cached", "authority": "partial"}
+    assert result["next_cursor"] == cursor
+    assert [item["message"]["id"] for item in result["results"]] == (
+        ["101", "99"] if 101 not in missing_ids else ["99"]
+    )
+    assert permissions.await_count == 2
+    permissions.side_effect = search_service.HTTPException(status_code=403)
+    with pytest.raises(search_service.SearchUnavailable, match="unauthorized"):
+        await search_service.search_with_authority(
+            session, cast(Any, object()), settings(), cast(Any, actor), request
+        )

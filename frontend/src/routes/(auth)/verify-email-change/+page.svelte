@@ -40,15 +40,14 @@
   {:else if confirmationState === 'done'}
     <h1 class="auth-title">{$t('ui_your_address_is_updated_a6bac80f')}</h1>
     <p>
-      <a class="primary-button" href={resolve('/settings')}
-        >{$t('ui_return_to_settings_cab0aa32')}</a
+      <a class="primary-button" href={resolve('settings')}>{$t('ui_return_to_settings_cab0aa32')}</a
       >
     </p>
   {:else}
     <h1 class="auth-title">{$t('ui_this_link_has_faded_c21c2905')}</h1>
     <p class="lede form-error" role="alert">{error}</p>
     <p class="form-foot">
-      <a href={resolve('/settings')}>{$t('ui_return_to_settings_cab0aa32')}</a>
+      <a href={resolve('settings')}>{$t('ui_return_to_settings_cab0aa32')}</a>
     </p>
   {/if}
 </div>

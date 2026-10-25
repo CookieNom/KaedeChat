@@ -42,11 +42,20 @@ async def test_known_pending_join_makes_pre_snapshot_events_retryable() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("inserted", "returns_message"), [(300, True), (None, False)])
+@pytest.mark.parametrize(
+    ("inserted", "returns_message", "cache_case"),
+    [
+        (300, True, "join"),
+        (None, False, "join"),
+        (None, False, "evicted_replay"),
+        (300, True, "pin_evicted_source"),
+    ],
+)
 async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
     monkeypatch: pytest.MonkeyPatch,
     inserted: int | None,
     returns_message: bool,
+    cache_case: str,
 ) -> None:
     guild = Guild(
         id=100,
@@ -94,12 +103,19 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
         created_at=created_at,
     )
 
+    if cache_case == "evicted_replay":
+        guild.replica_evicted_through_id = 300
+    elif cache_case == "pin_evicted_source":
+        guild.replica_evicted_through_id = 299
+
     async def get_model(model: object, _key: object) -> object | None:
         if model is Channel:
             return channel
         if model is GuildMember:
-            return None
+            return object() if cache_case == "pin_evicted_source" else None
         if model is Message:
+            if cache_case == "evicted_replay" or _key == (299, "alpha.localhost"):
+                return None
             return message
         return None
 
@@ -172,6 +188,27 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
         },
     }
 
+    if cache_case == "pin_evicted_source":
+        event["context"]["seq"] = "11"
+        event["content"]["message"].update(
+            {
+                "message_type": 6,
+                "content": None,
+                "client_nonce": None,
+                "referenced_message_id": "299",
+                "referenced_message_domain": "alpha.localhost",
+                "message_reference": {
+                    "type": 0,
+                    "message_id": "299",
+                    "message_domain": "alpha.localhost",
+                    "channel_id": "200",
+                    "channel_domain": "alpha.localhost",
+                    "guild_id": "100",
+                    "guild_domain": "alpha.localhost",
+                },
+            }
+        )
+
     applied = await apply_guild_message_event(
         cast(Any, session),
         cast(Settings, SimpleNamespace(domain="gamma.localhost")),
@@ -180,11 +217,16 @@ async def test_retried_join_window_message_backfills_behind_snapshot_cursor(
     )
 
     assert (applied is message) is returns_message
+    if cache_case == "evicted_replay":
+        reconcile_control.assert_not_awaited()
+        session.scalar.assert_awaited_once()
+        assert guild.last_event_seq == 10
+        return
     reconcile_control.assert_awaited_once_with(
         session,
         message,
         None,
         expected_authority="alpha.localhost",
     )
-    assert guild.last_event_seq == 10
-    assert guild.next_event_seq == 11
+    assert guild.last_event_seq == (11 if cache_case == "pin_evicted_source" else 10)
+    assert guild.next_event_seq == guild.last_event_seq + 1

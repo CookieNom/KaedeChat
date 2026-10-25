@@ -62,7 +62,13 @@ export interface Channel {
   federated_history_policy?: 'inherit' | 'disabled' | 'full_retained';
   encryption_mode?: 'plaintext' | 'e2ee';
   encryption_state?:
-    'plaintext' | 'legacy' | 'proposed' | 'activating' | 'active' | 'rekeying' | 'failed';
+    | 'plaintext'
+    | 'legacy'
+    | 'proposed'
+    | 'activating'
+    | 'active'
+    | 'rekeying'
+    | 'failed';
   encryption_policy_generation?: string;
   encryption_protocol?: string | null;
   encryption_suite?: string | null;
@@ -374,7 +380,13 @@ export interface MessageSearchResponse {
   next_cursor: string | null;
   coverage: {
     local: 'complete' | 'cached' | 'unavailable';
-    authority: 'not_needed' | 'not_queried' | 'complete' | 'unsupported' | 'unavailable';
+    authority:
+      | 'not_needed'
+      | 'not_queried'
+      | 'complete'
+      | 'partial'
+      | 'unsupported'
+      | 'unavailable';
   };
   encrypted_channel_refs: string[];
   indexing: boolean;

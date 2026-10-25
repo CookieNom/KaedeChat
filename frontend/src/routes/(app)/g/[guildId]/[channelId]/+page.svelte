@@ -1303,7 +1303,7 @@
     channelReady = false;
     busy = false;
     error = $t('ui_this_guild_is_unavailable_or_you_no_longer_ha_70ba0e65');
-    window.location.assign(resolve('/home'));
+    window.location.assign(resolve('home'));
   }
 
   function withCurrentThreads(channels: Channel[]): Channel[] {
@@ -1424,7 +1424,7 @@
 
   function guildLandingPath(targetGuild: Guild): string {
     const target = firstNavigableChannel(targetGuild.channels);
-    return target ? guildChannelPath(targetGuild, target) : resolve('/home');
+    return target ? guildChannelPath(targetGuild, target) : resolve('home');
   }
 
   async function openMobileNavigation() {
@@ -1782,7 +1782,7 @@
       closeChannelDeleteDialog();
       if (channel && entityKey(channel) === entityKey(target)) {
         const next = remaining.find((item) => item.type !== 4);
-        window.location.assign(guild && next ? guildChannelPath(guild, next) : resolve('/home'));
+        window.location.assign(guild && next ? guildChannelPath(guild, next) : resolve('home'));
       }
     } catch (caught) {
       if (!stillCurrent()) return;
@@ -2997,7 +2997,7 @@
                   item.id === target.parent_id && item.origin_domain === target.parent_domain
               );
               window.location.assign(
-                destination ? guildChannelPath(guild, destination) : resolve('/home')
+                destination ? guildChannelPath(guild, destination) : resolve('home')
               );
             }
           }
@@ -3189,7 +3189,7 @@
           channelReady = false;
           readAcknowledgements.reset();
           const next = firstNavigableChannel(remaining);
-          window.location.assign(guild && next ? guildChannelPath(guild, next) : resolve('/home'));
+          window.location.assign(guild && next ? guildChannelPath(guild, next) : resolve('home'));
         }
       }
     } else if (dispatch.t === 'CHANNEL_INFO' || dispatch.t === 'VOICE_CHANNEL_START_TIME_UPDATE') {
@@ -4036,7 +4036,7 @@
             isVoiceLikeChannel(loadedChannel) ? 'media' : 'messages'
           )
         ) {
-          window.location.assign(resolve('/home'));
+          window.location.assign(resolve('home'));
           return;
         }
         const client = await initializeE2EE(loadedCurrentUser);
@@ -6583,7 +6583,7 @@
 <main class:member-roster-visible={memberRosterOpen} class="chat-app">
   <GuildRail
     {guilds}
-    homeHref={resolve('/home')}
+    homeHref={resolve('home')}
     {homeUnreadCount}
     guildHref={guildLandingPath}
     mentionCount={(item) => guildMentionCount(readStates, item)}
@@ -6798,7 +6798,7 @@
                       class:drag-over={dragOverChannelKey === entityKey(item) ||
                         voiceDropChannelKey === entityKey(item)}
                       draggable={canStartChannelMove(item)}
-                      href={guild ? guildChannelPath(guild, item) : resolve('/home')}
+                      href={guild ? guildChannelPath(guild, item) : resolve('home')}
                       aria-haspopup="menu"
                       aria-current={matchesEntityRef(channelId, item, localDomain)
                         ? 'page'
@@ -6892,7 +6892,7 @@
                   class:drag-over={dragOverChannelKey === entityKey(item) ||
                     voiceDropChannelKey === entityKey(item)}
                   draggable={canStartChannelMove(item)}
-                  href={guild ? guildChannelPath(guild, item) : resolve('/home')}
+                  href={guild ? guildChannelPath(guild, item) : resolve('home')}
                   aria-haspopup="menu"
                   aria-current={matchesEntityRef(channelId, item, localDomain) ? 'page' : undefined}
                   ondragstart={(event) => channelDragStart(event, item)}
@@ -6976,7 +6976,7 @@
       />
       <a
         class="icon-button"
-        href={resolve('/settings')}
+        href={resolve('settings')}
         aria-label={$t('ui_user_settings_2b363e87')}
       >
         <Icon name="settings" size={18} />
@@ -7092,6 +7092,7 @@
           {/if}
           {#if canReadMessageHistory && !isForumChannel(channel) && channel?.type !== TRACKER_CHANNEL_TYPE}
             <MessageSearch
+              customEmojis={pickerEmojis}
               bind:open={messageSearchOpen}
               scope="guild"
               scopeRef={guild ? entityRef(guild) : guildId}
@@ -7665,8 +7666,7 @@
                         ? $t('ui_use_to_choose_an_app_command_e83ca31e')
                         : $t('ui_use_thread_to_create_a_thread_3987e965')}
                     rows="1"
-                    maxlength="3000"
-                  ></textarea>
+                    maxlength="3000"></textarea>
                 {/if}
                 {#if (gifPickerEnabled || gifConfigurationError) && !editingMessage && !nativeThreadComposer && !selectedApplicationCommand}
                   <button

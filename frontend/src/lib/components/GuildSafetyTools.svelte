@@ -805,8 +805,7 @@
           <label
             ><span>{$t('ui_allowed_terms_4f8e356f')}</span><textarea
               bind:value={draft.allowList}
-              rows="3"
-            ></textarea></label
+              rows="3"></textarea></label
           >
         {:else if draft.triggerType === 'mention_spam'}
           <div class="form-grid two">

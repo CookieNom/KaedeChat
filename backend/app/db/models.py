@@ -1120,6 +1120,8 @@ class AuthEvent(Base, LocalUserMixin):
 
 
 class Guild(Base, FederatedIdMixin, TimestampMixin):
+    # Local-only cache watermark; never copied from an authority snapshot.
+    replica_evicted_through_id: Mapped[int | None] = mapped_column(BigInteger)
     onboarding: Mapped[dict[str, Any]] = mapped_column(
         JSONB, default=dict, server_default="{}", nullable=False
     )
@@ -2950,6 +2952,7 @@ class GuildHistoryImportChannel(Base):
     channel_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     upper_bound_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     next_before_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    next_after_id: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)
     complete: Mapped[bool] = mapped_column(Boolean, server_default=false(), nullable=False)
     pages_downloaded: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, server_default="0", nullable=False)

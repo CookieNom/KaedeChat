@@ -925,14 +925,26 @@ replica budget by itself. Configure these with
 `KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN`. Origin limits must not be
 below the corresponding guild limits.
 
-Live replication and retained-history merges use the same atomic ledger. An
-operation that would cross a high-water mark is rolled back before its guild
-sequence advances, and the replica enters `quota_paused` with
-`KAED_FED_REPLICA_QUOTA_EXCEEDED`. Raising the applicable limit permits
-retry. Revocation, channel purge, history cleanup, and orphan-guild deletion
-release their charges transactionally through the same ledger. Treat a paused
-replica as a capacity-planning signal or a potentially abusive peer, and
-review the origin before raising a limit substantially.
+Live replication and retained-history imports use the same atomic ledger.
+When a change crosses a replica limit, admission removes the oldest replaceable
+messages and staged history from that guild in batches of at most 500 message
+identities, up to 5,000 per transaction, aiming for 5% headroom. Deletions stay
+local and queue removal from the private search index. Locally authored
+messages, local attachment owners, pins, bookmarks, channel heads, thread
+starters, pending message projections, encryption controls, and required
+message references are preserved.
+
+A persistent local cutoff prevents history imports and old create-event
+replays from restoring discarded history. Evicted history is unavailable
+through local scrolling; this does not add on-demand remote guild history.
+Meilisearch storage remains separate from the SQL replica budget.
+
+If protected data or structural rows leave insufficient reclaimable space,
+or the bounded cleanup cannot recover enough capacity, the operation still
+rolls back before its guild sequence advances and enters `quota_paused` with
+`KAED_FED_REPLICA_QUOTA_EXCEEDED`. Origin pressure is reclaimed from the guild
+being updated, without locking unrelated guilds. Raising the applicable limit
+permits retry; review the origin before raising a limit substantially.
 
 The daily retention cycle also removes at most 5,000 aged remote user
 profiles and 5,000 unused remote instance namespaces per run by default. It
@@ -1002,6 +1014,11 @@ federation, or history. Monitor the worker task `search.index_sweep`,
 `kaede_search_index_retrying_messages`. Repeated `SEARCH_BACKEND_UNAVAILABLE`
 means the URL, key, service health, disk, or an index task failed. Restore
 the service and rebuild; don't edit message rows to repair a derived index.
+
+Remote guild search skips authority hits whose messages are absent from the
+local replica, returns other usable matches, and reports partial coverage.
+Pagination remains available even when an individual page has no usable hits.
+This does not import missing messages or make evicted history locally readable.
 
 Only plaintext channels are indexed. Setting a channel encryption policy to
 `e2ee` queues removal of all of its indexed documents, and API/SQL/federation

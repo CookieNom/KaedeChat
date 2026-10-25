@@ -15,7 +15,7 @@
   import { resolveApplicationDirectoryPath } from '$lib/navigation/routes';
   import { onDestroy, onMount } from 'svelte';
 
-  let { data } = $props<{ data: { applicationRef: string; returnTo: string } }>();
+  let { data }: { data: { applicationRef: string; returnTo: string } } = $props();
   let application = $state<DirectoryApplicationDetail | null>(null);
   let loading = $state(true);
   let error = $state('');
@@ -218,7 +218,7 @@
           >
           {#if installPath}<a
               class="add"
-              href={resolve(installPath as `/applications/${string}/install/${string}`)}
+              href={resolve(installPath.slice(1) as `applications/${string}/install/${string}`)}
               >{$t('ui_add_app_3de6a773')}</a
             >{/if}
         </div>

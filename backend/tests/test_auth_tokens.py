@@ -15,6 +15,7 @@ from starlette.requests import Request
 import app.api.auth as auth_api
 from app.api.dependencies import AuthenticatedUser
 from app.auth.schemas import LoginRequest, MfaCodeRequest
+from app.auth.security import new_refresh_token, token_hash
 from app.auth.service import (
     FAILURE_WINDOW_SCRIPT,
     INCREMENT_WITH_EXPIRY_SCRIPT,
@@ -33,6 +34,7 @@ from app.auth.service import (
     record_mfa_ip_failure,
     record_mfa_ticket_failure,
     record_mfa_verification_failure,
+    rotate_refresh_token,
     store_mfa_setup,
 )
 from app.auth.tokens import (
@@ -361,6 +363,43 @@ async def test_session_revocation_revokes_database_and_live_access_tokens(
     assert record.revoked_at is not None
     session.commit.assert_awaited_once()
     revoke.assert_awaited_once_with("session-two")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("rotated_seconds_ago", "accepted"), [(5, True), (61, False)])
+async def test_superseded_refresh_token_is_accepted_only_within_grace_period(
+    rotated_seconds_ago: int, accepted: bool
+) -> None:
+    now = datetime.now(UTC)
+    rotated_at = now - timedelta(seconds=rotated_seconds_ago)
+    superseded = new_refresh_token()
+    record = Session(
+        id="session-three",
+        user_id=42,
+        user_domain="alpha.test",
+        user_is_local=True,
+        refresh_token_hash=token_hash(new_refresh_token()),
+        previous_token_hash=token_hash(superseded),
+        last_used_at=rotated_at,
+        expires_at=now + timedelta(days=7),
+        absolute_expires_at=now + timedelta(days=30),
+    )
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=record)
+    session.commit = AsyncMock()
+
+    if not accepted:
+        with pytest.raises(InvalidTokenError):
+            await rotate_refresh_token(session, FakeRedis(), auth_settings(), superseded)  # type: ignore[arg-type]
+        assert record.revoked_at is not None
+        return
+
+    issued = await rotate_refresh_token(session, FakeRedis(), auth_settings(), superseded)  # type: ignore[arg-type]
+    assert record.revoked_at is None
+    assert record.refresh_token_hash == token_hash(issued.refresh_token)
+    # Retries keep presenting the superseded token, and must not slide the window.
+    assert record.previous_token_hash == token_hash(superseded)
+    assert record.last_used_at == rotated_at
 
 
 @pytest.mark.asyncio

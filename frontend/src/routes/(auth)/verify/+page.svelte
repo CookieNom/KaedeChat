@@ -39,11 +39,11 @@
       {$t('ui_you_re_verified_a3ed9e86')}
     </h1>
     <p>
-      <a class="primary-button" href={resolve('/login')}>{$t('ui_continue_to_sign_in_d398cd0a')}</a>
+      <a class="primary-button" href={resolve('login')}>{$t('ui_continue_to_sign_in_d398cd0a')}</a>
     </p>
   {:else}<h1 class="auth-title">{$t('ui_this_link_has_faded_c21c2905')}</h1>
     <p class="lede form-error" role="alert">{error}</p>
     <p class="form-foot">
-      <a href={resolve('/login')}>{$t('ui_return_to_sign_in_8504054f')}</a>
+      <a href={resolve('login')}>{$t('ui_return_to_sign_in_8504054f')}</a>
     </p>{/if}
 </div>

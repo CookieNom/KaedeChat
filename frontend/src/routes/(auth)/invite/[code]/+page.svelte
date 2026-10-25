@@ -69,7 +69,7 @@
       if (generation !== loadGeneration || targetCode !== code) return;
       const channel = invitedChannel(hydrated, preview?.channel_id ?? null);
       if (!channel) {
-        window.location.assign(resolve('/home'));
+        window.location.assign(resolve('home'));
         return;
       }
       window.location.assign(guildChannelPath(hydrated, channel));
@@ -77,7 +77,7 @@
       if (generation !== loadGeneration || targetCode !== code) return;
       if (caught instanceof ApiError && caught.status === 401) {
         sessionStorage.setItem('kaede.return-to', window.location.pathname);
-        window.location.assign(resolve('/login'));
+        window.location.assign(resolve('login'));
       } else {
         error = userErrorMessage(caught, $t('ui_could_not_accept_this_invite_try_again_fc4d2e30'));
       }

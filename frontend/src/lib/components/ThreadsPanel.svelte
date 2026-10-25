@@ -149,8 +149,7 @@
             disabled={busy || !canSendStarter}
             placeholder={canSendStarter
               ? $t('ui_type_the_first_message_in_your_thread_dc3d4661')
-              : $t('ui_you_can_create_the_thread_but_cannot_send_its_5173d0fb')}
-          ></textarea>
+              : $t('ui_you_can_create_the_thread_but_cannot_send_its_5173d0fb')}></textarea>
         </label>
         {#if canCreatePrivate}
           <label class="private-thread-toggle">

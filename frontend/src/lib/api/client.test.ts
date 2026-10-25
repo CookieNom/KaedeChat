@@ -322,6 +322,38 @@ describe('API session recovery', () => {
     });
   });
 
+  it.each([
+    ['signs out when the server rejects the refresh token', 'INVALID_REFRESH_TOKEN', 401, true],
+    ['signs out when the desktop discarded the session', 'NOT_AUTHENTICATED', 0, true],
+    ['keeps the session when the server is unreachable', 'NATIVE_TRANSPORT_ERROR', 0, false]
+  ])('desktop refresh %s', async (_case, refreshCode, refreshStatus, signsOut) => {
+    const failures: Record<string, { code: string; status: number }> = {
+      '/guilds/1': { code: 'NOT_AUTHENTICATED', status: 0 },
+      '/users/@me': { code: 'INVALID_REFRESH_TOKEN', status: 401 },
+      '/auth/refresh': { code: refreshCode, status: refreshStatus }
+    };
+    const invoke = vi.fn(async (command: string, args?: { request: { path: string } }) => {
+      if (command === 'native_restore_session') return { instance: null, authenticated: true };
+      const failure = command === 'native_api_request' && failures[args?.request.path ?? ''];
+      if (failure) throw { ...failure, message: 'Request failed.', detail: null };
+      throw new Error('Unexpected native command');
+    });
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } }, dispatchEvent });
+    const { api } = await import('./client');
+
+    const request = api('/guilds/1');
+    if (signsOut) {
+      await expect(request).rejects.toMatchObject({ status: 401 });
+      expect(dispatchEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'kaede:session-expired' })
+      );
+    } else {
+      await expect(request).rejects.toMatchObject({ code: 'SESSION_REFRESH_UNAVAILABLE' });
+      expect(dispatchEvent).not.toHaveBeenCalled();
+    }
+  });
+
   it('forwards desktop audit reasons and raw If-Match through the native allowlist boundary', async () => {
     const requests: unknown[] = [];
     const invoke = vi.fn(async (command: string, args?: unknown) => {

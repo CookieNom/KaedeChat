@@ -327,6 +327,8 @@ def meili_filters(
             values.append(
                 f"({' OR '.join(f'{attribute} = {filter_value(value)}' for value in field)})"
             )
+    if request.filters.reaction is not None:
+        values.append(f"reaction_emojis = {filter_value(request.filters.reaction)}")
     if request.filters.pinned is not None:
         values.append(f"pinned = {'true' if request.filters.pinned else 'false'}")
     author_types = (
@@ -792,7 +794,7 @@ async def materialize_federated_results(
         # offer a result the client cannot open; retained/history-sync rows
         # become searchable as soon as they exist in the authorized replica.
         if stored is None and access.guild is not None:
-            raise SearchUnavailable("remote guild search returned unavailable history")
+            continue
         if stored is not None:
             if (
                 (stored.channel_id, stored.channel_domain) != (channel.id, channel.origin_domain)
@@ -875,7 +877,8 @@ async def remote_search_wire_response(
     authority: str,
     request: MessageSearchRequest,
 ) -> FederatedMessageSearchResponse:
-    payload = request.model_dump(mode="json")
+    # Omit unset filters so older peers can still handle ordinary searches.
+    payload = request.model_dump(mode="json", exclude_none=True)
     payload["actor_ref"] = f"{actor.id}@{actor.origin_domain}"
     async with session_factory() as request_session:
         response = await signed_request(
@@ -1196,7 +1199,8 @@ async def search_with_authority(
         coverage = cast(dict[str, object], local["coverage"])
         local["coverage"] = {"local": coverage["local"], "authority": "unsupported"}
         return local
-    payload = request.model_dump(mode="json")
+    # Omit unset filters so older peers can still handle ordinary searches.
+    payload = request.model_dump(mode="json", exclude_none=True)
     payload["actor_ref"] = f"{actor.id}@{actor.origin_domain}"
     try:
         response = await signed_request(
@@ -1248,5 +1252,8 @@ async def search_with_authority(
     local["results"] = merged
     local["next_cursor"] = remote.next_cursor
     coverage = cast(dict[str, object], local["coverage"])
-    local["coverage"] = {"local": coverage["local"], "authority": "complete"}
+    local["coverage"] = {
+        "local": coverage["local"],
+        "authority": "partial" if len(remote_results) < len(remote.results) else "complete",
+    }
     return public_search_payload(local)

@@ -91,7 +91,7 @@
   >
     <p class="lede">
       {$t('ui_your_password_has_been_updated_cc244a90')}
-      <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>.
+      <a href={resolve('login')}>{$t('ui_sign_in_bfd402b2')}</a>.
     </p>
     <p class="auth-warning">
       {localStateRebased

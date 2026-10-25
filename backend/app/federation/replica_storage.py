@@ -3,14 +3,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, delete, exists, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import Select
 
 from app.core.settings import Settings
 from app.db.base import Base
-from app.db.models import FederationReplicaUsage, Guild, Instance, PeerKey, User
+from app.db.models import (
+    Attachment,
+    Channel,
+    E2EEControlRecord,
+    FederatedHistoryMessage,
+    FederationReplicaUsage,
+    Guild,
+    GuildHistoryStagedMessage,
+    Instance,
+    Message,
+    MessageBookmark,
+    MessageCrosspost,
+    MessageProjection,
+    PeerKey,
+    Pin,
+    Reaction,
+    RemoteMediaCache,
+    User,
+)
 
 REPLICA_QUOTA_ERROR_CODE = "KAED_FED_REPLICA_QUOTA_EXCEEDED"
 REMOTE_IDENTITY_GC_BATCH_SIZE = 250
@@ -74,6 +92,175 @@ def replica_storage_quota_violation(
     return None
 
 
+def replica_message_candidates(settings: Settings, guild: Guild) -> Select[tuple[int]]:
+    """Only replaceable history: preserve local assets, user intent and channel heads."""
+    newer = Message.__table__.alias("newer_guild_message")
+    conditions = [
+        Channel.guild_id == guild.id,
+        Channel.guild_domain == guild.origin_domain,
+        Message.origin_domain == guild.origin_domain,
+        Message.author_domain != settings.domain,
+        exists().where(
+            newer.c.channel_id == Message.channel_id,
+            newer.c.channel_domain == Message.channel_domain,
+            newer.c.id > Message.id,
+        ),
+        ~exists()
+        .where(
+            Channel.starter_message_id == Message.id,
+            Channel.starter_message_domain == Message.origin_domain,
+        )
+        .correlate(Message),
+        ~exists().where(
+            Attachment.message_id == Message.id,
+            Attachment.message_domain == Message.origin_domain,
+            Attachment.origin_domain == settings.domain,
+        ),
+        ~exists().where(
+            MessageProjection.message_id == Message.id,
+            MessageProjection.message_domain == Message.origin_domain,
+            MessageProjection.processed_at.is_(None),
+        ),
+        ~exists().where(
+            E2EEControlRecord.id == Message.id,
+            E2EEControlRecord.origin_domain == Message.origin_domain,
+        ),
+    ]
+    # Non-cascading references (including channel heads) must survive. Pins,
+    # bookmarks and crosspost delivery records also express durable user intent.
+    for table in Base.metadata.sorted_tables:
+        for constraint in table.foreign_key_constraints:
+            if constraint.referred_table is not Message.__table__:
+                continue
+            if constraint.ondelete == "CASCADE" and table not in (
+                Pin.__table__,
+                MessageBookmark.__table__,
+                MessageCrosspost.__table__,
+            ):
+                continue
+            conditions.append(
+                ~exists(
+                    select(1)
+                    .select_from(table)
+                    .where(
+                        and_(
+                            *(
+                                element.parent == Message.__table__.c[element.column.name]
+                                for element in constraint.elements
+                            )
+                        )
+                    )
+                ).correlate(Message)
+            )
+    return (
+        select(Message.id)
+        .join(
+            Channel,
+            (Channel.id == Message.channel_id) & (Channel.origin_domain == Message.channel_domain),
+        )
+        .where(*conditions)
+        .order_by(Message.id)
+        .limit(500)
+        .with_for_update(of=Message, skip_locked=True)
+    )
+
+
+async def evict_replica_history_batch(
+    session: AsyncSession,
+    settings: Settings,
+    guild: Guild,
+) -> bool:
+    """Discard one oldest batch without emitting authoritative deletions."""
+    if guild.origin_domain == settings.domain:
+        return False
+    message_ids = list(await session.scalars(replica_message_candidates(settings, guild)))
+    staged_ids = list(
+        await session.scalars(
+            select(GuildHistoryStagedMessage.message_id)
+            .join(
+                Channel,
+                (Channel.id == GuildHistoryStagedMessage.channel_id)
+                & (Channel.origin_domain == GuildHistoryStagedMessage.channel_domain),
+            )
+            .where(Channel.guild_id == guild.id, Channel.guild_domain == guild.origin_domain)
+            .order_by(GuildHistoryStagedMessage.message_id)
+            .limit(500)
+        )
+    )
+    selected = sorted(set(message_ids + staged_ids))[:500]
+    if not selected:
+        return False
+    retained_ids = set(message_ids).intersection(selected)
+    if retained_ids:
+        refs = [(identifier, guild.origin_domain) for identifier in retained_ids]
+        attachment_refs = select(Attachment.id, Attachment.origin_domain).where(
+            tuple_(Attachment.message_id, Attachment.message_domain).in_(refs)
+        )
+        await session.execute(
+            update(RemoteMediaCache)
+            .where(
+                tuple_(RemoteMediaCache.attachment_id, RemoteMediaCache.origin_domain).in_(
+                    attachment_refs
+                )
+            )
+            .values(expires_at=datetime.now(UTC))
+        )
+        # Delete message-accounted children while their parent still exists so
+        # the ledger triggers can release charges without a whole-guild scan.
+        for model in (Reaction, Attachment, FederatedHistoryMessage):
+            await session.execute(
+                delete(model).where(tuple_(model.message_id, model.message_domain).in_(refs))
+            )
+        await session.execute(
+            delete(Message).where(tuple_(Message.id, Message.origin_domain).in_(refs))
+        )
+    await session.execute(
+        delete(GuildHistoryStagedMessage).where(
+            GuildHistoryStagedMessage.message_domain == guild.origin_domain,
+            GuildHistoryStagedMessage.message_id.in_(selected),
+        )
+    )
+    # Cache maintenance must not manufacture a new authoritative guild version.
+    await session.execute(
+        update(Guild)
+        .where(Guild.id == guild.id, Guild.origin_domain == guild.origin_domain)
+        .values(
+            replica_evicted_through_id=max(guild.replica_evicted_through_id or 0, selected[-1]),
+            updated_at=Guild.updated_at,
+        )
+    )
+    await session.flush()
+    return True
+
+
+async def replica_storage_usage(session: AsyncSession, guild: Guild) -> ReplicaStorageUsage:
+    ledger = await session.scalar(
+        select(FederationReplicaUsage)
+        .where(
+            FederationReplicaUsage.guild_id == guild.id,
+            FederationReplicaUsage.guild_domain == guild.origin_domain,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if ledger is None:
+        raise RuntimeError("remote replica storage ledger is missing")
+    totals = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(FederationReplicaUsage.total_rows), 0),
+                func.coalesce(func.sum(FederationReplicaUsage.total_bytes), 0),
+            ).where(FederationReplicaUsage.guild_domain == guild.origin_domain)
+        )
+    ).one()
+    return ReplicaStorageUsage(
+        guild_rows=int(ledger.total_rows),
+        guild_bytes=int(ledger.total_bytes),
+        origin_rows=int(totals[0]),
+        origin_bytes=int(totals[1]),
+    )
+
+
 async def admit_replica_storage(
     session: AsyncSession,
     settings: Settings,
@@ -107,33 +294,31 @@ async def admit_replica_storage(
             )
         )
     )
-    ledger = await session.scalar(
-        select(FederationReplicaUsage)
-        .where(
-            FederationReplicaUsage.guild_id == guild.id,
-            FederationReplicaUsage.guild_domain == guild.origin_domain,
+    usage = await replica_storage_usage(session, guild)
+    if replica_storage_quota_violation(settings, usage) is not None:
+        # Aim for headroom, but bound work in a live event transaction. Origin
+        # pressure is relieved from this guild only, preserving lock ordering
+        # with concurrent guild mutations on the same origin.
+        target = settings.model_copy(
+            update={
+                name: int(getattr(settings, name) * 0.95)
+                for name in (
+                    "federation_replica_max_rows_per_guild",
+                    "federation_replica_max_bytes_per_guild",
+                    "federation_replica_max_rows_per_origin",
+                    "federation_replica_max_bytes_per_origin",
+                )
+            }
         )
-        .with_for_update()
-    )
-    if ledger is None:
-        raise RuntimeError("remote replica storage ledger is missing")
-    totals = (
-        await session.execute(
-            select(
-                func.coalesce(func.sum(FederationReplicaUsage.total_rows), 0),
-                func.coalesce(func.sum(FederationReplicaUsage.total_bytes), 0),
-            ).where(FederationReplicaUsage.guild_domain == guild.origin_domain)
-        )
-    ).one()
-    usage = ReplicaStorageUsage(
-        guild_rows=int(ledger.total_rows),
-        guild_bytes=int(ledger.total_bytes),
-        origin_rows=int(totals[0]),
-        origin_bytes=int(totals[1]),
-    )
-    violation = replica_storage_quota_violation(settings, usage)
-    if violation is not None:
-        raise violation
+        for _ in range(10):
+            if not await evict_replica_history_batch(session, settings, guild):
+                break
+            usage = await replica_storage_usage(session, guild)
+            if replica_storage_quota_violation(target, usage) is None:
+                break
+        violation = replica_storage_quota_violation(settings, usage)
+        if violation is not None:
+            raise violation
     if guild.sync_status == "quota_paused":
         # The caller still owns deciding whether the successful operation has
         # fully synchronized the replica. Only remove the obsolete error here.

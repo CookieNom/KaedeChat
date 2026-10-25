@@ -235,7 +235,12 @@ export interface DirectoryPreviewResponse {
 export type DirectoryCollectionSlug = 'featured' | 'staff-picks' | 'new-and-noteworthy';
 
 export type DirectoryCategory =
-  'entertainment' | 'games' | 'moderation' | 'productivity' | 'social' | 'utilities';
+  | 'entertainment'
+  | 'games'
+  | 'moderation'
+  | 'productivity'
+  | 'social'
+  | 'utilities';
 
 export type DirectoryLocale =
   | 'id'
@@ -332,7 +337,9 @@ export function canonicalDirectoryFilters(filters: DirectoryFilters): DirectoryF
   };
 }
 
-export function directoryFiltersFromSearchParams(params: URLSearchParams): DirectoryFilters {
+export function directoryFiltersFromSearchParams(
+  params: Pick<URLSearchParams, 'get'>
+): DirectoryFilters {
   return canonicalDirectoryFilters({
     query: params.get('q') ?? '',
     category: (params.get('category') ?? '') as DirectoryCategory | '',
@@ -341,7 +348,7 @@ export function directoryFiltersFromSearchParams(params: URLSearchParams): Direc
   });
 }
 
-export function directoryRestoredPageCount(params: URLSearchParams): number {
+export function directoryRestoredPageCount(params: Pick<URLSearchParams, 'get'>): number {
   const value = Number(params.get('pages') ?? '1');
   return Number.isSafeInteger(value) && value >= 1 ? Math.min(value, MAX_RESTORED_PAGES) : 1;
 }

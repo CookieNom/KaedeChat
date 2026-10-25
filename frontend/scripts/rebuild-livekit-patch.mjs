@@ -2,8 +2,8 @@
 import { createRequire } from 'node:module';
 import { realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { build } from 'esbuild';
 const require = createRequire(import.meta.url);
-const { build } = createRequire(require.resolve('vite'))('esbuild');
 
 const root = resolve(process.argv[2] ?? 'node_modules/livekit-client');
 const dependencies = dirname(dirname(realpathSync(require.resolve('livekit-client'))));

@@ -125,8 +125,7 @@
       }}
       rows="18"
       spellcheck="false"
-      {disabled}
-    ></textarea>
+      {disabled}></textarea>
   </label>
   <p class="hint">{$t('ui_use_json_for_subcommands_choices_autocomplete_79a1a7cd')}</p>
 {:else}

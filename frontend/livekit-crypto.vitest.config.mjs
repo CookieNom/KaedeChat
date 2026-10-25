@@ -8,7 +8,10 @@ const variantCheck = fileURLToPath(
 );
 export default {
   resolve: { alias: { '@livekit-e2ee': `${sdkRoot}/src/e2ee` } },
-  esbuild: { tsconfigRaw: { compilerOptions: { useDefineForClassFields: false } } },
+  oxc: {
+    assumptions: { setPublicClassFields: true },
+    typescript: { removeClassFieldsWithoutInitializer: true }
+  },
   test: {
     root: sdkRoot,
     include: [

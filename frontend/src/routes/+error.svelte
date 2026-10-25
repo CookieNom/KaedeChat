@@ -46,9 +46,9 @@
     <p>{description}</p>
     <div class="welcome-actions">
       {#if page.status === 401}
-        <a class="primary-button" href={resolve('/login')}>{$t('ui_sign_in_again_51fbe1dc')}</a>
+        <a class="primary-button" href={resolve('login')}>{$t('ui_sign_in_again_51fbe1dc')}</a>
       {:else}
-        <a class="primary-button" href={resolve('/home')}>{$t('ui_return_home_bbcc935e')}</a>
+        <a class="primary-button" href={resolve('home')}>{$t('ui_return_home_bbcc935e')}</a>
       {/if}
       <button class="secondary-button" type="button" onclick={() => window.location.reload()}>
         {$t('ui_try_again_d8b8392e')}

@@ -205,7 +205,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
   @override
   void initState() {
     super.initState();
-    if (callRef != null) Future<void>.microtask(_joinWithRegion);
+    if (callRef != null) Future<void>.microtask(_join);
     if (channel.type == ChannelType.voice) {
       Future<void>.microtask(_loadVoiceStatus);
     }
@@ -274,53 +274,15 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
 
   bool _rtcPreparing = false;
 
-  Future<void> _joinWithRegion() async {
+  Future<void> _join() async {
     if (!mounted || _rtcPreparing) return;
     setState(() => _rtcPreparing = true);
     try {
       final session = ref.read(voiceSessionProvider);
       if (session.connecting) return;
-      if (callRef != null) {
-        await session.connect(channel, callRef: callRef);
-        return;
-      }
-      final repository = ref.read(mobileControllerProvider.notifier).repository;
-      String? region;
-      try {
-        final config =
-            await repository.rtcRouting(channel: channel.ref, call: callRef);
-        if (!mounted) return;
-        if (config['provider'] == 'cinnamon' &&
-            config['allow_region_selection'] == true) {
-          final choice = await showDialog<String>(
-              context: context,
-              builder: (context) => SimpleDialog(
-                    title: const Text('Region for a new call'),
-                    contentPadding: const EdgeInsets.all(16),
-                    children: [
-                      SimpleDialogOption(
-                          onPressed: () => Navigator.pop(context, ''),
-                          child: const Text('Instance default')),
-                      SimpleDialogOption(
-                          onPressed: () => Navigator.pop(context, 'automatic'),
-                          child: const Text('Automatic')),
-                      for (final item in (config['regions'] as List? ?? [])
-                          .whereType<Map<Object?, Object?>>())
-                        SimpleDialogOption(
-                            onPressed: () =>
-                                Navigator.pop(context, '${item['id']}'),
-                            child: Text('${item['name']}')),
-                    ],
-                  ));
-          if (choice == null) return;
-          region = choice.isEmpty ? null : choice;
-        }
-      } on Object {
-        /* Use the existing no-hints fallback when discovery fails. */
-      }
-      if (mounted) {
-        await session.connect(channel, callRef: callRef, rtcRegion: region);
-      }
+      // Mobile follows the channel's region setting; join-time region
+      // overrides are only offered on web and desktop.
+      await session.connect(channel, callRef: callRef);
     } finally {
       if (mounted) setState(() => _rtcPreparing = false);
     }
@@ -421,7 +383,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                   ActionButton(
                     onPressed:
                         canConnect && !session.connecting && !_rtcPreparing
-                            ? _joinWithRegion
+                            ? _join
                             : null,
                     icon: session.connecting && thisRoom
                         ? SizedBox.square(

@@ -38,7 +38,7 @@
       <span>{$t('ui_trust_safety_5b9c374d')}</span>
       <h1>{$t('ui_my_reports_cc6e3f45')}</h1>
     </div>
-    <a href={resolve('/settings')}>{$t('ui_back_to_settings_dc9c6093')}</a>
+    <a href={resolve('settings')}>{$t('ui_back_to_settings_dc9c6093')}</a>
   </header>
   <p class="intro">{$t('ui_reports_go_to_your_instance_s_trust_safety_te_d7a4025e')}</p>
   {#if error}<div class="notice" role="alert">{error}</div>{/if}

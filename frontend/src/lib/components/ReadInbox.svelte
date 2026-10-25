@@ -109,7 +109,7 @@
     const reference = target(entry);
     const around = reference ? `?around=${encodeURIComponent(reference)}` : '';
     onClose();
-    await goto(resolve((path + around) as '/home'));
+    await goto(resolve((path + around).slice(1) as 'home'));
   }
   onMount(() => {
     dialog.showPopover();

@@ -12,10 +12,10 @@
 
 <main class="landing-page">
   <header class="landing-nav">
-    <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
+    <a class="wordmark" href={resolve('')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
     <nav aria-label={$t('ui_account_7e1b0d56')}>
-      <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
-      <a class="secondary-button" href={resolve('/register')}>{$t('ui_create_account_798ca2ce')}</a>
+      <a href={resolve('login')}>{$t('ui_sign_in_bfd402b2')}</a>
+      <a class="secondary-button" href={resolve('register')}>{$t('ui_create_account_798ca2ce')}</a>
     </nav>
   </header>
 
@@ -25,11 +25,11 @@
       <h1>{$t('ui_conversation_that_belongs_to_baa04b61')} <em>you.</em></h1>
       <p>{$t('ui_kaede_brings_communities_messages_voice_and_v_e00a751e')}</p>
       <div class="welcome-actions">
-        <a class="primary-button large-button" href={resolve('/register')}>
+        <a class="primary-button large-button" href={resolve('register')}>
           {$t('ui_find_your_place_048d6aa2')}
           <Icon name="chevron-right" size={18} />
         </a>
-        <a class="secondary-button large-button" href={resolve('/login')}
+        <a class="secondary-button large-button" href={resolve('login')}
           >{$t('ui_i_already_belong_here_77322fc3')}</a
         >
       </div>
@@ -103,7 +103,7 @@
   </section>
 
   <footer class="landing-footer">
-    <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
+    <a class="wordmark" href={resolve('')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
     <p>{$t('ui_built_for_communities_that_want_a_place_of_th_f7a42867')}</p>
   </footer>
 </main>

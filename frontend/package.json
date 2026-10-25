@@ -10,8 +10,8 @@
     "check:csp": "node scripts/verify-csp.mjs",
     "check:e2ee-wasm": "node scripts/verify-e2ee-wasm.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "lint": "eslint . && prettier --check .",
-    "format": "prettier --write .",
+    "lint": "oxlint . && eslint --concurrency auto . && oxfmt --check .",
+    "format": "oxfmt --write .",
     "test": "vitest run",
     "test:livekit-crypto": "vitest run --config livekit-crypto.vitest.config.mjs",
     "check:locales": "node scripts/check-locales.mjs"
@@ -20,18 +20,18 @@
     "overrides": {
       "brace-expansion@>=1.0.0 <1.1.21": "1.1.21",
       "brace-expansion@>=5.0.0 <5.0.12": "5.0.12",
-      "cookie": "0.7.2",
       "devalue@>=5.0.0 <5.9.3": "5.9.3",
       "js-yaml@<4.3.2": "4.3.2",
       "nanoid@<3.3.18": "3.3.18",
-      "postcss": "8.5.23"
+      "postcss": "8.5.23",
+      "cookie@<0.7.2": "0.7.2"
     },
     "patchedDependencies": {
       "livekit-client@2.20.1": "patches/livekit-client@2.20.1.patch"
     }
   },
   "dependencies": {
-    "dompurify": "3.4.16",
+    "dompurify": "3.4.17",
     "emojibase-data": "17.0.0",
     "intl-messageformat": "^11.2.15",
     "livekit-client": "2.20.1",
@@ -42,21 +42,23 @@
     "@fontsource-variable/bricolage-grotesque": "^5.2.10",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
-    "@sveltejs/adapter-static": "^3.0.6",
-    "@sveltejs/kit": "^2.70.2",
-    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@sveltejs/adapter-static": "^4.0.0",
+    "@sveltejs/kit": "3.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^22.13.4",
+    "esbuild": "0.28.2",
     "eslint": "^9.19.0",
+    "eslint-plugin-oxlint": "1.89.0",
     "eslint-plugin-svelte": "^3.0.3",
     "globals": "^15.14.0",
-    "happy-dom": "^20.14.0",
-    "prettier": "^3.5.0",
-    "prettier-plugin-svelte": "^3.3.3",
-    "svelte": "^5.20.1",
-    "svelte-check": "^4.1.4",
-    "typescript": "^5.7.3",
+    "happy-dom": "^21.0.4",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.89.0",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.7.7",
+    "typescript": "^6.0.3",
     "typescript-eslint": "^8.22.0",
-    "vite": "^6.1.0",
-    "vitest": "^4.1.11"
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12"
   }
 }

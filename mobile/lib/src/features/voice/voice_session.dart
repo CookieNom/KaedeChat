@@ -550,7 +550,6 @@ final class VoiceSession extends ChangeNotifier {
     EntityRef? callRef,
     bool force = false,
     bool takeover = false,
-    String? rtcRegion,
   }) async {
     _mediaQuality = await MobileMediaQuality.load();
     if (!force &&
@@ -620,7 +619,7 @@ final class VoiceSession extends ChangeNotifier {
       final routing = await _repository.rtcHints(
           channel: target.ref,
           call: callRef,
-          region: callRef != null ? 'automatic' : rtcRegion);
+          region: callRef != null ? 'automatic' : null);
       if (generation != _generation) return;
       final grant = callRef == null
           ? await _repository.voiceToken(

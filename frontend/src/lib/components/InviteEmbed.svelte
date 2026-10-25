@@ -63,7 +63,7 @@
       if (generation !== loadGeneration) return;
       chatEntities.ingestGuilds([hydrated]);
       const channel = invitedChannel(hydrated, preview.channel_id);
-      window.location.assign(channel ? guildChannelPath(hydrated, channel) : resolve('/home'));
+      window.location.assign(channel ? guildChannelPath(hydrated, channel) : resolve('home'));
     } catch (caught) {
       if (generation !== loadGeneration) return;
       error = userErrorMessage(

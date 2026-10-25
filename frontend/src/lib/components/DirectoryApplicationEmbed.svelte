@@ -1,7 +1,6 @@
 <script lang="ts">
   import { t } from '$lib/ui/locale';
 
-  /* eslint-disable svelte/no-navigation-without-resolve -- the Directory helper validates and resolves this internal product route. */
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import type { DirectoryProductReference } from '$lib/chat/application-product-links';
@@ -107,7 +106,7 @@
       >
       {#if installPath}<a
           class="add"
-          href={resolve(installPath as `/applications/${string}/install/${string}`)}
+          href={resolve(installPath.slice(1) as `applications/${string}/install/${string}`)}
           >{$t('ui_add_app_3de6a773')}</a
         >{/if}
     </div>

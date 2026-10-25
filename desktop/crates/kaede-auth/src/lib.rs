@@ -7,6 +7,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use kaede_api::{ApiClient, ApiClientError};
@@ -22,6 +24,13 @@ use tokio::sync::{Mutex, RwLock};
 const PASSWORD_KDF_VERSION: u64 = 2;
 const PASSWORD_KDF_ALGORITHM: &str = "PBKDF2-SHA256";
 const PASSWORD_KDF_ITERATIONS: u64 = 600_000;
+
+// A refresh whose response is lost has already rotated the token on the server.
+// The server accepts the superseded token for a short grace period (60 seconds
+// by default), so transient failures are retried with the same token, and only
+// while the retry can still land inside that window.
+const REFRESH_RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+const REFRESH_RETRY_BUDGET: Duration = Duration::from_secs(45);
 
 fn canonical_base64url_material(value: &str, decoded_length: usize) -> bool {
     let Ok(mut decoded) = URL_SAFE_NO_PAD.decode(value) else {
@@ -173,6 +182,9 @@ where
     account_key: String,
     session: RwLock<Option<StoredSession>>,
     refresh_lock: Mutex<()>,
+    /// Incremented whenever new tokens are adopted, so callers that queued
+    /// behind an in-flight refresh reuse its result instead of rotating again.
+    generation: AtomicU64,
 }
 
 impl<V, T> SessionManager<V, T>
@@ -189,6 +201,7 @@ where
             account_key,
             session: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -196,10 +209,7 @@ where
         let Some(session) = self.vault.load(&self.account_key).await? else {
             return Ok(false);
         };
-        self.api
-            .set_access_token(Some(session.access_token.clone()))
-            .await;
-        *self.session.write().await = Some(session);
+        self.adopt(session).await;
         Ok(true)
     }
 
@@ -516,7 +526,13 @@ where
     }
 
     pub async fn refresh(&self) -> Result<(), AuthError> {
+        // Each rotation revokes the access tokens issued by the previous one, so
+        // callers that hit a 401 together must share a single rotation.
+        let observed = self.generation.load(Ordering::Acquire);
         let _guard = self.refresh_lock.lock().await;
+        if self.generation.load(Ordering::Acquire) != observed {
+            return Ok(());
+        }
         let refresh_token = self
             .session
             .read()
@@ -524,21 +540,76 @@ where
             .as_ref()
             .map(|session| session.refresh_token.clone())
             .ok_or(AuthError::NotAuthenticated)?;
-        let response: TokenResponse = self
-            .api
-            .post(
-                "auth/refresh",
-                &RefreshRequest {
-                    refresh_token: refresh_token.expose_secret(),
-                },
-            )
-            .await?;
-        match self.accept_tokens(response).await? {
-            LoginOutcome::Authenticated => Ok(()),
-            LoginOutcome::MfaRequired(_) | LoginOutcome::ChallengeRequired => {
-                Err(AuthError::UnexpectedAuthState)
+        let response = match self.request_refresh(&refresh_token).await {
+            Ok(response) => response,
+            Err(ApiClientError::Server { status, error }) if status.as_u16() == 401 => {
+                // The server has retired this session for good. Drop it so the
+                // app signs out instead of retrying a token that cannot recover.
+                self.discard_rejected_session().await;
+                return Err(ApiClientError::Server { status, error }.into());
             }
+            Err(error) => return Err(error.into()),
+        };
+        if response.mfa_required {
+            return Err(AuthError::UnexpectedAuthState);
         }
+        let session = native_tokens(response)?;
+        // The previous refresh token is already retired server-side. Adopt the
+        // new one before persisting it: if the vault write fails, this process
+        // keeps working, and the next successful refresh saves again.
+        self.adopt(session.clone()).await;
+        if let Err(error) = self.vault.save(&self.account_key, &session).await {
+            tracing::warn!(%error, "could not save the rotated desktop session");
+        }
+        Ok(())
+    }
+
+    async fn request_refresh(
+        &self,
+        refresh_token: &SecretString,
+    ) -> Result<TokenResponse, ApiClientError> {
+        let started = Instant::now();
+        let mut backoff = REFRESH_RETRY_BACKOFF.into_iter();
+        loop {
+            let error = match self
+                .api
+                .post(
+                    "auth/refresh",
+                    &RefreshRequest {
+                        refresh_token: refresh_token.expose_secret(),
+                    },
+                )
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) => error,
+            };
+            let Some(delay) = backoff
+                .next()
+                .and_then(|backoff| refresh_retry_delay(&error, backoff))
+                .filter(|delay| started.elapsed() + *delay <= REFRESH_RETRY_BUDGET)
+            else {
+                return Err(error);
+            };
+            tracing::warn!(%error, ?delay, "session refresh failed; retrying");
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    async fn discard_rejected_session(&self) {
+        self.api.set_access_token(None).await;
+        *self.session.write().await = None;
+        if let Err(error) = self.vault.delete(&self.account_key).await {
+            tracing::warn!(%error, "could not remove the rejected desktop session");
+        }
+    }
+
+    async fn adopt(&self, session: StoredSession) {
+        self.api
+            .set_access_token(Some(session.access_token.clone()))
+            .await;
+        *self.session.write().await = Some(session);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub async fn complete_mfa(
@@ -593,20 +664,41 @@ where
                 .map(LoginOutcome::MfaRequired)
                 .ok_or(AuthError::UnexpectedAuthState);
         }
-        let session = StoredSession {
-            access_token: response
-                .access_token
-                .ok_or(AuthError::MissingNativeTokens)?,
-            refresh_token: response
-                .refresh_token
-                .ok_or(AuthError::MissingNativeTokens)?,
-        };
+        let session = native_tokens(response)?;
         self.vault.save(&self.account_key, &session).await?;
-        self.api
-            .set_access_token(Some(session.access_token.clone()))
-            .await;
-        *self.session.write().await = Some(session);
+        self.adopt(session).await;
         Ok(LoginOutcome::Authenticated)
+    }
+}
+
+fn native_tokens(response: TokenResponse) -> Result<StoredSession, AuthError> {
+    Ok(StoredSession {
+        access_token: response
+            .access_token
+            .ok_or(AuthError::MissingNativeTokens)?,
+        refresh_token: response
+            .refresh_token
+            .ok_or(AuthError::MissingNativeTokens)?,
+    })
+}
+
+/// Returns how long to wait before retrying a failed refresh, or `None` when
+/// the failure is a definite answer that retrying cannot change.
+fn refresh_retry_delay(error: &ApiClientError, backoff: Duration) -> Option<Duration> {
+    match error {
+        // The server may have committed the rotation before the response was
+        // lost or garbled; the grace period makes the same token valid again.
+        ApiClientError::Transport(_) | ApiClientError::Decode(_) => Some(backoff),
+        ApiClientError::Server { status, error } => match status.as_u16() {
+            429 | 500 | 502 | 503 | 504 => {
+                let delay = error
+                    .retry_after_ms
+                    .map_or(backoff, |ms| Duration::from_millis(ms).max(backoff));
+                Some(delay)
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -630,12 +722,224 @@ pub enum AuthError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use kaede_api::{ApiClient, ApiClientError, InstanceEndpoint};
+    use kaede_platform::{
+        CredentialVault, PlatformError, StoredSession, TurnstileBroker, TurnstileChallenge,
+    };
+    use kaede_protocol::Domain;
+    use secrecy::{ExposeSecret, SecretString};
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex;
+    use tokio::task::JoinHandle;
+    use url::Url;
 
     use super::{
-        AuthError, LoginRequest, RegisterRequest, validate_authentication_secret,
+        AuthError, LoginRequest, RegisterRequest, SessionManager, validate_authentication_secret,
         validate_password_kdf,
     };
+
+    const ROTATED: &str =
+        r#"{"access_token":"access-2","refresh_token":"kc1_rt_rotated","mfa_required":false}"#;
+    const ROTATED_AGAIN: &str =
+        r#"{"access_token":"access-3","refresh_token":"kc1_rt_third","mfa_required":false}"#;
+    const UNAVAILABLE: &str =
+        r#"{"detail":{"code":"SERVICE_UNAVAILABLE","message":"Try again shortly"}}"#;
+    const INVALID_REFRESH: &str =
+        r#"{"detail":{"code":"INVALID_REFRESH_TOKEN","message":"Refresh token is invalid"}}"#;
+
+    struct MemoryVault {
+        saved: Mutex<Option<StoredSession>>,
+        fail_saves: bool,
+    }
+
+    impl MemoryVault {
+        fn holding(refresh_token: &str, fail_saves: bool) -> Arc<Self> {
+            Arc::new(Self {
+                saved: Mutex::new(Some(StoredSession {
+                    access_token: SecretString::from("access-1"),
+                    refresh_token: SecretString::from(refresh_token),
+                })),
+                fail_saves,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl CredentialVault for MemoryVault {
+        async fn load(&self, _: &str) -> Result<Option<StoredSession>, PlatformError> {
+            Ok(self.saved.lock().await.clone())
+        }
+
+        async fn save(&self, _: &str, session: &StoredSession) -> Result<(), PlatformError> {
+            if self.fail_saves {
+                return Err(PlatformError::Other(
+                    "credential manager is locked".to_owned(),
+                ));
+            }
+            *self.saved.lock().await = Some(session.clone());
+            Ok(())
+        }
+
+        async fn delete(&self, _: &str) -> Result<(), PlatformError> {
+            *self.saved.lock().await = None;
+            Ok(())
+        }
+    }
+
+    struct NoTurnstile;
+
+    #[async_trait]
+    impl TurnstileBroker for NoTurnstile {
+        async fn solve(&self, _: TurnstileChallenge) -> Result<SecretString, PlatformError> {
+            Err(PlatformError::ChallengeCancelled)
+        }
+    }
+
+    type Server = JoinHandle<std::io::Result<Vec<String>>>;
+
+    /// Answers one request per connection with the scripted replies and
+    /// returns the request bodies it received.
+    async fn serve(replies: Vec<(u16, &'static str)>) -> Result<(Url, Server), Box<dyn Error>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let origin = Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for (status, body) in replies {
+                let (mut stream, _) = listener.accept().await?;
+                bodies.push(read_body(&mut stream).await?);
+                let reply = format!(
+                    "HTTP/1.1 {status} Scripted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).await?;
+            }
+            Ok(bodies)
+        });
+        Ok((origin, server))
+    }
+
+    async fn read_body(stream: &mut TcpStream) -> std::io::Result<String> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1_024];
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok(String::new());
+            }
+            request.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&request).into_owned();
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let length = text[..head_end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            let body_start = head_end + 4;
+            if request.len() >= body_start + length {
+                return Ok(
+                    String::from_utf8_lossy(&request[body_start..body_start + length]).into_owned(),
+                );
+            }
+        }
+    }
+
+    async fn restored_session(
+        origin: &Url,
+        vault: Arc<MemoryVault>,
+    ) -> Result<SessionManager<MemoryVault, NoTurnstile>, Box<dyn Error>> {
+        let endpoint = InstanceEndpoint::development(Domain::parse("dev.example")?, origin)?;
+        let session = SessionManager::new(
+            ApiClient::new(endpoint)?,
+            vault,
+            Arc::new(NoTurnstile),
+            "maple@dev.example".to_owned(),
+        );
+        assert!(session.restore().await?);
+        Ok(session)
+    }
+
+    #[tokio::test]
+    async fn refresh_retries_transient_failures_with_the_same_token() -> Result<(), Box<dyn Error>>
+    {
+        let (origin, server) = serve(vec![(503, UNAVAILABLE), (200, ROTATED)]).await?;
+        let vault = MemoryVault::holding("kc1_rt_original", false);
+        let session = restored_session(&origin, vault.clone()).await?;
+
+        session.refresh().await?;
+
+        let bodies = server.await??;
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies.iter().all(|body| body.contains("kc1_rt_original")));
+        assert_eq!(session.access_token().await?.expose_secret(), "access-2");
+        let Some(saved) = vault.saved.lock().await.clone() else {
+            panic!("the rotated session should be saved");
+        };
+        assert_eq!(saved.refresh_token.expose_secret(), "kc1_rt_rotated");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_vault_write_keeps_using_the_rotated_token() -> Result<(), Box<dyn Error>> {
+        let (origin, server) = serve(vec![(200, ROTATED), (200, ROTATED_AGAIN)]).await?;
+        let vault = MemoryVault::holding("kc1_rt_original", true);
+        let session = restored_session(&origin, vault).await?;
+
+        session.refresh().await?;
+        session.refresh().await?;
+
+        let bodies = server.await??;
+        assert!(bodies[0].contains("kc1_rt_original"));
+        assert!(bodies[1].contains("kc1_rt_rotated"));
+        assert_eq!(session.access_token().await?.expose_secret(), "access-3");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_share_one_rotation() -> Result<(), Box<dyn Error>> {
+        let (origin, server) = serve(vec![(200, ROTATED)]).await?;
+        let session =
+            restored_session(&origin, MemoryVault::holding("kc1_rt_original", false)).await?;
+
+        let (first, second) = tokio::join!(session.refresh(), session.refresh());
+
+        first?;
+        second?;
+        assert_eq!(server.await??.len(), 1);
+        assert_eq!(session.access_token().await?.expose_secret(), "access-2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_discards_the_session_without_retrying() -> Result<(), Box<dyn Error>>
+    {
+        let (origin, server) = serve(vec![(401, INVALID_REFRESH)]).await?;
+        let vault = MemoryVault::holding("kc1_rt_revoked", false);
+        let session = restored_session(&origin, vault.clone()).await?;
+
+        assert!(matches!(
+            session.refresh().await,
+            Err(AuthError::Api(ApiClientError::Server { status, .. })) if status.as_u16() == 401
+        ));
+        assert!(matches!(
+            session.refresh().await,
+            Err(AuthError::NotAuthenticated)
+        ));
+        assert_eq!(server.await??.len(), 1);
+        assert!(vault.saved.lock().await.is_none());
+        Ok(())
+    }
 
     fn password_kdf(include_vault_salt: bool) -> serde_json::Value {
         let mut value = json!({

@@ -355,6 +355,9 @@ class Settings(BaseSettings):
     access_token_ttl_seconds: int = Field(default=15 * 60, ge=60)
     refresh_sliding_days: int = Field(default=30, ge=1)
     refresh_absolute_days: int = Field(default=90, ge=1)
+    # Accept the just-superseded refresh token this long after a rotation so a
+    # client whose refresh response was lost can retry. Zero disables it.
+    refresh_reuse_grace_seconds: int = Field(default=60, ge=0, le=300)
     verification_ttl_hours: int = Field(default=48, ge=1)
     password_reset_ttl_minutes: int = Field(default=30, ge=5)
 

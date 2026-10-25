@@ -599,8 +599,7 @@
             bind:value={draft.description}
             maxlength="1000"
             rows="3"
-            disabled={Boolean(busyRef)}
-          ></textarea>
+            disabled={Boolean(busyRef)}></textarea>
         </label>
         <label>
           <span

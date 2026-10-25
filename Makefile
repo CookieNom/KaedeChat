@@ -8,7 +8,7 @@ KUBE_ARGS := --env-file "$(ENV_FILE)" $(if $(KUBE_CONFIG),--config "$(KUBE_CONFI
 .PHONY: dev-logs dev-federation-logs dev-prune dev-federation-prune
 .PHONY: help setup tools deploy status logs exec dev dev-cluster dev-down dev-federation dev-federation-down kubernetes-check env-check legacy-down
 .PHONY: hooks lock generate search-rebuild auto-update-enable auto-update-disable auto-update-status auto-update-run auto-update-check update-notices
-.PHONY: check test audit migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check nginx-check
+.PHONY: check test audit osv-audit migration migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check nginx-check
 .PHONY: mobile-check desktop-check desktop-lint desktop-test desktop-build desktop-dev
 help:
 	@echo "setup                 Configure production Kubernetes, storage, and host nginx"
@@ -28,6 +28,7 @@ help:
 	@echo "auto-update-run       Fetch and roll out a compatible production update"
 	@echo "auto-update-enable / auto-update-disable / auto-update-status"
 	@echo "check / test / audit  Run application checks in disposable k3d clusters"
+	@echo "osv-audit             Scan Python, JavaScript, Rust, and Dart lockfiles (Docker + network)"
 	@echo "migration             Generate a migration with m='description'"
 	@echo "migration-check / identity-check / chat-check / media-check / voice-check"
 	@echo "release-check / federation-check / federation-tls-check"
@@ -86,6 +87,15 @@ kubernetes-check:
 	python3 -m unittest discover -s deploy/tests -p 'test_*.py'
 	bash deploy/tests/test_setup_project_name.sh
 	bash -n setup.sh deploy/auto-update.sh deploy/kubernetes/import-image.sh
+
+audit: osv-audit
+
+osv-audit:
+	docker run --rm -v "$(CURDIR):/workspace:ro" -w /workspace \
+		ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 scan source \
+		--lockfile=backend/uv.lock --lockfile=sdk/python/uv.lock \
+		--lockfile=frontend/pnpm-lock.yaml --lockfile=desktop/Cargo.lock \
+		--lockfile=mobile/pubspec.lock
 
 check test audit migration-check identity-check chat-check media-check voice-check release-check federation-check federation-tls-check:
 	python3 deploy/kubernetes/check.py $@

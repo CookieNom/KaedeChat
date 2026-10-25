@@ -17,5 +17,8 @@ tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+kaede-protocol = { path = "../kaede-protocol" }
+
 [lints]
 workspace = true

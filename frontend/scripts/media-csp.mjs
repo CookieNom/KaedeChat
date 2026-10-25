@@ -1,6 +1,7 @@
 const LOCAL_HTTP_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|(?:[a-z0-9-]+\.)+localhost)$/i;
 const BUCKET_NAME = /^[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?$/;
 
+/** @param {string} configured @param {string} settingName */
 function exactUploadOrigin(configured, settingName) {
   const target = new URL(configured);
   if (

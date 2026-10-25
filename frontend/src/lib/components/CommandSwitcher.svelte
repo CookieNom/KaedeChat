@@ -115,7 +115,6 @@
 
   function choose(destination: Destination) {
     hide(false);
-    // eslint-disable-next-line svelte/no-navigation-without-resolve -- destinations are built exclusively from resolved route templates above
     void goto(destination.path);
   }
 

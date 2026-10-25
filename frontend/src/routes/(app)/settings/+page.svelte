@@ -682,7 +682,7 @@
 
 <main class="settings-page">
   <aside class="settings-nav">
-    <a class="settings-back" href={resolve('/home')}>
+    <a class="settings-back" href={resolve('home')}>
       <Icon name="arrow-left" size={18} />
       <span>{$t('ui_back_to_kaede_e13fc875')}</span>
     </a>
@@ -706,8 +706,7 @@
       <a href="#authorized-apps"
         ><Icon name="server" size={18} />{$t('ui_authorized_apps_c3ecd1b4')}</a
       >
-      <a href={resolve('/reports')}
-        ><Icon name="shield" size={18} />{$t('ui_my_reports_cc6e3f45')}</a
+      <a href={resolve('reports')}><Icon name="shield" size={18} />{$t('ui_my_reports_cc6e3f45')}</a
       >
       <p>{$t('ui_preferences_66962f72')}</p>
       <a href="#appearance"><Icon name="palette" size={18} />{$t('ui_appearance_3907fa7f')}</a>
@@ -722,10 +721,10 @@
       <a href="#privacy"><Icon name="lock" size={18} />{$t('ui_privacy_54a57c31')}</a>
       <a href="#advanced"><Icon name="settings" size={18} />{$t('ui_advanced_9f088dbe')}</a>
       <p>{$t('ui_build_and_operate_06e611b9')}</p>
-      <a href={resolve('/developers')}
+      <a href={resolve('developers')}
         ><Icon name="server" size={18} />{$t('ui_developer_portal_1eb68022')}</a
       >
-      {#if administrationAvailable}<a href={resolve('/administration')}
+      {#if administrationAvailable}<a href={resolve('administration')}
           ><Icon name="shield" size={18} />{$t('ui_administration_4b42c669')}</a
         >{/if}
     </nav>
@@ -744,7 +743,7 @@
       </div>
       <a
         class="icon-button settings-close"
-        href={resolve('/home')}
+        href={resolve('home')}
         aria-label={$t('ui_close_settings_0ccfef82')}>×</a
       >
     </header>
@@ -764,7 +763,7 @@
           <span><Icon name="user" size={28} /></span>
           <h2>{$t('ui_settings_are_unavailable_3197fb24')}</h2>
           <p>{$t('ui_return_to_kaede_and_try_opening_your_settings_7fcbbe13')}</p>
-          <a class="primary-button" href={resolve('/home')}>{$t('ui_return_home_bbcc935e')}</a>
+          <a class="primary-button" href={resolve('home')}>{$t('ui_return_home_bbcc935e')}</a>
         </section>
       {/if}
     {:else}

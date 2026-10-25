@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures_util::StreamExt;
@@ -418,6 +418,8 @@ pub async fn join_channel(
     media_key: Option<Vec<u8>>,
     request: VoiceGrantRequest<'_>,
 ) -> Result<VoiceHandle, VoiceError> {
+    let started = Instant::now();
+    tracing::info!("voice join: requesting grant");
     let grant: VoiceGrant = api
         .post(
             &format!("channels/{channel}/voice/token"),
@@ -429,6 +431,10 @@ pub async fn join_channel(
             }),
         )
         .await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: grant received"
+    );
     Box::pin(join(grant, media, expected_policy, media_key, true)).await
 }
 
@@ -446,6 +452,8 @@ pub async fn join_call(
     media_key: Option<Vec<u8>>,
     request: VoiceGrantRequest<'_>,
 ) -> Result<VoiceHandle, VoiceError> {
+    let started = Instant::now();
+    tracing::info!("voice join: requesting grant");
     let grant: VoiceGrant = api
         .post(
             &format!("calls/{call}/voice/token"),
@@ -457,6 +465,10 @@ pub async fn join_call(
             }),
         )
         .await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: grant received"
+    );
     Box::pin(join(grant, media, expected_policy, media_key, false)).await
 }
 
@@ -468,9 +480,16 @@ async fn join(
     media_key: Option<Vec<u8>>,
     allow_priority_speaker: bool,
 ) -> Result<VoiceHandle, VoiceError> {
+    // Cumulative milestones distinguish cold native setup from network delays.
+    let started = Instant::now();
+    tracing::info!("voice join: preparing media");
     let initially_muted = media.initially_muted;
     let initially_deafened = media.initially_deafened;
     let room_options = media_room_options(&grant, &expected_policy, media_key)?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: room options ready"
+    );
     let move_session_id = grant.move_session_id.clone();
     if grant.can_speak
         && media.capture.mode == kaede_audio::InputMode::VoiceActivity
@@ -491,6 +510,10 @@ async fn join(
     let (video_tx, video_rx) = mpsc::channel(16);
     let mut processor_chain = ProcessorChain::default();
     processor_chain.push(Box::new(SpeechProcessor::from_settings(&media.capture)));
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: speech processor ready"
+    );
     // Do not open the operating-system microphone when the server grant is
     // listen-only. This avoids an unnecessary privacy prompt and ensures that
     // a missing SPEAK grant cannot accidentally feed a local capture graph.
@@ -503,9 +526,23 @@ async fn join(
             .gate
             .set_muted(initially_muted || initially_deafened);
     }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: capture ready"
+    );
     let playback = NativePlayback::open(media.output_device.as_deref())?;
     playback.set_deafened(initially_deafened);
     let input_level = capture.as_ref().map(|capture| capture.gate.clone());
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: playback ready, initializing WebRTC"
+    );
+    // Retain the runtime through connect so timing it cannot initialize it twice.
+    let runtime = livekit::rtc_engine::lk_runtime::LkRuntime::instance();
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: WebRTC ready, connecting room"
+    );
     let room_name = grant.room.clone();
     let (room, events) = Box::pin(Room::connect(
         &grant.url,
@@ -514,6 +551,11 @@ async fn join(
     ))
     .await?;
 
+    drop(runtime);
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: room connected"
+    );
     let source = if grant.can_speak {
         let source = NativeAudioSource::new(
             AudioSourceOptions::default(),
@@ -524,6 +566,10 @@ async fn join(
         let track = LocalAudioTrack::create_audio_track(
             "microphone",
             RtcAudioSource::Native(source.clone()),
+        );
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "voice join: microphone track ready, publishing"
         );
         room.local_participant()
             .publish_track(
@@ -545,6 +591,10 @@ async fn join(
     } else {
         None
     };
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "voice join: media ready"
+    );
     let _ = status_tx.send(VoiceStatus::Connected {
         room: room_name,
         can_speak: grant.can_speak,

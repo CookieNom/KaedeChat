@@ -1127,7 +1127,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                                         Theme.of(context).colorScheme.error)),
                           ),
                         if (_page?.authorityCoverage
-                            case 'unavailable' || 'unsupported')
+                            case 'unavailable' || 'unsupported' || 'partial')
                           Padding(
                             padding: EdgeInsets.only(top: 8),
                             child: Text(L10n.of(context)

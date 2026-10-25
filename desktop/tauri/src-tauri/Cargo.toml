@@ -37,7 +37,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
-tauri-plugin-updater = "2"
+# Official ZIP 9 fix; switch back to crates.io after the next updater release.
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "ba98bfadc4c868c9a7e1a226c83af528e1f11b89" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

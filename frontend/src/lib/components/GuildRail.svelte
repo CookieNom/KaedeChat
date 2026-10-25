@@ -344,7 +344,7 @@
   <a
     class:active={homeActive}
     class="spine-home"
-    href={resolve(homeHref as '/home')}
+    href={resolve(homeHref.slice(1) as 'home')}
     aria-label={homeNotificationCount
       ? `Home, ${homeUnreadCount} unread direct messages, ${pendingRequests} friend requests`
       : $t('ui_home_3a786953')}
@@ -369,7 +369,7 @@
           data-navigation-index={itemIndex}
           class:active={activeGuildKey === item.guild}
           class:dragging={draggedGuild === item.guild}
-          href={resolve(guildHref(guild) as `/g/${string}/${string}`)}
+          href={resolve(guildHref(guild).slice(1) as `g/${string}/${string}`)}
           draggable={!guildNavigation.saving}
           aria-haspopup="menu"
           aria-expanded={contextMenuIsFor(guild) ? 'true' : undefined}
@@ -435,7 +435,7 @@
               <a
                 class:active={activeGuildKey === member.ref}
                 class:dragging={draggedGuild === member.ref}
-                href={resolve(guildHref(member.guild) as `/g/${string}/${string}`)}
+                href={resolve(guildHref(member.guild).slice(1) as `g/${string}/${string}`)}
                 draggable={!guildNavigation.saving}
                 aria-haspopup="menu"
                 aria-expanded={contextMenuIsFor(member.guild) ? 'true' : undefined}

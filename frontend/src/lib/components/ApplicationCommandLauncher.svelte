@@ -1,7 +1,6 @@
 <script lang="ts">
   import { t } from '$lib/ui/locale';
 
-  /* eslint-disable svelte/no-navigation-without-resolve -- Directory route helpers validate the path and resolve the configured base path. */
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
@@ -176,7 +175,7 @@
   function resolvedDestination(path: string): string {
     return path.startsWith('/application-directory/')
       ? resolveApplicationDirectoryPath(path)
-      : resolve(path as `/applications/${string}/install/${string}`);
+      : resolve(path.slice(1) as `applications/${string}/install/${string}`);
   }
 
   function loadInstalledDestination(

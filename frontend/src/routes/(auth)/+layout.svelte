@@ -11,8 +11,8 @@
 
 <main class="auth-shell">
   <header class="auth-topbar">
-    <a class="wordmark" href={resolve('/')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
-    <a href={onLogin ? resolve('/register') : resolve('/login')}>
+    <a class="wordmark" href={resolve('')}><span>K</span>{$t('ui_kaede_chat_8f3c1776')}</a>
+    <a href={onLogin ? resolve('register') : resolve('login')}>
       {onLogin ? $t('ui_create_account_798ca2ce') : $t('ui_sign_in_bfd402b2')}
     </a>
   </header>

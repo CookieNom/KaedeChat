@@ -2,7 +2,11 @@ import { Permission } from '$lib/generated/permissions';
 import { hasAllPermissions, hasAnyPermission } from './permissions';
 
 export type AutoModTrigger =
-  'keyword' | 'spam' | 'keyword_preset' | 'mention_spam' | 'member_profile';
+  | 'keyword'
+  | 'spam'
+  | 'keyword_preset'
+  | 'mention_spam'
+  | 'member_profile';
 
 export interface AutoModDraft {
   name: string;

@@ -45,7 +45,7 @@
       sessionStorage.removeItem('kaede.gateway.sequence');
       sessionStorage.removeItem('kaede.return-to');
       localStorage.removeItem('kaede.native.last-route');
-      window.location.replace(resolve('/home'));
+      window.location.replace(resolve('home'));
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not switch accounts. Try again or sign in again.');
       busy = false;
@@ -94,7 +94,7 @@
         <p>{busy ? 'Loading accounts…' : 'No saved accounts yet.'}</p>
       {/each}
     </div>
-    <a class="primary-button" href={resolve('/login?add-account=1')}
+    <a class="primary-button" href={resolve('login?add-account=1')}
       >Add an account / sign in again</a
     >
     <p class="field-note">
@@ -113,7 +113,7 @@
       >Back to current account</button
     >
   {:else}
-    <a href={resolve('/home')}>Back to chat</a>
+    <a href={resolve('home')}>Back to chat</a>
   {/if}
 </div>
 

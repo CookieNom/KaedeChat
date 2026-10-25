@@ -580,7 +580,7 @@
 
       <div class="user-popover-actions">
         {#if isSelf}
-          <a class="user-popover-primary" href={resolve('/settings#profile')} onclick={onClose}>
+          <a class="user-popover-primary" href={resolve('settings#profile')} onclick={onClose}>
             <Icon name="edit" size={17} />
             <span>{$t('ui_edit_profile_15c4aa13')}</span>
           </a>
@@ -599,7 +599,7 @@
           <a
             class="user-popover-primary"
             href={resolve(
-              `/applications/${encodeURIComponent(profileApplication.application_ref)}/install/${encodeURIComponent(profileApplication.install_template.slug)}` as `/applications/${string}/install/${string}`
+              `applications/${encodeURIComponent(profileApplication.application_ref)}/install/${encodeURIComponent(profileApplication.install_template.slug)}` as `applications/${string}/install/${string}`
             )}
             onclick={onClose}
           >
@@ -613,7 +613,7 @@
           {#if profileApplication.directory_listed}
             <a
               href={resolve(
-                `/application-directory/${encodeURIComponent(profileApplication.application_ref)}` as `/application-directory/${string}`
+                `application-directory/${encodeURIComponent(profileApplication.application_ref)}` as `application-directory/${string}`
               )}
               onclick={onClose}
             >

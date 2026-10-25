@@ -54,7 +54,7 @@
         <li>{$t('ui_to_secure_the_instance_and_investigate_abuse__def65a9e')}</li>
         <li>
           {$t('ui_to_enforce_the_a3de79a8')}
-          <a href={resolve('/terms')}>{$t('ui_terms_of_service_529f0e5f')}</a>
+          <a href={resolve('terms')}>{$t('ui_terms_of_service_529f0e5f')}</a>
           {$t('ui_and_community_rules_b954c20b')}
         </li>
         <li>{$t('ui_to_respond_to_support_and_moderation_requests_69d9c052')}</li>

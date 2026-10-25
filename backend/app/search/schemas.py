@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from app.chat.custom_emojis import canonical_reaction_emoji
 from app.core.model_validation import UnambiguousInputModel
 from app.core.types import EntityRef
 
@@ -55,11 +56,17 @@ class MessageSearchFilters(UnambiguousInputModel):
     min_id: EntityRef | None = None
     before: datetime | None = None
     after: datetime | None = None
+    reaction: str | None = Field(default=None, max_length=512)
     pinned: bool | None = None
     author_type: Literal["user", "bot", "webhook"] | None = None
     author_types: list[Literal["user", "bot", "webhook", "-user", "-bot", "-webhook"]] = Field(
         default_factory=list, max_length=6
     )
+
+    @field_validator("reaction")
+    @classmethod
+    def canonical_reaction(cls, value: str | None) -> str | None:
+        return canonical_reaction_emoji(value) if value is not None else None
 
     @field_validator("embed_providers", "attachment_filenames")
     @classmethod
@@ -184,6 +191,7 @@ class MessageSearchRequest(UnambiguousInputModel):
                 self.filters.before,
                 self.filters.after,
                 self.filters.pinned is not None,
+                self.filters.reaction,
                 self.filters.author_type,
                 self.filters.author_types,
             )

@@ -55,7 +55,7 @@
       });
       if (generation !== submissionGeneration || !open) return;
       const channel = firstNavigableChannel(guild.channels);
-      window.location.assign(channel ? guildChannelPath(guild, channel) : resolve('/home'));
+      window.location.assign(channel ? guildChannelPath(guild, channel) : resolve('home'));
     } catch (caught) {
       if (generation !== submissionGeneration || !open) return;
       error = userErrorMessage(

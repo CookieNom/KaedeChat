@@ -1,3 +1,5 @@
+import oxlint from 'eslint-plugin-oxlint';
+import { fileURLToPath } from 'node:url';
 import js from '@eslint/js';
 import globals from 'globals';
 import svelte from 'eslint-plugin-svelte';
@@ -27,7 +29,12 @@ export default tseslint.config(
       '.svelte-kit/',
       'src/lib/generated/',
       'src/lib/e2ee/wasm/kaede_e2ee.js',
+      'src/lib/e2ee/wasm/kaede_e2ee.d.ts',
       'src/lib/e2ee/wasm/kaede_e2ee_bg.wasm.d.ts'
     ]
-  }
+  },
+  // Oxlint handles scripts; keep full ESLint coverage for Svelte templates.
+  ...(await oxlint.buildFromConfigFile(fileURLToPath(new URL('./.oxlintrc.json', import.meta.url))))
+    .filter((config) => config.rules)
+    .map((config) => ({ ...config, ignores: [...(config.ignores ?? []), '**/*.svelte'] }))
 );

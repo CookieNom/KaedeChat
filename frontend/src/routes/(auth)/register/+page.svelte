@@ -140,7 +140,7 @@
       <h1 class="auth-title">{$t('ui_welcome_to_kaede_7ed4553a')}</h1>
       <p class="lede">{$t('ui_your_account_was_created_you_can_sign_in_with_c8ac6468')}</p>
       <p class="form-foot">
-        <a href={resolve('/login')}>{$t('ui_continue_to_sign_in_d398cd0a')}</a>
+        <a href={resolve('login')}>{$t('ui_continue_to_sign_in_d398cd0a')}</a>
       </p>
     {/if}
   </div>
@@ -256,6 +256,6 @@
   </form>
   <p class="form-foot">
     {$t('ui_already_have_an_account_e77fea93')}
-    <a href={resolve('/login')}>{$t('ui_sign_in_bfd402b2')}</a>
+    <a href={resolve('login')}>{$t('ui_sign_in_bfd402b2')}</a>
   </p>
 {/if}

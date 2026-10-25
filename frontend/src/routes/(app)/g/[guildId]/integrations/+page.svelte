@@ -110,7 +110,7 @@
     botsLoading = false;
     notice = '';
     error = $t('ui_this_guild_is_unavailable_or_you_no_longer_ha_70ba0e65');
-    window.location.assign(resolve('/home'));
+    window.location.assign(resolve('home'));
   }
 
   async function load(targetGuildRef: string) {
@@ -331,7 +331,7 @@
 <main>
   <header>
     <div>
-      <a href={resolve(`/g/${encodeURIComponent(guildRef)}/settings`)}
+      <a href={resolve(`g/${encodeURIComponent(guildRef)}/settings`)}
         >{$t('ui_guild_settings_30da895f')}</a
       ><span>{$t('ui_guild_integrations_ce0e63b1')}</span>
       <h1>{$t('ui_integrations_090512d9')}</h1>

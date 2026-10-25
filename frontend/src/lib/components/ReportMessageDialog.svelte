@@ -359,8 +359,7 @@
           bind:value={description}
           maxlength="2000"
           rows="4"
-          disabled={busy || Boolean(createdReportId)}
-        ></textarea>
+          disabled={busy || Boolean(createdReportId)}></textarea>
       </label>
       {#if requiresDisclosure}
         <label class="disclosure-consent">

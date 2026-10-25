@@ -3,7 +3,9 @@ import { canonicalReactionEmoji } from './reactions';
 import type { Message, UserSummary } from './types';
 
 export type ReactionDispatchName =
-  'MESSAGE_REACTION_ADD' | 'MESSAGE_REACTION_REMOVE' | 'MESSAGE_UPDATE';
+  | 'MESSAGE_REACTION_ADD'
+  | 'MESSAGE_REACTION_REMOVE'
+  | 'MESSAGE_UPDATE';
 
 export interface ReactionUpdate {
   id: string;

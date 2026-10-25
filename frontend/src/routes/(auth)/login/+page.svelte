@@ -113,7 +113,7 @@
       ticket = null;
       const returnTo = sessionStorage.getItem('kaede.return-to');
       sessionStorage.removeItem('kaede.return-to');
-      window.location.replace(safeReturnPath(returnTo, window.location.origin) ?? resolve('/home'));
+      window.location.replace(safeReturnPath(returnTo, window.location.origin) ?? resolve('home'));
     } catch (caught) {
       if (!ticket) preparedVaultKey = null;
       if (caught instanceof ApiError) {
@@ -174,7 +174,7 @@
 
 {#if page.url.searchParams.has('add-account')}
   <p class="field-note">Sign in to another account. Your existing sign-ins stay saved.</p>
-  <a href={resolve('/accounts')}>Back to saved accounts</a>
+  <a href={resolve('accounts')}>Back to saved accounts</a>
 {/if}
 <p class="eyebrow">{$t('ui_welcome_back_66212495')}</p>
 <h1 class="auth-title">{$t('ui_pick_up_the_thread_767b206c')}</h1>
@@ -274,9 +274,9 @@
   </div>
 {/if}
 <p class="form-foot">
-  {#if recoveryEnabled === true}<a href={resolve('/forgot-password')}
+  {#if recoveryEnabled === true}<a href={resolve('forgot-password')}
       >{$t('ui_forgot_password_30c1d8d3')}</a
     > ·
   {/if}{$t('ui_new_here_38c1c445')}
-  <a href={resolve('/register')}>{$t('ui_create_an_account_86033f75')}</a>
+  <a href={resolve('register')}>{$t('ui_create_an_account_86033f75')}</a>
 </p>

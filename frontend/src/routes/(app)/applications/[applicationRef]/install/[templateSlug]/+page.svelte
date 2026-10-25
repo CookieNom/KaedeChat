@@ -11,9 +11,11 @@
     type UserApplicationContext
   } from '$lib/chat/application-installations';
   import { onDestroy } from 'svelte';
-  let { data } = $props<{
+  let {
+    data
+  }: {
     data: { applicationRef: string; templateSlug: string; returnTo: string };
-  }>();
+  } = $props();
   interface Guild {
     id: string;
     origin_domain: string;
@@ -281,7 +283,8 @@
 >
 <!-- eslint-disable svelte/no-navigation-without-resolve -- privacy and support destinations are external URLs supplied by the application -->
 <main>
-  <a class="back" href={resolve(data.returnTo as '/home')}>{$t('ui_back_to_kaede_bfbafc02')}</a
+  <a class="back" href={resolve(data.returnTo.slice(1) as 'home')}
+    >{$t('ui_back_to_kaede_bfbafc02')}</a
   >{#if error}<div class="notice error" role="alert">
       {error}
     </div>{/if}{#if loading || !routeIsLoaded}<div class="notice" role="status">
@@ -433,7 +436,7 @@
           >
         </div>
         {#if installed}
-          <a class="return-link" href={resolve(data.returnTo as '/home')}
+          <a class="return-link" href={resolve(data.returnTo.slice(1) as 'home')}
             >{$t('ui_return_to_kaede_df76c5df')}</a
           >
         {:else if invite.application.supported_install_types.includes('guild_install')}<button

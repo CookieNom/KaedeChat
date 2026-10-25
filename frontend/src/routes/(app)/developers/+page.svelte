@@ -146,8 +146,7 @@
               bind:value={description}
               maxlength="1000"
               rows="3"
-              placeholder={$t('ui_what_does_this_application_do_868d227a')}
-            ></textarea>
+              placeholder={$t('ui_what_does_this_application_do_868d227a')}></textarea>
           </label>
         </div>
         <footer>
@@ -184,10 +183,7 @@
       {:else}
         <div class="app-grid">
           {#each applications as application (application.ref)}
-            <a
-              class="app-card"
-              href={resolve(`/developers/${encodeURIComponent(application.ref)}`)}
-            >
+            <a class="app-card" href={resolve(`developers/${encodeURIComponent(application.ref)}`)}>
               <span class="avatar" aria-hidden="true">
                 {#if application.icon_hash}
                   <img

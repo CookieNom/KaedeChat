@@ -3055,5 +3055,11 @@
   "profile_account_created": "Account created",
   "profile_joined_guild": "Joined guild",
   "profile_friends_since": "Friends since",
-  "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for # day} other {Friends for # days}}"
+  "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for # day} other {Friends for # days}}",
+  "search_reaction": "Reaction",
+  "search_choose_reaction": "Choose reaction emoji",
+  "search_change_reaction": "Change reaction filter",
+  "search_change_emoji": "Change emoji",
+  "search_remove_reaction": "Remove reaction filter",
+  "search_custom_emoji_error": "Could not load custom emojis."
 }

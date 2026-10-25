@@ -2,7 +2,14 @@ import { canonicalReactionEmoji } from './reactions';
 import { parseCanonicalEntityRef } from './refs';
 
 export type EmojiCategory =
-  'people' | 'nature' | 'food' | 'activity' | 'travel' | 'objects' | 'symbols' | 'flags';
+  | 'people'
+  | 'nature'
+  | 'food'
+  | 'activity'
+  | 'travel'
+  | 'objects'
+  | 'symbols'
+  | 'flags';
 
 export interface EmojiOption {
   value: string;

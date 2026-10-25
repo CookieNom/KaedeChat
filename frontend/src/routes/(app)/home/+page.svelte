@@ -136,7 +136,7 @@
 
   function guildLandingPath(guild: Guild): string {
     const channel = firstNavigableChannel(guild.channels);
-    return channel ? guildChannelPath(guild, channel) : resolve('/home');
+    return channel ? guildChannelPath(guild, channel) : resolve('home');
   }
 
   function applyDispatch(dispatch: Dispatch) {
@@ -334,7 +334,7 @@
       if (routeGeneration !== loadGeneration || snapshot !== snapshotGeneration) return;
       replay(batch);
       if (caught instanceof ApiError && caught.status === 401) {
-        window.location.replace(resolve('/login'));
+        window.location.replace(resolve('login'));
       } else if (!recovering || !error) {
         error = userErrorMessage(
           caught,
@@ -651,7 +651,7 @@
 <main class="home-app">
   <GuildRail
     {guilds}
-    homeHref={resolve('/home')}
+    homeHref={resolve('home')}
     homeActive
     {homeUnreadCount}
     guildHref={guildLandingPath}
@@ -693,13 +693,13 @@
     <nav class="home-nav" aria-label={$t('ui_home_3a786953')}>
       <a
         class:active={!friendsView}
-        href={resolve('/home')}
+        href={resolve('home')}
         aria-current={!friendsView ? 'page' : undefined}
         ><Icon name="home" size={18} />{$t('ui_overview_d4b1ea57')}</a
       >
       <a
         class:active={friendsView}
-        href={resolve('/home/friends')}
+        href={resolve('home/friends')}
         aria-current={friendsView ? 'page' : undefined}
         ><Icon name="users" size={18} />{$t('ui_friends_requests_2cb22f8b')}
         {#if incomingRequests.length > 0}
@@ -750,7 +750,7 @@
       <AccountPanel user={currentUser} />
       <a
         class="icon-button"
-        href={resolve('/settings')}
+        href={resolve('settings')}
         aria-label={$t('ui_user_settings_2b363e87')}
       >
         <Icon name="settings" size={18} />
@@ -797,7 +797,7 @@
         >
           <Icon name="search" size={19} />
         </button>
-        <a class="icon-button" href={resolve('/settings')} aria-label={$t('ui_settings_74a883a0')}>
+        <a class="icon-button" href={resolve('settings')} aria-label={$t('ui_settings_74a883a0')}>
           <Icon name="settings" size={19} />
         </a>
       </div>

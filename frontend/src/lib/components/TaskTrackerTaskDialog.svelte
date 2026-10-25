@@ -258,8 +258,7 @@
           maxlength="10000"
           rows="5"
           placeholder={$t('ui_add_context_acceptance_criteria_or_links_cfa914ec')}
-          disabled={busy || readOnly || assignmentOnly}
-        ></textarea>
+          disabled={busy || readOnly || assignmentOnly}></textarea>
       </label>
       <label>
         <span>{$t('ui_status_920e413c')}</span>

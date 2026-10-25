@@ -316,8 +316,7 @@
                 onDescriptionLocalizationsChange({
                   ...descriptionLocalizations,
                   [locale]: (event.currentTarget as HTMLTextAreaElement).value
-                })}
-            ></textarea></label
+                })}></textarea></label
           >
         </div>
       {/each}

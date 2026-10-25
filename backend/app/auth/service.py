@@ -125,15 +125,23 @@ async def rotate_refresh_token(
     ):
         raise InvalidTokenError
     store = AccessTokenStore(redis, settings.access_token_ttl_seconds)
-    if record.previous_token_hash == digest:
+    grace = timedelta(seconds=settings.refresh_reuse_grace_seconds)
+    reused = record.previous_token_hash == digest
+    if reused and now - record.last_used_at > grace:
         record.revoked_at = now
         await session.commit()
         await store.revoke_session(record.id)
         raise InvalidTokenError
     new_refresh = new_refresh_token()
-    record.previous_token_hash = record.refresh_token_hash
-    record.refresh_token_hash = token_hash(new_refresh)
-    record.last_used_at = now
+    if reused:
+        # The client most likely never received the last rotation. Replace that
+        # undelivered token, but keep the superseded one as `previous` and leave
+        # `last_used_at` alone so retries cannot extend the grace window.
+        record.refresh_token_hash = token_hash(new_refresh)
+    else:
+        record.previous_token_hash = record.refresh_token_hash
+        record.refresh_token_hash = token_hash(new_refresh)
+        record.last_used_at = now
     record.expires_at = min(
         now + timedelta(days=settings.refresh_sliding_days), record.absolute_expires_at
     )

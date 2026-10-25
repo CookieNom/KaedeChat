@@ -948,7 +948,7 @@ fn enumerate(input: bool) -> Result<Vec<AudioDevice>, AudioError> {
 
 fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<Device, AudioError> {
     select_device(
-        host.input_devices()?,
+        || host.input_devices().map_err(AudioError::from),
         host.default_input_device(),
         id,
         |device| device.id().ok().map(|id| id.to_string()),
@@ -957,21 +957,21 @@ fn select_input(host: &cpal::Host, id: Option<&str>) -> Result<Device, AudioErro
 
 fn select_output(host: &cpal::Host, id: Option<&str>) -> Result<Device, AudioError> {
     select_device(
-        host.output_devices()?,
+        || host.output_devices().map_err(AudioError::from),
         host.default_output_device(),
         id,
         |device| device.id().ok().map(|id| id.to_string()),
     )
 }
 
-fn select_device<T>(
-    mut devices: impl Iterator<Item = T>,
+fn select_device<T, I: Iterator<Item = T>>(
+    devices: impl FnOnce() -> Result<I, AudioError>,
     default: Option<T>,
     requested: Option<&str>,
     device_id: impl Fn(&T) -> Option<String>,
 ) -> Result<T, AudioError> {
     if let Some(requested) = requested.filter(|id| !id.is_empty() && *id != "default") {
-        for device in devices {
+        for device in devices()? {
             if device_id(&device).as_deref() == Some(requested) {
                 return Ok(device);
             }
@@ -980,9 +980,11 @@ fn select_device<T>(
     }
     // Windows can expose usable endpoints without reporting a system default.
     // A missing custom device falls back to the system default above.
-    default
-        .or_else(|| devices.next())
-        .ok_or(AudioError::DeviceNotFound)
+    // Avoid enumerating every endpoint when the system default is usable.
+    if let Some(default) = default {
+        return Ok(default);
+    }
+    devices()?.next().ok_or(AudioError::DeviceNotFound)
 }
 
 trait PcmSample: cpal::SizedSample + Send + 'static {
@@ -1104,28 +1106,42 @@ mod tests {
         let id = |device: &&str| Some((*device).to_owned());
         for requested in [None, Some(""), Some("default")] {
             assert_eq!(
-                select_device(["mic", "usb"].into_iter(), None, requested, id).ok(),
+                select_device(|| Ok(["mic", "usb"].into_iter()), None, requested, id).ok(),
                 Some("mic")
             );
             assert_eq!(
-                select_device(["mic", "usb"].into_iter(), Some("usb"), requested, id).ok(),
+                select_device(
+                    || -> Result<std::array::IntoIter<&str, 0>, AudioError> {
+                        panic!("system default must not enumerate devices")
+                    },
+                    Some("usb"),
+                    requested,
+                    id,
+                )
+                .ok(),
                 Some("usb")
             );
         }
         assert_eq!(
-            select_device(["mic", "usb"].into_iter(), Some("mic"), Some("usb"), id).ok(),
+            select_device(
+                || Ok(["mic", "usb"].into_iter()),
+                Some("mic"),
+                Some("usb"),
+                id
+            )
+            .ok(),
             Some("usb")
         );
         assert_eq!(
-            select_device(["mic"].into_iter(), Some("mic"), Some("missing"), id).ok(),
+            select_device(|| Ok(["mic"].into_iter()), Some("mic"), Some("missing"), id).ok(),
             Some("mic")
         );
         assert!(matches!(
-            select_device(["mic"].into_iter(), None, Some("missing"), id),
+            select_device(|| Ok(["mic"].into_iter()), None, Some("missing"), id),
             Err(AudioError::DeviceNotFound)
         ));
         assert!(matches!(
-            select_device([].into_iter(), None, None, id),
+            select_device(|| Ok([].into_iter()), None, None, id),
             Err(AudioError::DeviceNotFound)
         ));
     }

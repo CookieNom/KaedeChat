@@ -58,7 +58,7 @@
     tabindex="-1"
   >
     <p class="lede">{$t('ui_if_that_address_has_an_account_a_reset_link_i_480871ae')}</p>
-    <p class="form-foot"><a href={resolve('/login')}>{$t('ui_return_to_sign_in_8504054f')}</a></p>
+    <p class="form-foot"><a href={resolve('login')}>{$t('ui_return_to_sign_in_8504054f')}</a></p>
   </div>
 {:else}<form
     onsubmit={(event) => {
@@ -82,4 +82,4 @@
       >{busy ? $t('ui_sending_b8ed5279') : $t('ui_send_reset_link_708c5d67')}</button
     >
   </form>
-  <p class="form-foot"><a href={resolve('/login')}>{$t('ui_back_to_sign_in_71fe31cc')}</a></p>{/if}
+  <p class="form-foot"><a href={resolve('login')}>{$t('ui_back_to_sign_in_71fe31cc')}</a></p>{/if}

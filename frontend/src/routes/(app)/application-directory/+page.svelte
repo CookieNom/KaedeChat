@@ -1,7 +1,6 @@
 <script lang="ts">
   import { t } from '$lib/ui/locale';
 
-  /* eslint-disable svelte/no-navigation-without-resolve -- App Directory helpers validate internal path prefixes and resolve the configured base path. */
   import { replaceState } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
@@ -193,7 +192,7 @@
 <svelte:head><title>{$t('ui_app_directory_kaede_chat_a46ee351')}</title></svelte:head>
 
 <main aria-busy={loading || loadingMore}>
-  <nav><a href={resolve(backPath as '/home')}>{$t('ui_back_to_kaede_bfbafc02')}</a></nav>
+  <nav><a href={resolve(backPath.slice(1) as 'home')}>{$t('ui_back_to_kaede_bfbafc02')}</a></nav>
   <header class="hero">
     <span>{$t('ui_app_directory_b9932dc9')}</span>
     <h1>{$t('ui_find_apps_for_your_community_6360a471')}</h1>

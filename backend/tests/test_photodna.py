@@ -292,7 +292,10 @@ def test_sdk_adapter_uses_microsoft_edge_v2_contract(monkeypatch: pytest.MonkeyP
     assert calls == [(160, 160, 0)]
 
 
-def test_sdk_adapter_hashes_every_animation_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("image_format", "first_mode"), [("GIF", "RGB"), ("MPO", "L")])
+def test_sdk_adapter_hashes_every_animation_frame(
+    monkeypatch: pytest.MonkeyPatch, image_format: str, first_mode: str
+) -> None:
     encoded = base64.b64encode(b"x" * 924)
     calls: list[tuple[int, int, int]] = []
 
@@ -306,7 +309,8 @@ def test_sdk_adapter_hashes_every_animation_frame(monkeypatch: pytest.MonkeyPatc
             stride: int,
             options: object,
         ) -> int:
-            del pixels, options
+            assert len(bytes(pixels)) == width * height * 3
+            assert options == 0x90
             output.raw = encoded
             calls.append((width, height, stride))
             return 0
@@ -322,9 +326,9 @@ def test_sdk_adapter_hashes_every_animation_frame(monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.setattr(photodna_sdk, "_sdk", lambda: (edge, Generator()))
     rendered = io.BytesIO()
-    first = Image.new("RGB", (160, 160), "teal")
+    first = Image.new(first_mode, (160, 160), "teal")
     second = Image.new("RGB", (160, 160), "purple")
-    first.save(rendered, format="GIF", save_all=True, append_images=[second], duration=100)
+    first.save(rendered, format=image_format, save_all=True, append_images=[second], duration=100)
 
     assert photodna_sdk._hashes(rendered.getvalue()) == [
         encoded.decode("ascii"),

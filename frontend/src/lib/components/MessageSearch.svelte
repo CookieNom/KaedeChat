@@ -23,6 +23,8 @@
   import { assetUrl } from '$lib/media/assets';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import Icon from './Icon.svelte';
+  import ReactionSearchField from './ReactionSearchField.svelte';
+  import type { CustomEmojiOption } from '$lib/chat/emojis';
   import GuildMemberPicker from './GuildMemberPicker.svelte';
   import MessageRow from './MessageRow.svelte';
 
@@ -34,6 +36,7 @@
     channel,
     channels = [],
     users = [],
+    customEmojis,
     onJump,
     placement = 'dialog'
   }: {
@@ -44,6 +47,7 @@
     channel?: Channel | null;
     channels?: Channel[];
     users?: UserSummary[];
+    customEmojis?: CustomEmojiOption[];
     onJump?: (result: MessageSearchResult) => void | Promise<void>;
     placement?: 'dialog' | 'header';
   } = $props();
@@ -102,6 +106,7 @@
   let mentionRef = $state('');
   let selectedUsers = $state<UserSummary[]>([]);
   let has = $state<string[]>([]);
+  let reaction = $state('');
   let pinned = $state<'any' | 'yes' | 'no'>('any');
   let authorType = $state<'any' | MessageSearchAuthorType>('any');
   let sort = $state<'relevance' | 'newest' | 'oldest'>('relevance');
@@ -145,6 +150,7 @@
       authorRef ||
       mentionRef ||
       has.length ||
+      reaction ||
       pinned !== 'any' ||
       authorType !== 'any' ||
       before ||
@@ -155,6 +161,7 @@
     Number(Boolean(authorRef)) +
       Number(Boolean(mentionRef)) +
       has.length +
+      Number(Boolean(reaction)) +
       Number(pinned !== 'any') +
       Number(authorType !== 'any') +
       Number(Boolean(before)) +
@@ -257,6 +264,7 @@
     authorRef = '';
     mentionRef = '';
     has = [];
+    reaction = '';
     pinned = 'any';
     authorType = 'any';
     before = '';
@@ -408,6 +416,7 @@
             authors: authorRef ? [authorRef] : [],
             mentions: mentionRef ? [mentionRef] : [],
             has,
+            ...(reaction ? { reaction } : {}),
             pinned: pinned === 'any' ? null : pinned === 'yes',
             author_type: authorType === 'any' ? null : authorType,
             before: before ? new Date(`${before}T23:59:59`).toISOString() : null,
@@ -750,6 +759,7 @@
                       }}
                     />
                   </label>
+                  <ReactionSearchField bind:value={reaction} {customEmojis} />
                   <label
                     >{$t('ui_sort_bec69036')}<select bind:value={sort}
                       ><option value="relevance">{$t('ui_most_relevant_6e9317d8')}</option><option
@@ -895,7 +905,7 @@
             {#if response.indexing}<p class="partial" role="status">
                 {$t('ui_search_is_catching_up_with_recent_messages_re_c79a234b')}
               </p>{/if}
-            {#if response.coverage.authority === 'unavailable' || response.coverage.authority === 'unsupported'}<p
+            {#if response.coverage.authority === 'unavailable' || response.coverage.authority === 'unsupported' || response.coverage.authority === 'partial'}<p
                 class="partial"
                 role="status"
               >

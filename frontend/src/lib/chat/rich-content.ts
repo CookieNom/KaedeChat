@@ -104,7 +104,10 @@ export interface TextInputComponent {
 }
 
 export type MessageComponent =
-  ButtonComponent | StringSelectComponent | EntitySelectComponent | TextInputComponent;
+  | ButtonComponent
+  | StringSelectComponent
+  | EntitySelectComponent
+  | TextInputComponent;
 
 export interface ActionRow {
   type: 1;

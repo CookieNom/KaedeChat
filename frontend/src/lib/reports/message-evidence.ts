@@ -1,7 +1,8 @@
 import type { Message } from '$lib/chat/types';
 
 export type EncryptedReportDisclosure =
-  { available: false; content: null } | { available: true; content: string };
+  | { available: false; content: null }
+  | { available: true; content: string };
 
 /**
  * Preserve the security-significant distinction between an MLS application

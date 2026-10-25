@@ -36,8 +36,18 @@ const PUBLIC_AUTH_PATHS = new Set([
 
 export type RefreshResult = 'ok' | 'invalid' | 'unavailable';
 
+// Rust reports a session it has already discarded locally without an HTTP
+// status; treat it like the server's 401 so the app returns to sign-in.
+const NATIVE_SESSION_ENDED_CODES = new Set(['NOT_AUTHENTICATED', 'ACCOUNT_SESSION_EXPIRED']);
+
 let refreshPromise: Promise<RefreshResult> | null = null;
 const trustedNativeMessages = new WeakMap<Response, string>();
+
+function nativeErrorStatus(caught: unknown): number {
+  const error = nativeError(caught);
+  if (error.code && NATIVE_SESSION_ENDED_CODES.has(error.code)) return 401;
+  return error.status && error.status > 0 ? error.status : 503;
+}
 
 function isStructuredNativeError(value: unknown): value is NativeError & {
   code: string;
@@ -82,9 +92,14 @@ async function performRefresh(): Promise<RefreshResult> {
   try {
     if (isNativeDesktop()) {
       await initializeNativeInstance();
-      await nativeInvoke('native_api_request', {
-        request: { method: 'POST', path: '/auth/refresh', body: {} }
-      });
+      // Rust already retries transient failures, so any 401 here is final.
+      try {
+        await nativeInvoke('native_api_request', {
+          request: { method: 'POST', path: '/auth/refresh', body: {} }
+        });
+      } catch (caught) {
+        return nativeErrorStatus(caught) === 401 ? 'invalid' : 'unavailable';
+      }
       return 'ok';
     }
     const response = await fetch('/api/v1/auth/refresh', {
@@ -105,9 +120,13 @@ async function accessSessionIsLive(): Promise<boolean | null> {
   try {
     if (isNativeDesktop()) {
       await initializeNativeInstance();
-      await nativeInvoke('native_api_request', {
-        request: { method: 'GET', path: '/users/@me', body: null }
-      });
+      try {
+        await nativeInvoke('native_api_request', {
+          request: { method: 'GET', path: '/users/@me', body: null }
+        });
+      } catch (caught) {
+        return nativeErrorStatus(caught) === 401 ? false : null;
+      }
       return true;
     }
     const response = await fetch('/api/v1/users/@me', {
@@ -191,7 +210,7 @@ async function send(path: string, init: RequestInit): Promise<Response> {
       });
     } catch (caught) {
       const error = nativeError(caught);
-      const status = error.status && error.status > 0 ? error.status : 503;
+      const status = nativeErrorStatus(caught);
       const detail = {
         ...(error.detail ?? {}),
         code: error.code ?? 'NATIVE_TRANSPORT_ERROR',

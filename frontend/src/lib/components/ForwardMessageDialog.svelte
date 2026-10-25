@@ -127,8 +127,7 @@
         maxlength="3000"
         rows="3"
         placeholder={$t('ui_say_something_about_this_message_8d64d127')}
-        disabled={busy}
-      ></textarea>
+        disabled={busy}></textarea>
     </label>
     <small class="source"
       >{$t('ui_original_value0_f1509acc', {

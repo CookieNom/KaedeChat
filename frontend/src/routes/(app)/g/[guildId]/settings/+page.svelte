@@ -879,14 +879,14 @@
   }
 
   function channelPath(channel: Channel): string {
-    if (!guild) return resolve('/home');
+    if (!guild) return resolve('home');
     return guildChannelPath(guild, channel);
   }
 
   function donePath(): string {
     if (channelOnly && selectedChannel) return channelPath(selectedChannel);
     const channel = firstNavigableChannel(guild?.channels);
-    return channel ? channelPath(channel) : resolve('/home');
+    return channel ? channelPath(channel) : resolve('home');
   }
 
   function channelPanelTitle(panel: ChannelSettingsPanel): string {
@@ -3010,7 +3010,7 @@
   function leaveConfirmedGuild() {
     return run(async (targetGuild) => {
       await api(`/guilds/${encodeURIComponent(targetGuild)}/members/@me`, { method: 'DELETE' });
-      window.location.assign(resolve('/home'));
+      window.location.assign(resolve('home'));
     });
   }
 
@@ -3037,7 +3037,7 @@
         method: 'DELETE',
         headers: { 'If-Match': guild.version }
       });
-      window.location.assign(resolve('/home'));
+      window.location.assign(resolve('home'));
     });
   }
 
@@ -3670,7 +3670,7 @@
         <span><Icon name="server" size={28} /></span>
         <h2>{$t('ui_guild_settings_are_unavailable_a1a7e63e')}</h2>
         <p>{$t('ui_return_to_kaede_and_try_opening_this_guild_ag_14a2e38e')}</p>
-        <a class="primary-button" href={resolve('/home')}>{$t('ui_return_home_bbcc935e')}</a>
+        <a class="primary-button" href={resolve('home')}>{$t('ui_return_home_bbcc935e')}</a>
       </section>
     {:else}
       {#if !channelOnly}
@@ -3738,7 +3738,7 @@
             </div>
             <p class="settings-helper">
               {$t('ui_notifications_must_also_be_enabled_in_ea8e841d')}
-              <a href={resolve('/settings#notifications')}>{$t('ui_user_settings_818ed0c8')}</a>{$t(
+              <a href={resolve('settings#notifications')}>{$t('ui_user_settings_818ed0c8')}</a>{$t(
                 'ui_the_preference_syncs_across_the_web_desktop_a_30f07ec6'
               )}
             </p>
@@ -3893,8 +3893,7 @@
                 maxlength="500"
                 rows="4"
                 disabled={!canManageGuild}
-                placeholder={$t('ui_what_brings_this_community_together_8fe5bcff')}
-              ></textarea>
+                placeholder={$t('ui_what_brings_this_community_together_8fe5bcff')}></textarea>
             </label>
             <div class="settings-card-row history-policy-row">
               <div>
@@ -4076,8 +4075,7 @@
                           placeholder={selectedChannel.type === 15
                             ? $t('ui_help_members_understand_what_to_post_here_1cdc0d9c')
                             : $t('ui_what_belongs_in_this_channel_99732b14')}
-                          disabled={busy}
-                        ></textarea>
+                          disabled={busy}></textarea>
                       </label>
                       {#if selectedChannel.type === 15}
                         <fieldset class="forum-settings-group">
@@ -6468,8 +6466,7 @@
             maxlength="512"
             rows="3"
             placeholder={$t('ui_visible_in_the_guild_audit_log_5958620b')}
-            disabled={memberModerationBusy}
-          ></textarea>
+            disabled={memberModerationBusy}></textarea>
         </label>
         {#if error}<p class="form-error" role="alert">{error}</p>{/if}
         <footer>
