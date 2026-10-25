@@ -91,8 +91,9 @@ kubernetes-check:
 audit: osv-audit
 
 osv-audit:
-	docker run --rm -v "$(CURDIR):/workspace:ro" -w /workspace \
+	python3 .github/scripts/osv-audit.py docker run --quiet --rm -v "$(CURDIR):/workspace:ro" -w /workspace \
 		ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 scan source \
+		--format=json --verbosity=error \
 		--lockfile=backend/uv.lock --lockfile=sdk/python/uv.lock \
 		--lockfile=frontend/pnpm-lock.yaml --lockfile=desktop/Cargo.lock \
 		--lockfile=mobile/pubspec.lock

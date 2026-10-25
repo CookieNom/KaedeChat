@@ -1,0 +1,5 @@
+{
+  "crates.io": {
+    "glib": "Tauri's GTK3 stack requires glib 0.18. No callers of the affected VariantStrIter API were found in Kaede or reviewed dependencies (RUSTSEC-2024-0429). Reassess when the GTK dependencies change."
+  }
+}

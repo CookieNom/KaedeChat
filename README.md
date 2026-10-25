@@ -524,12 +524,21 @@ lockfiles for known dependency vulnerabilities with:
 make osv-audit
 ```
 
-This runs a pinned OSV-Scanner container and requires Docker and network access;
-it does not compile or install application dependencies. CI runs the same target
-and fails on findings or scanner errors. `make audit` runs this scan before the
-existing Python and JavaScript audits in disposable k3d clusters. The lockfile
-scan does not cover iOS CocoaPods, Android native dependencies, SDKs, or container
-OS packages.
+This runs a pinned OSV-Scanner container and requires Python 3, Docker, and network
+access; it does not compile or install application dependencies. CI runs the same
+target and fails when a non-ignored vulnerability's CVSS score is strictly above
+6.0, or the scan fails. Findings at or below 6.0 and those without a CVSS score are
+reported without failing the job. `make audit` runs this scan before the existing
+Python and JavaScript audits in disposable k3d clusters. The lockfile scan does
+not cover iOS CocoaPods, Android native dependencies, SDKs, or container OS packages.
+
+To ignore a package, add its exact name and a nonempty reason under its OSV
+ecosystem in [.github/osv-ignored-packages.json](.github/osv-ignored-packages.json),
+following the existing `crates.io` / `glib` entry. These exceptions apply to all
+versions and advisories for that package. Findings still appear as `IGNORED` with
+their score, advisory IDs, and reason, but do not fail the job. Remove the entry
+to resume enforcement; use `{}` for no ignores. Invalid configuration and scanner
+errors still fail the job.
 
 The
 [operator guide](docs/operator.md#acceptance-checks) lists the focused acceptance
