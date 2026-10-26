@@ -14,6 +14,7 @@ import 'package:kaede_mobile/src/domain/application_command_permissions.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/bot_e2ee_participation.dart';
+import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
@@ -2373,15 +2374,27 @@ final class KaedeRepository {
   Future<File> downloadAttachment(
     KaedeAttachment attachment,
     File destination,
-  ) =>
-      api.downloadToFile(
-        attachmentMediaPath(
-          attachment.ref,
-          historyMediaUrl: attachment.historyMediaUrl,
-          privateMediaUrl: attachment.privateMediaUrl,
-        ),
-        destination,
-      );
+  ) async {
+    contentSafety.trackFile(attachment.ref, destination);
+    final generation = contentSafety.attachmentGeneration(attachment.ref);
+    bool revoked() =>
+        contentSafety.blocksAttachment(attachment.ref) ||
+        generation != contentSafety.attachmentGeneration(attachment.ref);
+    final file = await api.downloadToFile(
+      attachmentMediaPath(
+        attachment.ref,
+        historyMediaUrl: attachment.historyMediaUrl,
+        privateMediaUrl: attachment.privateMediaUrl,
+      ),
+      destination,
+      isCancelled: revoked,
+    );
+    if (revoked()) {
+      if (await file.exists()) await file.delete();
+      contentSafety.requireAttachment(attachment.ref, generation: generation);
+    }
+    return file;
+  }
 
   Future<Map<String, Object?>> linkPreview(String url) =>
       api.sendJson('POST', '/api/v1/link-previews',

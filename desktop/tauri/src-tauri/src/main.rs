@@ -87,6 +87,7 @@ struct NativeState {
     instance: RwLock<Option<Domain>>,
     account: RwLock<Option<Arc<NativeAccount>>>,
     restore_lock: Mutex<()>,
+    revoked_media: RwLock<BTreeMap<String, BTreeSet<String>>>,
     pending_mfa: Mutex<Option<PendingMfa>>,
     gateway_commands: RwLock<Option<mpsc::Sender<GatewayCommand>>>,
     gateway_generation: AtomicU64,
@@ -1760,12 +1761,89 @@ fn validate_history_media_path(path: &str) -> bool {
     })
 }
 
+fn attachment_ref_for_media_path(path: &str) -> Option<String> {
+    let route = path.split('?').next()?;
+    let parts = route.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let reference = match parts.as_slice() {
+        ["media", domain, id, _] => format!("{id}@{domain}"),
+        ["api", "v1", "dms", _, "history-media", _, attachment, _] => attachment.to_string(),
+        _ => return None,
+    };
+    reference
+        .parse::<EntityRef>()
+        .ok()
+        .map(|value| value.to_string())
+}
+
+#[tauri::command]
+async fn native_revoke_media(
+    attachment_refs: Vec<String>,
+    released_attachment_refs: Option<Vec<String>>,
+    state: State<'_, NativeState>,
+) -> Result<(), NativeError> {
+    let released = released_attachment_refs.unwrap_or_default();
+    if attachment_refs.len() + released.len() > 10_000
+        || attachment_refs
+            .iter()
+            .chain(&released)
+            .any(|value| value.parse::<EntityRef>().is_err())
+    {
+        return Err(NativeError::local(
+            "INVALID_MEDIA_REVOCATION",
+            "Invalid media safety update.",
+        ));
+    }
+    let account = state
+        .account
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in to continue."))?;
+    let mut revoked = state.revoked_media.write().await;
+    let refs = revoked.entry(account.account_key.clone()).or_default();
+    for reference in released {
+        refs.remove(&reference);
+    }
+    refs.extend(attachment_refs);
+    Ok(())
+}
+
+async fn require_available_media(
+    state: &NativeState,
+    account: &str,
+    attachment: &str,
+) -> Result<(), NativeError> {
+    if state
+        .revoked_media
+        .read()
+        .await
+        .get(account)
+        .is_some_and(|refs| refs.contains(attachment))
+    {
+        return Err(NativeError::local(
+            "CONTENT_UNAVAILABLE",
+            "This attachment is unavailable for safety reasons.",
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn native_media_request(
     path: String,
     state: State<'_, NativeState>,
 ) -> Result<Response, NativeError> {
     let path = validate_attachment_media_path(&path)?;
+    let attachment = attachment_ref_for_media_path(path)
+        .ok_or_else(|| NativeError::local("INVALID_MEDIA_PATH", "This media link is invalid."))?;
+    let account_key = state
+        .account
+        .read()
+        .await
+        .as_ref()
+        .map(|account| account.account_key.clone())
+        .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in to continue."))?;
+    require_available_media(&state, &account_key, &attachment).await?;
     let api = configured_api(&state).await?;
     let bytes = match api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES).await {
         Ok(bytes) => bytes,
@@ -1783,6 +1861,20 @@ async fn native_media_request(
         }
         Err(error) => return Err(error.into()),
     };
+    require_available_media(&state, &account_key, &attachment).await?;
+    if state
+        .account
+        .read()
+        .await
+        .as_ref()
+        .map(|account| account.account_key.as_str())
+        != Some(account_key.as_str())
+    {
+        return Err(NativeError::local(
+            "SESSION_CHANGED",
+            "The signed-in account changed during the download.",
+        ));
+    }
     Ok(Response::new(bytes.to_vec()))
 }
 
@@ -3691,6 +3783,7 @@ fn main() {
         instance: RwLock::new(None),
         account: RwLock::new(None),
         restore_lock: Mutex::new(()),
+        revoked_media: RwLock::new(BTreeMap::new()),
         pending_mfa: Mutex::new(None),
         gateway_commands: RwLock::new(None),
         gateway_generation: AtomicU64::new(0),
@@ -3887,6 +3980,7 @@ fn main() {
             native_forget_account,
             native_api_request,
             native_media_request,
+            native_revoke_media,
             native_soundboard_media,
             native_upload_object,
             native_save_attachment,
@@ -4645,6 +4739,18 @@ mod tests {
 
     #[test]
     fn attachment_media_paths_are_narrowly_scoped() {
+        assert_eq!(
+            super::attachment_ref_for_media_path("media/chat.example/60/thumbnail_512"),
+            Some("60@chat.example".to_owned())
+        );
+        let reference_path = concat!(
+            "api/v1/dms/43@home.example/history-media/50@remote.example/",
+            "60@remote.example/original?expires=1&token=token"
+        );
+        assert_eq!(
+            super::attachment_ref_for_media_path(reference_path),
+            Some("60@remote.example".to_owned())
+        );
         let Ok(valid_path) =
             validate_attachment_media_path("/media/chat.example/75512661369970688/thumbnail_512")
         else {

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/api/announcement_repository.dart';
@@ -16,6 +17,7 @@ import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/client_preferences.dart';
+import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/message_permissions.dart';
@@ -1989,6 +1991,9 @@ final class MobileController extends StateNotifier<MobileState> {
     final resolved = api.tokens ?? tokens.copyWith(userRef: user.ref);
     await api.useTokens(resolved.copyWith(userRef: user.ref));
     _activeAccountKey = resolved.accountKey;
+    await contentSafety.load(database, resolved.accountKey);
+    contentSafety.resetFreshAuthorizations();
+    await reconcileContentSafety();
     final critical = await Future.wait<Object>([
       repository.guilds(),
       repository.dms(),
@@ -2100,6 +2105,9 @@ final class MobileController extends StateNotifier<MobileState> {
           authConfiguration['e2ee_activation_enabled'] == true,
       offline: false,
     );
+    unawaited(_persistContentSafety().catchError((Object _) {
+      _scheduleSafetyRetry(resolved.accountKey);
+    }));
     unawaited(setAppLanguage(state.localePreference));
     _displayNameIndex.clear();
     push.setAppVisibility(
@@ -3241,6 +3249,9 @@ final class MobileController extends StateNotifier<MobileState> {
         return;
       }
       var ordered = page.reversed.toList();
+      for (final message in ordered) {
+        _acceptFreshSafetyMessage(message);
+      }
       if (channel.encryptionMode == 'e2ee') {
         ordered = await (await e2eeClient()).decryptMessages(channel, ordered);
       }
@@ -3275,7 +3286,19 @@ final class MobileController extends StateNotifier<MobileState> {
       } else if (!newer) {
         withOlder.remove(channelRef);
       }
-      final current = state.messageStore[channelRef] ?? existing;
+      final freshReleased = {
+        for (final message in ordered)
+          if (message.safetyState == null &&
+              !message.safetyLocked &&
+              !contentSafety.protect(message).safetyLocked)
+            message.ref,
+      };
+      final current = (state.messageStore[channelRef] ?? existing)
+          .where((message) =>
+              !freshReleased.contains(message.ref) ||
+              (message.safetyState != 'pending_review' &&
+                  message.safetyState != 'unavailable'))
+          .toList();
       final withNewer = Set<EntityRef>.of(state.channelsWithNewerMessages);
       if (!older) {
         if ((around != null && page.isNotEmpty) ||
@@ -4153,6 +4176,8 @@ final class MobileController extends StateNotifier<MobileState> {
       return false;
     }
     _activeAccountKey = tokens.accountKey;
+    await contentSafety.load(database, tokens.accountKey);
+    contentSafety.resetFreshAuthorizations();
     final guilds = (await database.snapshots(tokens.accountKey, 'guilds'))
         .map(KaedeGuild.fromJson)
         .toList();
@@ -4236,6 +4261,9 @@ final class MobileController extends StateNotifier<MobileState> {
       offline: true,
       error: 'Offline — showing saved conversations.',
     );
+    unawaited(_persistContentSafety().catchError((Object _) {
+      _scheduleSafetyRetry(tokens.accountKey);
+    }));
     if (initial != null) {
       unawaited(_restoreCachedMessages(
         initial.ref,
@@ -4296,7 +4324,7 @@ final class MobileController extends StateNotifier<MobileState> {
     final values = <String, Object?>{
       for (final message in retained)
         if (marked == null || marked.contains(message.ref.wire))
-          message.ref.wire: message.toJson(),
+          message.ref.wire: contentSafety.protect(message).toJson(),
     };
     final keepKeys =
         retained.map((message) => message.ref.wire).toList(growable: false);
@@ -4326,7 +4354,7 @@ final class MobileController extends StateNotifier<MobileState> {
     final generation = _sessionLoadGeneration;
     final accountKey = tokens.accountKey;
     final kind = 'messages:${message.channelRef.wire}';
-    final payload = message.toJson();
+    final payload = contentSafety.protect(message).toJson();
     final messages = state.messageStore[message.channelRef];
     final retainWires = (messages != null && messages.length > 250)
         ? messages
@@ -4363,6 +4391,7 @@ final class MobileController extends StateNotifier<MobileState> {
     final generation = _sessionLoadGeneration;
     if (accountKey == null) return;
     final channel = _channel(message.channelRef);
+    _acceptFreshSafetyMessage(message);
     var displayed = message;
     if (channel != null && channel.encryptionMode == 'e2ee') {
       try {
@@ -4377,6 +4406,7 @@ final class MobileController extends StateNotifier<MobileState> {
         _removedGuildChannels.containsKey(message.channelRef)) {
       return;
     }
+    displayed = contentSafety.protect(displayed);
     if (update) {
       _patchStoredMessage(message.ref, (_) => displayed);
       _patchThreadStarter(message.ref, (_) => displayed);
@@ -4511,6 +4541,8 @@ final class MobileController extends StateNotifier<MobileState> {
 
   void _applyGateway(GatewayEvent event) {
     if (event.name == 'READY' || event.name == 'RESUMED') {
+      contentSafety.resetFreshAuthorizations();
+      unawaited(reconcileContentSafety());
       final preference = event.data['presence_preference'];
       if (const {'online', 'idle', 'dnd', 'invisible'}.contains(preference)) {
         state = state.copyWith(presencePreference: _presence(preference));
@@ -4588,6 +4620,7 @@ final class MobileController extends StateNotifier<MobileState> {
         final message =
             KaedeMessage.fromJson(Map<String, Object?>.from(raw as Map));
         if (_removedGuildChannels.containsKey(message.channelRef)) break;
+        _acceptFreshSafetyMessage(message);
         if (message.thread case final thread?) _upsertThreadBroadcast(thread);
         final latestReceived = _latestReceivedMessages[message.channelRef];
         if (latestReceived == null ||
@@ -4679,6 +4712,15 @@ final class MobileController extends StateNotifier<MobileState> {
         if (!_pinEvents.isClosed) {
           _pinEvents.add(Map<String, Object?>.unmodifiable(event.data));
         }
+        break;
+      case 'CONTENT_SAFETY_UPDATE':
+        contentSafety.apply(event.data);
+        _applyContentSafety();
+        if (event.data['state'] == 'released') unawaited(loadMessages());
+        unawaited(_persistContentSafety().catchError((Object _) {
+          final account = api.tokens?.accountKey;
+          if (account != null) _scheduleSafetyRetry(account);
+        }));
         break;
       case 'MESSAGE_DELETE':
         final target = _messageRef(event.data);
@@ -5306,6 +5348,7 @@ final class MobileController extends StateNotifier<MobileState> {
     if (target == null) return;
     if (data['author_id'] != null && data['created_at'] != null) {
       var message = KaedeMessage.fromJson(data);
+      _acceptFreshSafetyMessage(message);
       if (message.thread case final thread?) {
         message = message.copyWith(thread: _upsertThreadBroadcast(thread));
       }
@@ -5483,6 +5526,243 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   void applyUserProfile(KaedeUser user) => _applyUserProfileUpdate(user);
+
+  Future<void>? _safetyReconciliation;
+  String? _safetyReconciliationAccount;
+  Timer? _safetyRetry;
+
+  void _acceptFreshSafetyMessage(KaedeMessage message) {
+    if (contentSafety.acceptFreshMessage(message)) {
+      unawaited(contentSafety.save().catchError((Object _) {
+        final account = api.tokens?.accountKey;
+        if (account != null) _scheduleSafetyRetry(account);
+      }));
+    }
+  }
+
+  Future<void> hideReportedContent(KaedeMessage message) async {
+    contentSafety.apply({
+      'message_refs': [message.ref.wire],
+      'attachment_refs': [
+        for (final attachment in message.attachments) attachment.ref.wire
+      ],
+      'state': 'hidden',
+    });
+    _applyContentSafety();
+    await contentSafety.save();
+    unawaited(_persistContentSafety().catchError((Object _) {
+      final account = api.tokens?.accountKey;
+      if (account != null) _scheduleSafetyRetry(account);
+    }));
+  }
+
+  void _applyContentSafety() {
+    for (final entry in state.messageStore.entries.toList()) {
+      _setChannelMessages(entry.key, entry.value);
+    }
+    state = state.copyWith(threads: [
+      for (final thread in state.threads)
+        if (thread.starterMessage case final starter?)
+          thread.copyWith(starterMessage: contentSafety.protect(starter))
+        else
+          thread,
+    ]);
+  }
+
+  Future<void> _persistContentSafety() async {
+    final account = api.tokens?.accountKey;
+    if (account == null || contentSafety.accountKey != account) return;
+    // Persist the deny-list before any fallible purge. A crash must not reveal
+    // bytes again; reconnect retries disk and vault cleanup before its cursor.
+    await contentSafety.save();
+    await contentSafety.purgeFiles();
+    if (contentSafety.messages.isEmpty && contentSafety.attachments.isEmpty) {
+      return;
+    }
+    await _queueCacheWrite(() =>
+        database.purgeSafetySnapshots(account, contentSafety.blocksValue));
+    if (!contentSafety.hasDestructiveRestrictions) return;
+    var client = _e2eeFuture;
+    final userRef = state.user?.ref.wire;
+    if (client == null &&
+        userRef != null &&
+        userRef == api.tokens?.userRef?.wire) {
+      final saved = await const MobileE2EEStore().load(userRef);
+      if (saved?.messageCache.values.any((entry) => contentSafety
+                  .purgesPlaintext(entry.messageRef, entry.plaintext)) ==
+              true &&
+          api.tokens?.accountKey == account) {
+        client = e2eeClient();
+      }
+    }
+    if (client != null) await (await client).purgeSafetyCache();
+  }
+
+  Future<void> reconcileContentSafety() {
+    final active = _safetyReconciliation;
+    if (active != null) {
+      return _safetyReconciliationAccount == api.tokens?.accountKey
+          ? active
+          : active.then((_) => reconcileContentSafety());
+    }
+    _safetyReconciliationAccount = api.tokens?.accountKey;
+    final task = _reconcileContentSafety();
+    _safetyReconciliation = task;
+    return task.whenComplete(() {
+      if (identical(_safetyReconciliation, task)) _safetyReconciliation = null;
+    });
+  }
+
+  Future<void> _reconcileContentSafety() async {
+    final account = api.tokens?.accountKey;
+    if (account == null) return;
+    try {
+      await contentSafety.load(database, account);
+      var released = false;
+      var more = true;
+      while (more && api.tokens?.accountKey == account) {
+        final page = await api.getJson('/api/v1/safety/client-state', query: {
+          'after': contentSafety.cursor,
+          'limit': 200,
+        });
+        if (api.tokens?.accountKey != account) return;
+        if (page['items'] is! List ||
+            page['next_cursor'] is! String ||
+            page['has_more'] is! bool) {
+          throw const FormatException('Invalid content safety page.');
+        }
+        for (final item in page['items']! as List) {
+          final update = Map<String, Object?>.from(item as Map);
+          released = released || update['state'] == 'released';
+          contentSafety.apply(update);
+        }
+        _applyContentSafety();
+        await _persistContentSafety();
+        contentSafety.cursor = page['next_cursor']! as String;
+        await contentSafety.save();
+        more = page['has_more'] == true;
+      }
+      final messageRefs = <String>{...contentSafety.messages.keys};
+      final attachmentRefs = <String>{...contentSafety.attachments.keys};
+      void collect(Object? value) {
+        if (value is List) {
+          for (final item in value) {
+            collect(item);
+          }
+          return;
+        }
+        if (value is! Map) return;
+        final id = value['id'];
+        final domain = value['origin_domain'];
+        if (id is String && domain is String) {
+          if (value.containsKey('channel_id') &&
+              value.containsKey('author_id')) {
+            messageRefs.add(EntityRef.parse('$id@$domain').wire);
+          } else if (value.containsKey('filename') &&
+              value.containsKey('content_type')) {
+            attachmentRefs.add(EntityRef.parse('$id@$domain').wire);
+          }
+        }
+        final attachmentId = value['attachment_id'];
+        final attachmentDomain = value['attachment_domain'];
+        if (attachmentId is String && attachmentDomain is String) {
+          attachmentRefs
+              .add(EntityRef.parse('$attachmentId@$attachmentDomain').wire);
+        }
+        for (final child in value.values) {
+          collect(child);
+        }
+      }
+
+      for (final row in await database.safetySnapshots(account)) {
+        collect(row);
+      }
+      for (final rows in state.messageStore.values) {
+        for (final message in rows) {
+          collect(message.toJson());
+        }
+      }
+      final userRef = api.tokens?.userRef?.wire;
+      if (userRef != null) {
+        final vault = await const MobileE2EEStore().load(userRef);
+        for (final entry in vault?.messageCache.values ??
+            const <MobileMessageCacheEntry>[]) {
+          if (entry.messageRef case final ref?) messageRefs.add(ref);
+          collect(jsonDecode(entry.plaintext));
+        }
+      }
+      final directory = await getTemporaryDirectory();
+      final mediaName = RegExp(r'^kaede-media-([0-9]+)-(.+)$');
+      await for (final entry in directory.list()) {
+        final match = mediaName.firstMatch(entry.uri.pathSegments.last);
+        if (match != null) {
+          final suffix = match[2]!;
+          // Old names did not encode the domain boundary; test valid prefixes.
+          for (var split = suffix.indexOf('-');
+              split >= 0;
+              split = suffix.indexOf('-', split + 1)) {
+            try {
+              attachmentRefs.add(
+                  EntityRef.parse('${match[1]}@${suffix.substring(0, split)}')
+                      .wire);
+            } on FormatException {/* A filename prefix is not an instance. */}
+          }
+        }
+      }
+      final messages = messageRefs.toList();
+      final attachments = attachmentRefs.toList();
+      for (var offset = 0;
+          offset < max(messages.length, attachments.length);
+          offset += 200) {
+        final result =
+            await api.sendJson('POST', '/api/v1/safety/content-status', data: {
+          'message_refs': messages.skip(offset).take(200).toList(),
+          'attachment_refs': attachments.skip(offset).take(200).toList(),
+        });
+        if (api.tokens?.accountKey != account) return;
+        for (final item in result['items']! as List) {
+          final update = Map<String, Object?>.from(item as Map);
+          released = released ||
+              (update['state'] == 'released' &&
+                  ((update['message_refs'] as List).any((ref) =>
+                          contentSafety.messages[ref] == 'pending_review') ||
+                      (update['attachment_refs'] as List).any((ref) =>
+                          contentSafety.attachments[ref] == 'pending_review')));
+          contentSafety.apply(update);
+        }
+      }
+      _applyContentSafety();
+      await _persistContentSafety();
+      _safetyRetry?.cancel();
+      _safetyRetry = null;
+      if (released &&
+          state.phase == SessionPhase.ready &&
+          state.selectedChannel != null) {
+        unawaited(loadMessages());
+      }
+    } on KaedeException catch (error) {
+      if (error.status == 404 || error.status == 405) return; // Older servers.
+      DebugLog.instance.record(DebugEvent.gatewayReconnecting,
+          step: 'safety_sync', error: error);
+      _scheduleSafetyRetry(account);
+    } on Object {
+      // Durable local revocations remain enforced during transient sync/purge failures.
+      DebugLog.instance
+          .record(DebugEvent.gatewayReconnecting, step: 'safety_cleanup');
+      _scheduleSafetyRetry(account);
+    }
+  }
+
+  void _scheduleSafetyRetry(String account) {
+    if (!mounted || api.tokens?.accountKey != account) return;
+    _safetyRetry?.cancel();
+    _safetyRetry = Timer(const Duration(seconds: 15), () {
+      _safetyRetry = null;
+      if (mounted && api.tokens?.accountKey == account) {
+        unawaited(reconcileContentSafety());
+      }
+    });
+  }
 
   void _tombstoneMessage(EntityRef target) {
     KaedeMessage tombstone(KaedeMessage message) => message.copyWith(
@@ -6984,7 +7264,8 @@ final class MobileController extends StateNotifier<MobileState> {
 
   void _setChannelMessages(EntityRef channel, List<KaedeMessage> messages) {
     final store = Map<EntityRef, List<KaedeMessage>>.of(state.messageStore);
-    store[channel] = List<KaedeMessage>.unmodifiable(messages);
+    store[channel] =
+        List<KaedeMessage>.unmodifiable(messages.map(contentSafety.protect));
     state = state.copyWith(messageStore: Map.unmodifiable(store));
   }
 
@@ -7231,6 +7512,7 @@ final class MobileController extends StateNotifier<MobileState> {
 
   @override
   void dispose() {
+    _safetyRetry?.cancel();
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _removedGuilds.clear();

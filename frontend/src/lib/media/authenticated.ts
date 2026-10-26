@@ -1,6 +1,15 @@
 import { isNativeDesktop, nativeInvoke, nativeInvokeBytes } from '$lib/platform/native';
 import { apiErrorMessage } from '$lib/api/errors';
 import { parseCanonicalEntityRef } from '$lib/chat/refs';
+import {
+  assertMediaAvailable,
+  assertMediaBlobAvailable,
+  createMediaObjectURL,
+  mediaReference,
+  onMediaRevoked,
+  revokeMediaObjectURL,
+  trackMediaBlob
+} from './content-revocation';
 
 export interface AuthenticatedMediaSource {
   path: string;
@@ -216,14 +225,27 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
   let generation = 0;
   let objectUrl = '';
   let controller: AbortController | null = null;
+  let activeSource = source;
+  const unsubscribe = onMediaRevoked((refs) => {
+    if (!refs.has(mediaReference(activeSource.path) ?? '')) return;
+    generation += 1;
+    controller?.abort();
+    revokeObjectUrl();
+    node.removeAttribute('src');
+    if (node instanceof HTMLMediaElement) node.load();
+    node.setAttribute('data-media-error', 'true');
+    node.setAttribute('data-media-error-message', 'This attachment is no longer available.');
+    node.dispatchEvent(new Event('error'));
+  });
 
   function revokeObjectUrl() {
     if (!objectUrl) return;
-    URL.revokeObjectURL(objectUrl);
+    revokeMediaObjectURL(objectUrl);
     objectUrl = '';
   }
 
   async function load(next: AuthenticatedMediaSource) {
+    activeSource = next;
     const current = ++generation;
     controller?.abort();
     const requestController = new AbortController();
@@ -232,14 +254,14 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
     node.removeAttribute('data-media-error');
     node.removeAttribute('data-media-error-message');
 
-    if (!isNativeDesktop() && !isBoundedThumbnail(next)) {
-      node.src = next.path;
-      if (node instanceof HTMLMediaElement) node.load();
-      return;
-    }
-
     node.removeAttribute('src');
     try {
+      assertMediaAvailable(next.path);
+      if (!isNativeDesktop() && !isBoundedThumbnail(next)) {
+        node.src = next.path;
+        if (node instanceof HTMLMediaElement) node.load();
+        return;
+      }
       let response: ArrayBuffer | Uint8Array | number[];
       if (isNativeDesktop()) {
         response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>('native_media_request', {
@@ -251,6 +273,7 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
           const fetched = await fetch(next.path, {
             credentials: 'same-origin',
             headers: { Accept: next.contentType },
+            cache: 'no-store',
             signal: requestController.signal
           });
           if (fetched.ok) {
@@ -283,7 +306,10 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
         response = loaded ?? new Uint8Array();
       }
       if (current !== generation) return;
-      objectUrl = URL.createObjectURL(new Blob([asBlobPart(response)], { type: next.contentType }));
+      assertMediaAvailable(next.path);
+      objectUrl = createMediaObjectURL(
+        trackMediaBlob(new Blob([asBlobPart(response)], { type: next.contentType }), next.path)
+      );
       node.src = objectUrl;
       if (node instanceof HTMLMediaElement) node.load();
     } catch (error) {
@@ -303,6 +329,7 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
       void load(next);
     },
     destroy() {
+      unsubscribe();
       generation += 1;
       controller?.abort();
       revokeObjectUrl();
@@ -316,36 +343,51 @@ export async function authenticatedMediaBlob(
   maximumBytes = 100 * 1024 * 1024,
   signal?: AbortSignal
 ): Promise<Blob> {
-  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
-    throw new TypeError('Authenticated media size limit is invalid.');
-  }
-  if (signal?.aborted) throw new DOMException('Media request cancelled', 'AbortError');
-  if (isNativeDesktop()) {
-    const response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>(
-      'native_media_request',
-      {
-        path: source.path
-      }
-    );
-    const bytes = asBytes(response);
-    if (bytes.byteLength > maximumBytes) {
-      throw new Error('Media response exceeded its safe in-memory limit.');
+  assertMediaAvailable(source.path);
+  const controller = new AbortController();
+  const unsubscribe = onMediaRevoked((refs) => {
+    if (refs.has(mediaReference(source.path) ?? '')) controller.abort();
+  });
+  signal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  try {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+      throw new TypeError('Authenticated media size limit is invalid.');
     }
     if (signal?.aborted) throw new DOMException('Media request cancelled', 'AbortError');
-    return new Blob([asBlobPart(bytes)], { type: source.contentType });
+    if (isNativeDesktop()) {
+      const response = await nativeInvoke<ArrayBuffer | Uint8Array | number[]>(
+        'native_media_request',
+        {
+          path: source.path
+        }
+      );
+      const bytes = asBytes(response);
+      if (bytes.byteLength > maximumBytes) {
+        throw new Error('Media response exceeded its safe in-memory limit.');
+      }
+      if (signal?.aborted) throw new DOMException('Media request cancelled', 'AbortError');
+      return trackMediaBlob(
+        new Blob([asBlobPart(bytes)], { type: source.contentType }),
+        source.path
+      );
+    }
+    const response = await fetch(source.path, {
+      credentials: 'same-origin',
+      headers: { Accept: source.contentType },
+      cache: 'no-store',
+      signal
+    });
+    if (!response.ok) throw new Error('Could not download the authenticated media.');
+    const declared = Number(response.headers.get('content-length') ?? '0');
+    if (Number.isFinite(declared) && declared > maximumBytes) {
+      throw new Error('Media response exceeded its safe in-memory limit.');
+    }
+    const bytes = await boundedBytes(response, maximumBytes);
+    if (signal.aborted) throw new DOMException('Media request cancelled', 'AbortError');
+    return trackMediaBlob(new Blob([asBlobPart(bytes)], { type: source.contentType }), source.path);
+  } finally {
+    unsubscribe();
   }
-  const response = await fetch(source.path, {
-    credentials: 'same-origin',
-    headers: { Accept: source.contentType },
-    signal
-  });
-  if (!response.ok) throw new Error('Could not download the authenticated media.');
-  const declared = Number(response.headers.get('content-length') ?? '0');
-  if (Number.isFinite(declared) && declared > maximumBytes) {
-    throw new Error('Media response exceeded its safe in-memory limit.');
-  }
-  const bytes = await boundedBytes(response, maximumBytes);
-  return new Blob([asBlobPart(bytes)], { type: source.contentType });
 }
 
 export async function copyAuthenticatedImage(source: AuthenticatedMediaSource): Promise<void> {
@@ -354,6 +396,7 @@ export async function copyAuthenticatedImage(source: AuthenticatedMediaSource): 
     throw new Error('Image copying is not supported on this device.');
   }
   const blob = await authenticatedMediaBlob(source);
+  assertMediaBlobAvailable(blob);
   await navigator.clipboard.write([new ClipboardItem({ [blob.type || source.contentType]: blob })]);
 }
 
@@ -365,16 +408,18 @@ export async function downloadAuthenticatedMedia(
 }
 
 export async function saveMediaBlob(blob: Blob, filename: string): Promise<void> {
+  assertMediaBlobAvailable(blob);
   if (isNativeDesktop()) {
     const name = new TextEncoder().encode(filename);
     const payload = new Uint8Array(4 + name.length + blob.size);
     new DataView(payload.buffer).setUint32(0, name.length, true);
     payload.set(name, 4);
     payload.set(new Uint8Array(await blob.arrayBuffer()), 4 + name.length);
+    assertMediaBlobAvailable(blob);
     await nativeInvokeBytes('native_save_attachment', payload);
     return;
   }
-  const objectUrl = URL.createObjectURL(blob);
+  const objectUrl = createMediaObjectURL(blob);
   try {
     const anchor = document.createElement('a');
     anchor.href = objectUrl;
@@ -382,6 +427,6 @@ export async function saveMediaBlob(blob: Blob, filename: string): Promise<void>
     anchor.rel = 'noopener';
     anchor.click();
   } finally {
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    window.setTimeout(() => revokeMediaObjectURL(objectUrl), 1000);
   }
 }

@@ -19,6 +19,8 @@
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
   import { onMount } from 'svelte';
+  import { contentSafety, syncContentSafety } from '$lib/chat/content-safety.svelte';
+  import { chatEntities } from '$lib/stores/entities.svelte';
 
   let { children } = $props();
   let notificationSettingsLoaded = $state(false);
@@ -218,12 +220,33 @@
 </script>
 
 <div class="authenticated-workspace">
-  <AppInbox />
-  {@render children()}
+  {#if contentSafety.ready}
+    <AppInbox />
+    {@render children()}
+  {:else}
+    <div class="content-safety-check" role="status">
+      <strong
+        >{contentSafety.error
+          ? 'Messages are temporarily unavailable'
+          : 'Checking message availability…'}</strong
+      >
+      {#if contentSafety.error}
+        <p>{contentSafety.error}</p>
+        <button
+          type="button"
+          onclick={() => {
+            if (chatEntities.currentUser)
+              void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
+          }}
+          disabled={!chatEntities.currentUser}>Try again</button
+        >
+      {/if}
+    </div>
+  {/if}
 </div>
-<CommandSwitcher />
+{#if contentSafety.ready}<CommandSwitcher />{/if}
 {#if notificationSettingsLoaded}<LanguageSuggestion />{/if}
-<InteractionOverlay />
+{#if contentSafety.ready}<InteractionOverlay />{/if}
 
 {#if authenticatedGateway.status.state === 'reconnecting' || authenticatedGateway.status.state === 'offline' || authenticatedGateway.status.state === 'degraded'}
   <aside
@@ -302,6 +325,25 @@
 {/if}
 
 <style>
+  .content-safety-check {
+    margin: auto;
+    padding: 2rem;
+    max-width: 32rem;
+    display: grid;
+    gap: 1rem;
+  }
+  .content-safety-check p {
+    margin: 0;
+  }
+  .content-safety-check button {
+    justify-self: start;
+    min-height: 2.75rem;
+    padding: 0.65rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+  }
   .realtime-status {
     position: fixed;
     z-index: 126;

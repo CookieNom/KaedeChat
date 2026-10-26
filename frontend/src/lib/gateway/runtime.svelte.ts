@@ -1,4 +1,10 @@
 import { entityKey } from '$lib/chat/refs';
+import {
+  applyContentSafetyUpdate,
+  contentSafety,
+  protectMessage,
+  syncContentSafety
+} from '$lib/chat/content-safety.svelte';
 import { api } from '$lib/api/client';
 import {
   applyBulkMessageDelete,
@@ -132,6 +138,18 @@ function applyOwnPresencePreference(
 
 function applyEntityDispatch(dispatch: Dispatch): void {
   const eventName = dispatch.t as string;
+  if (eventName === 'CONTENT_SAFETY_UPDATE') {
+    try {
+      applyContentSafetyUpdate(dispatch.d);
+      chatEntities.messages.replace(chatEntities.messages.values.map(protectMessage));
+      if (chatEntities.currentUser)
+        void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
+    } catch {
+      contentSafety.ready = false;
+      contentSafety.error = 'Could not apply a content safety update. Reconnect and try again.';
+    }
+    return;
+  }
   if (
     eventName === 'INTERACTION_RESPONSE_CREATE' ||
     eventName === 'INTERACTION_RESPONSE_UPDATE' ||
@@ -153,6 +171,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       // all member data before the new READY is applied. Likewise, preserve
       // history that HTTP may have loaded before the initial READY arrives.
       chatEntities.beginGatewaySession(ready.user);
+      void syncContentSafety(ready.user).catch(() => undefined);
       refreshRelationships();
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.ingestDirectMessages(ready.dm_channels);
@@ -162,6 +181,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     }
     case 'RESUMED': {
+      if (chatEntities.currentUser)
+        void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
       const resumed = dispatch.d as {
         presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
         presences?: Array<{
@@ -637,11 +658,14 @@ class AuthenticatedGatewayRuntime {
   };
   #updateStatus = (event: Event) => {
     this.status = (event as CustomEvent<GatewayStatus>).detail;
+    if (['connecting', 'reconnecting', 'offline'].includes(this.status.state))
+      contentSafety.ready = false;
   };
 
   start(): void {
     if (this.#started) return;
     this.#started = true;
+    contentSafety.ready = false;
     this.client.addEventListener('dispatch', this.#reduce);
     this.client.addEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     if (typeof BroadcastChannel !== 'undefined') {
@@ -658,6 +682,7 @@ class AuthenticatedGatewayRuntime {
   stop(): void {
     if (!this.#started) return;
     this.#started = false;
+    contentSafety.ready = false;
     this.client.removeEventListener('dispatch', this.#reduce);
     this.client.removeEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     this.client.close();

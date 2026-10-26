@@ -5,10 +5,12 @@ import {
   failPendingMessage,
   LoadFence,
   mergeMessageSnapshot,
+  mergeMessageUpdate,
   messageReferenceTarget,
   resolvedReferencedMessage,
   reconcileMessage
 } from './reconcile';
+import { applyContentSafetyUpdate, protectMessage } from './content-safety.svelte';
 
 function message(id: string, nonce: string | null = null, pending = false): Message {
   return {
@@ -34,6 +36,40 @@ function message(id: string, nonce: string | null = null, pending = false): Mess
 }
 
 describe('chat completion races', () => {
+  it('restores the authored timestamp only after a pending safety hold is released', () => {
+    const original = {
+      ...message('9301'),
+      edited_at: '2026-07-20T00:01:00Z',
+      safety_state: null,
+      safety_locked: false,
+      safety_updated_at: '2026-07-20T02:00:00Z'
+    };
+    const event = {
+      message_refs: ['9301@chat.example'],
+      attachment_refs: [],
+      reason: 'Review'
+    };
+    applyContentSafetyUpdate({ ...event, state: 'pending_review' });
+    const pending = protectMessage({
+      ...original,
+      edited_at: '2026-07-20T01:00:00Z',
+      safety_updated_at: '2026-07-20T01:00:00Z'
+    });
+    expect(mergeMessageUpdate(pending, original)).toBe(pending);
+    applyContentSafetyUpdate({ ...event, state: 'released' });
+    expect(mergeMessageUpdate(pending, original)).toMatchObject({
+      content: '9301',
+      edited_at: original.edited_at,
+      safety_state: null,
+      safety_locked: false
+    });
+    expect(reconcileMessage([pending], original)).toEqual([original]);
+    expect(mergeMessageUpdate(original, pending)).toBe(original);
+    expect(mergeMessageSnapshot([original], [pending], { authoritative: true })).toEqual([
+      original
+    ]);
+  });
+
   it('upgrades an encrypted gateway echo when local verification finishes later', () => {
     const echo = { ...message('12', 'a'), content: null, e2ee: { ciphertext: 'sealed' } };
     const verified = { ...echo, e2ee_verified: true, decrypted_content: 'hello' };

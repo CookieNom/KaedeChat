@@ -870,6 +870,9 @@ async def delete_channel(
             status_code=409,
             detail={"code": "CHANNEL_HAS_ANNOUNCEMENT_DEPENDENCIES"},
         )
+    from app.safety.enforcement import ensure_channels_deletable
+
+    await ensure_channels_deletable(session, [(channel.id, channel.origin_domain)])
     rendered_deleted = channel_payload(channel)
     await add_audit_entry(
         session,

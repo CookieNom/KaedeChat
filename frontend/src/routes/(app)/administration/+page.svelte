@@ -1,5 +1,6 @@
 <script lang="ts">
   import RTCSettings from '$lib/admin/RTCSettings.svelte';
+  import ChildSafetyQueue from '$lib/admin/ChildSafetyQueue.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
@@ -20,6 +21,7 @@
     | 'users'
     | 'applications'
     | 'reports'
+    | 'child-safety'
     | 'instances'
     | 'operators'
     | 'audit';
@@ -223,6 +225,13 @@
       capability: 'reports.read'
     },
     {
+      id: 'child-safety',
+      label: 'Child safety',
+      icon: 'shield',
+      description: 'Review restricted child safety reports and preserved evidence.',
+      capability: 'safety.read'
+    },
+    {
       id: 'instances',
       label: $t('ui_instances_aa8c181a'),
       icon: 'globe',
@@ -306,6 +315,7 @@
     users: false,
     applications: false,
     reports: false,
+    'child-safety': false,
     instances: false,
     operators: false,
     audit: false
@@ -316,6 +326,7 @@
     users: false,
     applications: false,
     reports: false,
+    'child-safety': false,
     instances: false,
     operators: false,
     audit: false
@@ -620,7 +631,7 @@
     loading[section] = true;
     sectionErrors[section] = undefined;
     try {
-      if (section === 'rtc') {
+      if (section === 'rtc' || section === 'child-safety') {
         /* RTCSettings owns its form and loading state. */
       } else if (section === 'overview') overview = await api('/administration/overview');
       else if (section === 'users') users = await api('/administration/users');
@@ -1346,6 +1357,8 @@
             </div>
           {/if}
         </section>
+      {:else if view === 'child-safety'}
+        <ChildSafetyQueue capabilities={me?.capabilities ?? []} />
       {:else if view === 'reports'}
         <div class="report-controls">
           <div class="segmented" aria-label={$t('ui_report_filter_8908b6f8')}>

@@ -2587,6 +2587,9 @@ async def delete_thread(
     )
     guild = cast(Guild, access.guild)
     thread = access.channel
+    from app.safety.enforcement import ensure_channels_deletable
+
+    await ensure_channels_deletable(session, [(thread.id, thread.origin_domain)])
     deleted_payload = {
         "id": str(thread.id),
         "origin_domain": thread.origin_domain,

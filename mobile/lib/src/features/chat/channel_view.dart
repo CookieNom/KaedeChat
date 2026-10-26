@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:math';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
@@ -22,6 +23,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/announcements.dart';
 import 'package:kaede_mobile/src/domain/application_commands.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
+import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:kaede_mobile/src/domain/message_permissions.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
@@ -5218,6 +5220,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       'harassment': 'Harassment',
       'hate': 'Hate',
       'sexual_content': 'Sexual content',
+      'csam': 'Child sexual abuse material (CSAM)',
       'violence': 'Violence',
       'self_harm': 'Self-harm',
       'impersonation': 'Impersonation',
@@ -5490,7 +5493,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                           final repository = ref
                               .read(mobileControllerProvider.notifier)
                               .repository;
-                          var evidenceFile = decryptedAttachment;
+                          var evidenceFile =
+                              ownedEvidenceFile ?? decryptedAttachment;
                           if (requiresAttachmentDisclosure &&
                               evidenceFile == null) {
                             setDialogState(() =>
@@ -5505,6 +5509,20 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                               destination: ownedEvidenceFile!,
                               historyMediaUrl: attachment.historyMediaUrl,
                             );
+                          }
+                          if (category == 'csam' &&
+                              evidenceFile != null &&
+                              createdReportId == null) {
+                            final directory = await getTemporaryDirectory();
+                            final oldEvidence = ownedEvidenceFile;
+                            ownedEvidenceFile = await evidenceFile.copy(
+                              '${directory.path}/kaede-report-${message.ref.id.value}-${DateTime.now().microsecondsSinceEpoch}.evidence',
+                            );
+                            evidenceFile = ownedEvidenceFile;
+                            if (oldEvidence != null &&
+                                await oldEvidence.exists()) {
+                              await oldEvidence.delete();
+                            }
                           }
                           if (createdReportId == null) {
                             setDialogState(() => activity = 'Creating report…');
@@ -5528,6 +5546,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                               disclosureAcknowledged: disclose,
                             );
                             createdReportId = '${created['id']}';
+                            if (category == 'csam') {
+                              await ref
+                                  .read(mobileControllerProvider.notifier)
+                                  .hideReportedContent(message);
+                            }
                           }
                           if (requiresAttachmentDisclosure) {
                             final filename =
@@ -6990,7 +7013,20 @@ final class _MessageTile extends StatelessWidget {
         onMenu: message.messageType == 12 && onMenu != null ? _openMenu : null,
       );
     }
-    final displayedMessage = threadStarterDisplayMessage(message);
+    final displayedMessage =
+        contentSafety.protect(threadStarterDisplayMessage(message));
+    if (displayedMessage.safetyState != null || displayedMessage.safetyLocked) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(Icons.shield_outlined, color: context.kaede.muted, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+              child: Text(contentSafetyLabel(displayedMessage.safetyState),
+                  style: TextStyle(color: context.kaede.muted))),
+        ]),
+      );
+    }
     if (state.isMessageBlocked(displayedMessage)) {
       return const SizedBox.shrink();
     }
@@ -10873,10 +10909,12 @@ final class _VisibleAttachmentCardState
   var _statusFailures = 0;
   var _loadGeneration = 0;
   var _disposed = false;
+  BuildContext? _viewerContext;
 
   @override
   void initState() {
     super.initState();
+    contentSafety.addListener(_safetyChanged);
     _displayAttachment = _manifestAttachment(
       widget.attachment,
       widget.encryptedManifest,
@@ -10907,6 +10945,23 @@ final class _VisibleAttachmentCardState
       _future = _initialFuture();
       _scheduleStatusPoll();
     }
+  }
+
+  void _safetyChanged() {
+    if (!mounted || !contentSafety.blocksAttachment(widget.attachment.ref)) {
+      return;
+    }
+    _loadGeneration += 1;
+    _statusTimer?.cancel();
+    final viewer = _viewerContext;
+    _viewerContext = null;
+    if (viewer != null && viewer.mounted) {
+      final route = ModalRoute.of(viewer);
+      if (route != null) Navigator.of(viewer).removeRoute(route);
+    }
+    setState(() {
+      _file = null;
+    });
   }
 
   Future<File> _initialFuture() => (_displayAttachment.scanStatus == 'clean' ||
@@ -10968,8 +11023,9 @@ final class _VisibleAttachmentCardState
 
   Future<File> _load([KaedeAttachment? resolved]) async {
     final generation = ++_loadGeneration;
-    final directory = await getTemporaryDirectory();
     final attachment = resolved ?? _displayAttachment;
+    contentSafety.requireAttachment(attachment.ref);
+    final directory = await getTemporaryDirectory();
     final safeDomain = attachment.ref.domain.value.replaceAll(
       RegExp('[^a-z0-9.-]'),
       '_',
@@ -10977,7 +11033,9 @@ final class _VisibleAttachmentCardState
     final destination = File(
       '${directory.path}/kaede-media-${attachment.ref.id.value}-$safeDomain-${_safeName(attachment.filename)}',
     );
+    contentSafety.trackFile(attachment.ref, destination);
     if (await destination.exists() && await destination.length() > 0) {
+      contentSafety.requireAttachment(attachment.ref);
       _file = destination;
       return destination;
     }
@@ -10995,7 +11053,10 @@ final class _VisibleAttachmentCardState
             historyMediaUrl: attachment.historyMediaUrl,
             privateMediaUrl: attachment.privateMediaUrl,
           );
-    if (_disposed || generation != _loadGeneration) {
+    if (_disposed ||
+        generation != _loadGeneration ||
+        contentSafety.blocksAttachment(attachment.ref)) {
+      await _deleteFile(downloaded);
       throw FileSystemException('Attachment load was cancelled.');
     }
     _file = downloaded;
@@ -11055,6 +11116,18 @@ final class _VisibleAttachmentCardState
   @override
   void dispose() {
     _disposed = true;
+    final viewer = _viewerContext;
+    _viewerContext = null;
+    if (viewer != null) {
+      // A server placeholder or deletion can remove this widget before the
+      // dedicated safety event arrives. Do not leave its full-screen copy open.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!viewer.mounted) return;
+        final route = ModalRoute.of(viewer);
+        if (route != null) Navigator.of(viewer).removeRoute(route);
+      });
+    }
+    contentSafety.removeListener(_safetyChanged);
     _statusTimer?.cancel();
     _loadGeneration += 1;
     _takeFile();
@@ -11077,6 +11150,14 @@ final class _VisibleAttachmentCardState
   @override
   Widget build(BuildContext context) {
     final attachment = _displayAttachment;
+    if (contentSafety.blocksAttachment(attachment.ref)) {
+      return _AttachmentStatusCard(
+          attachment: attachment,
+          icon: Icons.shield_outlined,
+          message: contentSafetyLabel(
+              contentSafety.attachments[attachment.ref.wire]),
+          error: true);
+    }
     if (attachment.scanStatus == 'pending' ||
         attachment.scanStatus == 'processing') {
       if (widget.compact) {
@@ -11263,33 +11344,37 @@ final class _VisibleAttachmentCardState
                   onLongPress: widget.onActions == null ? null : _openActions,
                   onTap: () => showDialog<void>(
                     context: context,
-                    builder: (dialogContext) => Dialog.fullscreen(
-                      backgroundColor: Colors.black.withValues(alpha: .92),
-                      child: Stack(
-                        children: [
-                          InteractiveViewer(
-                            minScale: .5,
-                            maxScale: 6,
-                            child: Center(
-                              child: Image.file(
-                                file,
-                                fit: BoxFit.contain,
-                                errorBuilder: (_, __, ___) =>
-                                    const _MediaDecodeError(kind: 'image'),
+                    builder: (dialogContext) {
+                      _viewerContext = dialogContext;
+                      return Dialog.fullscreen(
+                        backgroundColor: Colors.black.withValues(alpha: .92),
+                        child: Stack(
+                          children: [
+                            InteractiveViewer(
+                              minScale: .5,
+                              maxScale: 6,
+                              child: Center(
+                                child: Image.file(
+                                  file,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, __, ___) =>
+                                      const _MediaDecodeError(kind: 'image'),
+                                ),
                               ),
                             ),
-                          ),
-                          Positioned(
-                              top: 12,
-                              right: 12,
-                              child: IconButton.filled(
-                                  tooltip: L10n.of(context)
-                                      .ui_close_image_viewer_909f8c30,
-                                  onPressed: () => Navigator.pop(dialogContext),
-                                  icon: Icon(Icons.close_rounded))),
-                        ],
-                      ),
-                    ),
+                            Positioned(
+                                top: 12,
+                                right: 12,
+                                child: IconButton.filled(
+                                    tooltip: L10n.of(context)
+                                        .ui_close_image_viewer_909f8c30,
+                                    onPressed: () =>
+                                        Navigator.pop(dialogContext),
+                                    icon: Icon(Icons.close_rounded))),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),

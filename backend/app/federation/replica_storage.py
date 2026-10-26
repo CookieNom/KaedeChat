@@ -99,6 +99,7 @@ def replica_message_candidates(settings: Settings, guild: Guild) -> Select[tuple
         Channel.guild_id == guild.id,
         Channel.guild_domain == guild.origin_domain,
         Message.origin_domain == guild.origin_domain,
+        Message.safety_state.is_(None),
         Message.author_domain != settings.domain,
         exists().where(
             newer.c.channel_id == Message.channel_id,

@@ -60,6 +60,13 @@ from app.db.models import (
     User,
 )
 from app.federation.client import signed_request
+from app.federation.content_safety import (
+    project_safety,
+    reconcile_safety_history,
+    safety_projection,
+    safety_state,
+    safety_timestamp,
+)
 from app.federation.events import attachment_refs_from_payloads
 from app.federation.guilds import _validated_message_rich_projection
 from app.federation.identity_storage import admit_remote_user_identity
@@ -1052,6 +1059,7 @@ async def purge_ineligible_federated_history(
         .where(
             Channel.guild_id == guild.id,
             Channel.guild_domain == guild.origin_domain,
+            purged_message.safety_state.is_(None),
             tuple_(purged_message.channel_id, purged_message.channel_domain).not_in(
                 retained_channels
             ),
@@ -1413,6 +1421,7 @@ def _validate_history_message(
 ) -> tuple[int, dict[str, Any]]:
     if not isinstance(raw, dict):
         raise ValueError("historical message is invalid")
+    raw = safety_projection(raw)
     message_id = database_snowflake(raw.get("id"), "historical message id")
     in_range = (
         0 <= message_id <= min(before, upper_bound)
@@ -2112,12 +2121,17 @@ async def _apply_history_delta_event(
         if staged is None:
             return
         if event_type.endswith("delete"):
-            await session.delete(staged)
+            if safety_state(content) == "removed":
+                staged.payload = safety_projection({**staged.payload, "safety_state": "removed"})
+            elif safety_state(staged.payload) is None:
+                await session.delete(staged)
             return
         raw_message = content.get("message")
         if not isinstance(raw_message, dict):
             raise ValueError("history delta message update is invalid")
-        staged.payload = {**staged.payload, **raw_message}
+        if safety_state(staged.payload) == "removed" and safety_state(raw_message) != "removed":
+            raise ValueError("history update cannot restore confirmed content")
+        staged.payload = safety_projection({**staged.payload, **raw_message})
         await _revalidate_staged_history_message(
             session,
             settings,
@@ -2655,7 +2669,7 @@ async def _merge_history_import_batch(
             message_domain=staged.message_domain,
             edited=raw.get("edited_at") is not None,
         )
-        if (
+        if safety_state(raw) is None and (
             int(raw.get("message_type", 0)) != POLL_RESULT_MESSAGE_TYPE
             or raw.get("poll_result") is None
         ):
@@ -2707,6 +2721,9 @@ async def _merge_history_import_batch(
                 author_id=author.id,
                 author_domain=author.origin_domain,
                 content=raw.get("content"),
+                safety_state=safety_state(raw),
+                safety_reason=raw.get("safety_reason"),
+                safety_updated_at=safety_timestamp(raw),
                 e2ee=staged_e2ee,
                 embeds=cast(list[dict[str, Any]], rich["embeds"]),
                 components=cast(list[dict[str, Any]], rich["components"]),
@@ -2771,10 +2788,13 @@ async def _merge_history_import_batch(
                 )
             ):
                 raise ValueError("historical system message conflicts with stored history")
+            await reconcile_safety_history(session, settings, existing, raw)
             continue
         message = await session.get(Message, (staged.message_id, staged.message_domain))
         if message is None:
             raise RuntimeError("imported historical message disappeared")
+        if (message_safety_state := getattr(message, "safety_state", None)) is not None:
+            await project_safety(session, settings, message, message_safety_state)
         poll_projection = cast(
             tuple[
                 dict[str, object],

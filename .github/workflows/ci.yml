@@ -490,6 +490,14 @@ jobs:
         with: { python-version: "3.12.13" }
       - run: make kubernetes-check
       - run: make nginx-check
+      - name: Validate media access gate configuration
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e KAEDE_DOMAIN=ci.localhost \
+            -e KAEDE_EDGE_SECRET=ci-edge-secret \
+            -e KAEDE_PROXY_SECRET=ci-proxy-secret \
+            caddy:2.11.4-alpine caddy adapt --config /etc/caddy/Caddyfile --validate > /dev/null
       - run: make auto-update-check
 
   identity:

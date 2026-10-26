@@ -1060,6 +1060,7 @@ async def test_terminal_object_purge_marker_survives_failure_and_clears_after_gr
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attachment = SimpleNamespace(
+        origin_domain=LOCAL_DOMAIN,
         id=41,
         object_key="clean/41/original",
         staging_object_key="staging/41/original",
@@ -1073,6 +1074,10 @@ async def test_terminal_object_purge_marker_survives_failure_and_clears_after_gr
     class Session:
         def __init__(self) -> None:
             self.commits = 0
+
+        async def scalar(self, statement: object) -> bool:
+            assert "child_safety_cases" in sql(statement)
+            return False
 
         async def scalars(self, _statement: object) -> list[object]:
             return [attachment]
@@ -1129,6 +1134,7 @@ async def test_deleted_clean_staging_retry_deletes_main_and_variants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attachment = SimpleNamespace(
+        origin_domain=LOCAL_DOMAIN,
         id=44,
         object_key="clean/44/original",
         staging_object_key="staging/44/original",
@@ -1140,6 +1146,10 @@ async def test_deleted_clean_staging_retry_deletes_main_and_variants(
     )
 
     class Session:
+        async def scalar(self, statement: object) -> bool:
+            assert "child_safety_cases" in sql(statement)
+            return False
+
         async def scalars(self, _statement: object) -> list[object]:
             return [attachment]
 
@@ -1177,6 +1187,7 @@ async def test_active_encrypted_staging_retry_preserves_ciphertext_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attachment = SimpleNamespace(
+        origin_domain=LOCAL_DOMAIN,
         id=45,
         object_key="clean/45/ciphertext",
         staging_object_key="staging/45/ciphertext",
@@ -1188,6 +1199,10 @@ async def test_active_encrypted_staging_retry_preserves_ciphertext_object(
     )
 
     class Session:
+        async def scalar(self, statement: object) -> bool:
+            assert "child_safety_cases" in sql(statement)
+            return False
+
         async def scalars(self, _statement: object) -> list[object]:
             return [attachment]
 
@@ -1242,9 +1257,10 @@ async def test_staging_sweep_rotates_a_full_prefix_of_delete_failures(
 
     from app.db.models import Attachment
 
-    await postgres_schema.execute(
-        text("CREATE TABLE attachments AS TABLE public.attachments WITH NO DATA")
-    )
+    for table in ("attachments", "child_safety_cases", "child_safety_evidence"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
     now = datetime.now(UTC)
     attempts: list[int] = []
 
@@ -1316,6 +1332,10 @@ async def test_expired_pending_failure_commits_quota_then_retry_deletes_row(
         def __init__(self) -> None:
             self.commits = 0
             self.deleted: list[object] = []
+
+        async def scalar(self, statement: object) -> bool:
+            assert "child_safety_cases" in sql(statement)
+            return False
 
         async def scalars(self, _statement: object) -> list[object]:
             return [attachment]

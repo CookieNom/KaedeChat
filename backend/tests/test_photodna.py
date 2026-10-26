@@ -41,6 +41,7 @@ from app.media.processing import content_digest
 
 def settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
+        "_env_file": None,
         "domain": "alpha.localhost",
         "environment": "test",
         "secret_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
@@ -811,9 +812,13 @@ def test_automated_report_never_retains_image_or_photodna_hash() -> None:
     }
 
 
-async def test_local_match_is_durably_quarantined_before_staging_delete(
+@pytest.mark.parametrize("preservation_fails", [False, True])
+async def test_local_match_preserves_exact_bytes_before_deleting_scanned_source(
     monkeypatch: pytest.MonkeyPatch,
+    preservation_fails: bool,
 ) -> None:
+    from app.safety import service as safety_service
+
     image = io.BytesIO()
     Image.new("RGB", (160, 160), "teal").save(image, format="PNG")
     body = image.getvalue()
@@ -839,6 +844,7 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
         flags=(PhotoDNAMatchFlag("Test", ("A1",), 10, "match"),),
     )
     events: list[str] = []
+    deleted_keys: set[str] = set()
 
     class Session:
         def __init__(self) -> None:
@@ -852,8 +858,10 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
             return attachment if self.scalar_calls == 2 else None
 
         async def get(self, model: object, _key: object) -> object | None:
-            assert model is AbuseReport
             return None
+
+        async def refresh(self, _attachment: object, **_kwargs: object) -> None:
+            pass
 
         def add(self, value: object) -> None:
             self.added.append(value)
@@ -874,11 +882,14 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
             return body
 
         async def delete(self, _bucket: str, key: str) -> None:
-            assert key == attachment.object_key
+            assert key in {attachment.object_key, attachment.staging_object_key}
+            deleted_keys.add(key)
             events.append("delete")
 
         async def put(self, *_args: object, **_kwargs: object) -> None:
-            raise AssertionError("matched bytes must never be promoted")
+            assert _args[1].startswith("scanning/")
+            assert _args[2] == body
+            events.append("seal")
 
     monkeypatch.setattr(media_jobs, "S3Storage", Storage)
 
@@ -892,15 +903,39 @@ async def test_local_match_is_durably_quarantined_before_staging_delete(
     monkeypatch.setattr(media_jobs, "scan_image", match)
     monkeypatch.setattr(media_jobs, "try_lock_asset_digest", AsyncMock(return_value=True))
 
+    async def preserve(_session, _settings, _report, _attachment, data, _finding, **_kwargs):
+        assert data == body
+        assert _attachment.object_key.startswith("scanning/")
+        events.append("preserve")
+        if preservation_fails:
+            raise ValueError("invalid evidence encryption key")
+        return SimpleNamespace(id=77)
+
+    monkeypatch.setattr(safety_service, "capture_finding", preserve)
+    config = settings(
+        photodna_enabled=True,
+        photodna_subscription_key="p" * 32,
+        photodna_sdk_root="/opt/photodna",
+    )
+    if preservation_fails:
+        with pytest.raises(media_jobs.TerminalCommitPreparationError):
+            await media_jobs.process_attachment_record(
+                cast(Any, session), config, attachment.id, attachment.origin_domain
+            )
+        assert events == ["seal", "commit", "preserve", "rollback"]
+        assert attachment.deleted_at is None
+        return
+
     result = await media_jobs.process_attachment_record(
-        cast(Any, session), settings(), attachment.id, attachment.origin_domain
+        cast(Any, session), config, attachment.id, attachment.origin_domain
     )
 
-    assert result == "quarantined"
-    assert attachment.scan_status == "quarantined"
-    assert attachment.deleted_at is not None
-    assert events == ["commit", "delete"]
-    assert attachment.staging_object_key == attachment.object_key
+    assert result == "pending_review"
+    assert attachment.scan_status == "pending"
+    assert attachment.deleted_at is None
+    assert events == ["seal", "commit", "preserve", "commit", "delete", "delete"]
+    assert deleted_keys == {attachment.object_key, attachment.staging_object_key}
+    assert attachment.staging_object_key == "alpha.localhost/77/staging/original"
     assert len(session.added) == 1
     report = cast(AbuseReport, session.added[0])
     assert report.source == "photodna"
@@ -1010,7 +1045,7 @@ async def test_clean_public_asset_transition_propagates_retained_terminal_digest
         finalized_at=datetime.now(UTC),
         variants={},
     )
-    scalar_values = iter((None, attachment, 77))
+    scalar_values = iter((None, attachment, None, 77))
     commits: list[str] = []
 
     class Session:

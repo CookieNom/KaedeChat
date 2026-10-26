@@ -5,8 +5,9 @@ from datetime import UTC, datetime
 import pytest
 
 from app.chat.payloads import attachment_payload as chat_attachment_payload
+from app.chat.payloads import message_payload
 from app.core.federation import canonical_json
-from app.db.models import Attachment
+from app.db.models import Attachment, Message
 from app.media.payloads import (
     attachment_update_payload,
     federation_attachment_payload,
@@ -102,3 +103,45 @@ def test_voice_attachment_projection_can_be_signed(duration, expected, render):
     assert canonical_json({"message": {"attachments": [payload]}})
     # Display/signing precision must not modify the stored recording metadata.
     assert item.duration_secs == duration
+
+
+@pytest.mark.parametrize("state", ["pending_review", "removed"])
+def test_safety_placeholder_is_safe_for_legacy_and_current_clients(state):
+    message = Message(
+        id=11,
+        origin_domain="alpha.localhost",
+        channel_id=13,
+        channel_domain="alpha.localhost",
+        author_id=3,
+        author_domain="alpha.localhost",
+        content="original body",
+        e2ee={"ciphertext": "original ciphertext"},
+        safety_state=state,
+        safety_reason="Content unavailable pending a safety review.",
+        embeds=[{"description": "original preview"}],
+        components=[{"content": "original"}],
+        forward_snapshot={"content": "original forwarded body"},
+        flags=(1 << 15),
+        forwarded_message_id=19,
+        forwarded_message_domain="alpha.localhost",
+        referenced_message_id=21,
+        referenced_message_domain="alpha.localhost",
+        message_reference={"message_id": "21"},
+        created_at=datetime.now(UTC),
+        message_type=46,
+    )
+    result = message_payload(
+        message,
+        attachments=[attachment("clean")],
+        poll={"question": "original question"},
+        include_forward_source=True,
+    )
+    assert result["content"] == message.safety_reason
+    assert result["safety_locked"] is True
+    assert result["deleted_at"] is None
+    assert result["flags"] == result["message_type"] == 0
+    assert result["e2ee"] is result["forward_snapshot"] is result["poll"] is None
+    assert result["message_reference"] is result["referenced_message_id"] is None
+    assert result["forwarded_message_ref"] is None
+    assert result["attachments"] == result["embeds"] == result["components"] == []
+    assert b"original" not in canonical_json(result)

@@ -70,8 +70,8 @@ async def delete_terminal_attachment_objects(
 ) -> bool:
     """Best-effort deletion used immediately and by the durable staging sweep.
 
-    The terminal decision is committed before this runs, so none of these keys
-    can be served even if object storage is temporarily unavailable. Keeping
+    The terminal decision blocks new download links. Existing direct S3 links
+    may still work until deletion succeeds or their authorization expires. Keeping
     ``staging_object_key`` populated makes a failed deletion retryable.
     """
 
@@ -216,8 +216,6 @@ async def process_attachment_record(
         """Fence a bind-capable clean transition against retained evidence."""
 
         digest = attachment.content_sha256
-        if attachment.purpose == "attachment":
-            return False
         if not valid_content_digest(digest):
             raise TerminalCommitPreparationError("clean public asset has no valid digest")
         # This lifecycle path already owns the Attachment row. A capability or
@@ -273,6 +271,12 @@ async def process_attachment_record(
         return "missing"
     if attachment.finalized_at is None:
         return "pending_upload"
+    from app.safety.enforcement import case_for_attachment
+
+    pending_case = await case_for_attachment(session, attachment)
+    if pending_case is not None and pending_case.status == "pending":
+        await delete_terminal_attachment_objects(S3Storage(settings), settings, attachment)
+        return "pending_review"
     if attachment.encryption_mode == "e2ee":
         if attachment.scan_status == "encrypted":
             return "encrypted"
@@ -339,6 +343,8 @@ async def process_attachment_record(
             raise MediaValidationError("clean media content digest changed")
         attachment.detected_content_type = detected
         attachment.content_sha256 = digest
+        if await reject_retained_terminal_digest(attachment, storage):
+            return "rejected"
         scan = "clean" if reprocessing else await clamav_scan(data, settings)
         if scan == "infected":
             attachment.scan_status = "infected"
@@ -351,6 +357,25 @@ async def process_attachment_record(
             await delete_terminal_attachment_objects(storage, settings, attachment)
             return "infected"
         if detected in IMAGE_TYPES:
+            if (
+                settings.photodna_enabled
+                and not reprocessing
+                and not attachment.object_key.startswith(("scanning/", "reviewed/"))
+            ):
+                # Freeze the exact input before consulting PhotoDNA. A retry after
+                # preservation/DB failure must not read a rewritten presigned PUT.
+                immutable_key = f"scanning/{origin_domain}/{attachment_id}/{digest}"
+                await storage.put(settings.media_attachments_bucket, immutable_key, data, detected)
+                attachment.staging_object_key = (
+                    attachment.staging_object_key or attachment.object_key
+                )
+                attachment.object_key = immutable_key
+                await session.commit()
+                await lock_media_tombstone_ref(session, attachment_id, origin_domain)
+                await session.refresh(attachment, with_for_update=True)
+                if attachment.deleted_at is not None:
+                    return "missing"
+                staging_key = immutable_key
             try:
                 finding = await scan_image(data, settings)
             except PhotoDNAInputRejected as exc:
@@ -374,35 +399,58 @@ async def process_attachment_record(
                 await delete_terminal_attachment_objects(storage, settings, attachment)
                 return "rejected"
             if finding is not None:
-                attachment.scan_status = "quarantined"
-                await update_report_evidence_status(
+                from app.db.models import Message, User
+                from app.safety.enforcement import dismissed_digest, protect_message
+                from app.safety.service import capture_finding
+
+                if not await dismissed_digest(
                     session,
-                    attachment,
-                    "quarantined",
-                    finding=finding,
-                )
-                # This nullable key doubles as the existing durable physical
-                # deletion queue. Reprocessing may discover a match after the
-                # original staging key has already been swept.
-                if attachment.staging_object_key is None:
-                    attachment.staging_object_key = attachment.object_key
-                await discard_attachment(session, settings, attachment)
-                if (
-                    getattr(attachment, "report_id", None) is None
-                    and await session.get(AbuseReport, attachment.id) is None
+                    f"{attachment.id}@{attachment.origin_domain}",
+                    attachment.content_sha256,
                 ):
-                    session.add(attachment_photodna_report(attachment, finding))
-                await prepare_terminal_commit(attachment)
-                # Commit the durable quarantine and metadata-only report before
-                # deleting storage. A failed object deletion cannot republish
-                # the staging key, and the normal staging sweep will retry it.
-                await session.commit()
-                # Keep the durable marker until the upload capability expires.
-                # A client may rewrite its staging key after this immediate
-                # deletion; the scheduled sweep performs the authoritative
-                # post-expiry delete and only then clears the marker.
-                await delete_terminal_attachment_objects(storage, settings, attachment)
-                return "quarantined"
+                    report = await session.get(AbuseReport, attachment.report_id or attachment.id)
+                    if report is None:
+                        report = attachment_photodna_report(attachment, finding)
+                        session.add(report)
+                    bound_message = (
+                        await session.get(
+                            Message, (attachment.message_id, attachment.message_domain)
+                        )
+                        if attachment.message_id
+                        else None
+                    )
+                    subject = await session.get(
+                        User, (attachment.uploader_id, attachment.uploader_domain)
+                    )
+                    try:
+                        case = await capture_finding(
+                            session,
+                            settings,
+                            report,
+                            attachment,
+                            data,
+                            finding,
+                            subject=subject if attachment.report_id is None else None,
+                            message=bound_message,
+                        )
+                    except Exception as exc:
+                        await session.rollback()
+                        # Never let the generic scan retry handler commit a
+                        # partial case that has not preserved the matched bytes.
+                        raise TerminalCommitPreparationError from exc
+                    # Keep the existing public 'pending' enum. Review is reversible;
+                    # permanent tombstones and digest revocation start on confirmation.
+                    attachment.scan_status = "pending"
+                    attachment.staging_object_key = (
+                        attachment.staging_object_key or attachment.object_key
+                    )
+                    if bound_message is not None:
+                        await protect_message(
+                            session, settings, case, bound_message, state="pending_review"
+                        )
+                    await session.commit()
+                    await delete_terminal_attachment_objects(storage, settings, attachment)
+                    return "pending_review"
         # A bind-capable clean publication must be ordered against terminal
         # proof cleanup before any derivative/final-object work. When no proof
         # exists, retain the transaction-scoped digest fence through the clean
@@ -463,7 +511,31 @@ async def process_attachment_record(
         attachment.object_key = final_key
         attachment.scan_status = "clean"
         await update_report_evidence_status(session, attachment, "clean")
+        if attachment.report_id is not None:
+            from app.safety.models import ChildSafetyCase, ChildSafetyReport
+            from app.safety.service import preserve_evidence
+
+            link = await session.get(ChildSafetyReport, attachment.report_id)
+            disclosure_case = await session.get(ChildSafetyCase, link.case_id) if link else None
+            if disclosure_case is not None:
+                await preserve_evidence(
+                    session,
+                    settings,
+                    disclosure_case,
+                    f"{attachment.id}@{attachment.origin_domain}",
+                    data,
+                    filename=attachment.filename,
+                    content_type=detected,
+                    provenance="reporter_disclosed",
+                )
+                # Disclosed copies are private case evidence, never ordinary media.
+                await discard_attachment(session, settings, attachment)
+                attachment.staging_object_key = (
+                    attachment.staging_object_key or attachment.object_key
+                )
         await session.commit()
+        if attachment.deleted_at is not None:
+            await delete_terminal_attachment_objects(storage, settings, attachment)
         try:
             await storage.delete(settings.media_attachments_bucket, staging_key)
         except StorageError:
@@ -531,6 +603,8 @@ async def sweep_staging_objects(
 ) -> int:
     """Delete client-writable objects after expiry plus completion grace."""
 
+    from app.safety.enforcement import pending_attachment_review
+
     rows = list(
         await session.scalars(
             select(Attachment)
@@ -542,7 +616,8 @@ async def sweep_staging_objects(
                     < func.now() - timedelta(seconds=STAGING_UPLOAD_COMPLETION_GRACE_SECONDS),
                 ),
                 Attachment.scan_status.in_(("clean", "encrypted"))
-                | Attachment.deleted_at.is_not(None),
+                | Attachment.deleted_at.is_not(None)
+                | pending_attachment_review(),
             )
             .order_by(Attachment.updated_at, Attachment.id)
             .limit(limit)
@@ -560,11 +635,23 @@ async def sweep_staging_objects(
         # equality.
         if not staging_upload_grace_elapsed(attachment.upload_expires_at, now=swept_at):
             continue
-        if attachment.deleted_at is not None or attachment.scan_status in {
-            "infected",
-            "quarantined",
-            "rejected",
-        }:
+        review_pending = await session.scalar(
+            select(pending_attachment_review())
+            .select_from(Attachment)
+            .where(
+                Attachment.id == attachment.id, Attachment.origin_domain == attachment.origin_domain
+            )
+        )
+        if (
+            review_pending
+            or attachment.deleted_at is not None
+            or attachment.scan_status
+            in {
+                "infected",
+                "quarantined",
+                "rejected",
+            }
+        ):
             if not await delete_terminal_attachment_objects(storage, settings, attachment):
                 attachment.updated_at = swept_at
                 continue
@@ -837,6 +924,8 @@ async def retention_sweep(session: AsyncSession, settings: Settings) -> int:
     from app.tracker.media import task_references_attachment
 
     cutoff = datetime.now(UTC) - timedelta(days=settings.media_retention_days)
+    from app.safety.enforcement import pending_attachment_review
+
     rows = list(
         await session.scalars(
             select(Attachment)
@@ -850,6 +939,7 @@ async def retention_sweep(session: AsyncSession, settings: Settings) -> int:
                     & ~task_references_attachment(Attachment),
                 ),
                 Attachment.deleted_at.is_(None),
+                ~pending_attachment_review(),
             )
             .limit(100)
             .with_for_update(skip_locked=True)

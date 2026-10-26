@@ -12,6 +12,7 @@ bool canDeleteMessage(
     actor != null &&
     message.channelRef == channel.ref &&
     message.deletedAt == null &&
+    !message.safetyLocked &&
     (channel.guildRef == null || channel.allows(Permission.viewChannel)) &&
     (message.authorRef == actor ||
         (channel.guildRef != null &&
@@ -27,6 +28,7 @@ bool canEditMessage(
     message.authorRef == actor &&
     message.channelRef == channel.ref &&
     message.deletedAt == null &&
+    !message.safetyLocked &&
     message.clientContentAvailable &&
     !const <int>{6, 12, 46}.contains(message.messageType) &&
     message.poll == null &&

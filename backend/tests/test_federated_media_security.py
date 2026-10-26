@@ -98,6 +98,8 @@ class CacheSession:
         self.statements: list[object] = []
         self.added: list[object] = []
         self.deleted: list[object] = []
+        self.info: dict[str, Any] = {}
+        self.safety_report: object | None = None
 
     async def get(self, model: object, _key: object, **_kwargs: object) -> object | None:
         if model is media_api.RemoteMediaTombstone:
@@ -109,9 +111,13 @@ class CacheSession:
             return self.cached if self.cache_gets > 1 else None
         if model is media_api.RemoteMediaOrphan:
             return None
+        if model is media_api.Message:
+            return None
         raise AssertionError("unexpected cache model lookup")
 
     async def scalar(self, statement: object) -> object:
+        if getattr(statement, "column_descriptions", [{}])[0].get("name") == "AbuseReport":
+            return self.safety_report
         if "FROM abuse_reports" in str(statement):
             if self.photodna_reports:
                 return self.photodna_reports.pop(0)
@@ -241,6 +247,7 @@ async def test_known_remote_photodna_match_is_rejected_without_refetch(
 async def test_remote_media_not_yet_published_is_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    install_direct_file_io(monkeypatch)
     response = httpx.Response(
         404,
         request=httpx.Request("GET", "https://beta.localhost/media"),
@@ -388,9 +395,13 @@ async def test_spool_scan_upload_pipeline_behavior(
     }
 
 
-async def test_remote_photodna_match_is_reported_and_never_cached(
+@pytest.mark.parametrize("preservation_fails", [False, True])
+async def test_remote_photodna_match_is_preserved_privately_and_never_cached(
     monkeypatch: pytest.MonkeyPatch,
+    preservation_fails: bool,
 ) -> None:
+    from app.safety import service
+
     body = b"\x89PNG\r\n\x1a\n" + (b"safe-test-payload" * 40)
     response = httpx.Response(
         200,
@@ -399,6 +410,7 @@ async def test_remote_photodna_match_is_reported_and_never_cached(
         request=httpx.Request("GET", "https://beta.localhost/media"),
     )
     session = CacheSession(None)
+    session.safety_report = SimpleNamespace(id=900)
     redis = object()
     install_direct_file_io(monkeypatch)
 
@@ -422,16 +434,20 @@ async def test_remote_photodna_match_is_reported_and_never_cached(
 
     class Storage:
         def __init__(self, _settings: object) -> None:
-            raise AssertionError("a matched remote image must never reach object storage")
+            raise AssertionError("a matched remote image must never reach public cache storage")
 
     increment = AsyncMock()
+    capture = AsyncMock(
+        side_effect=StorageError("preservation unavailable") if preservation_fails else None
+    )
+    monkeypatch.setattr(service, "capture_finding", capture)
     monkeypatch.setattr(media_api, "signed_stream_request", stream)
     monkeypatch.setattr(media_api, "clamav_scan_file", AsyncMock(return_value="clean"))
     monkeypatch.setattr(media_api, "scan_image", scan)
     monkeypatch.setattr(media_api, "S3Storage", Storage)
     monkeypatch.setattr(media_api, "increment_metric", increment)
 
-    with pytest.raises(HTTPException) as raised:
+    with pytest.raises(StorageError if preservation_fails else HTTPException) as raised:
         await media_api.cache_remote_media(
             cast(Any, session),
             cast(Any, media_settings()),
@@ -443,6 +459,14 @@ async def test_remote_photodna_match_is_reported_and_never_cached(
             message_ref=(8, "beta.localhost"),
         )
 
+    capture.assert_awaited_once()
+    assert capture.await_args.args[2] is session.safety_report
+    assert capture.await_args.args[4] == body
+    assert capture.await_args.kwargs["provenance"] == "federated_origin"
+    if preservation_fails:
+        assert session.commits == 0
+        increment.assert_not_awaited()
+        return
     assert cast(dict[str, object], raised.value.detail)["code"] == "REMOTE_MEDIA_REJECTED"
     assert session.commits == 1
     assert len(session.statements) == 1

@@ -12,6 +12,7 @@ import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/instance_administration.dart';
 import 'package:kaede_mobile/src/features/settings/administration_attachment_viewer.dart';
+import 'package:kaede_mobile/src/features/settings/child_safety_queue.dart';
 import 'package:kaede_mobile/src/features/settings/rtc_settings.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/settings_ui.dart';
@@ -23,6 +24,7 @@ enum _AdminSection {
   users('Users', 'admin.read'),
   applications('Applications', 'admin.read'),
   reports('Reports', 'reports.read'),
+  childSafety('Child safety', 'safety.read'),
   instances('Instance blocks', 'admin.read'),
   operators('Operators', 'admin.read'),
   audit('Audit log', 'audit.read');
@@ -114,6 +116,7 @@ final class _InstanceAdministrationScreenState
     try {
       switch (_section) {
         case _AdminSection.rtc:
+        case _AdminSection.childSafety:
           break;
         case _AdminSection.overview:
           _overview = await repository.administrationOverview();
@@ -774,6 +777,12 @@ final class _InstanceAdministrationScreenState
         _AdminSection.users => _userWidgets(),
         _AdminSection.applications => _applicationWidgets(),
         _AdminSection.reports => _reportWidgets(),
+        _AdminSection.childSafety => [
+            ChildSafetyQueue(
+                repository: repository,
+                canManage: can('safety.manage'),
+                canViewEvidence: can('safety.evidence'))
+          ],
         _AdminSection.instances => _blockWidgets(),
         _AdminSection.operators => _operatorWidgets(),
         _AdminSection.audit => _auditWidgets(),

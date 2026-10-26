@@ -15,6 +15,7 @@ import {
   validTraceId
 } from './errors';
 import { stripNetworkClientState } from './network-boundary';
+import { contentSafety } from '$lib/chat/content-safety.svelte';
 
 export { ApiError, userErrorMessage } from './errors';
 
@@ -238,6 +239,7 @@ async function send(path: string, init: RequestInit): Promise<Response> {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const safetyRevision = contentSafety.revision;
   let response = await send(path, init);
   if (response.status === 401 && !PUBLIC_AUTH_PATHS.has(path)) {
     const refresh = await refreshSession();
@@ -280,7 +282,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (response.status === 204) return undefined as T;
   try {
-    return stripNetworkClientState((await response.json()) as T);
+    return stripNetworkClientState((await response.json()) as T, safetyRevision);
   } catch {
     const traceId = validTraceId(response.headers.get('X-Kaede-Trace-Id'));
     const detail: Record<string, unknown> = traceId ? { trace_id: traceId } : {};

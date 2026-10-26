@@ -10,6 +10,7 @@
   import { uploadObject, type UploadTicket } from '$lib/media/uploads';
   import { encryptedReportDisclosure } from '$lib/reports/message-evidence';
   import { portal } from '$lib/ui/portal';
+  import { hideReportedMessage, syncContentSafety } from '$lib/chat/content-safety.svelte';
 
   let {
     message,
@@ -28,6 +29,7 @@
   } = $props();
 
   const categories = [
+    ['csam', 'Child sexual abuse material (CSAM)'],
     ['spam', 'Spam'],
     ['harassment', 'Harassment'],
     ['hate', 'Hate'],
@@ -213,6 +215,12 @@
           })
         });
       }
+      if (category === 'csam') {
+        hideReportedMessage(message);
+        if (chatEntities.currentUser)
+          void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
+      }
+      decryptedEvidence = null;
       onSubmitted?.();
       onClose();
     } catch (caught) {

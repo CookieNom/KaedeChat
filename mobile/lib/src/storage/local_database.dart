@@ -150,6 +150,35 @@ final class LocalDatabase {
         whereArgs: <Object?>[accountKey, kind, entityKey],
       );
 
+  /// Enumerates encrypted snapshots for durable safety reconciliation, including
+  /// conversations that have not been opened in this session.
+  Future<List<Map<String, Object?>>> safetySnapshots(String accountKey) async {
+    final rows = await database.query('snapshots',
+        columns: const ['payload'],
+        where: 'account_key = ? AND kind != ?',
+        whereArgs: [accountKey, 'content_safety']);
+    return [
+      for (final row in rows)
+        Map<String, Object?>.from(
+            await _cipher.decryptJson(row['payload']! as String) as Map),
+    ];
+  }
+
+  Future<void> purgeSafetySnapshots(
+    String accountKey,
+    bool Function(Object?) blocked,
+  ) async {
+    final rows = await database.query('snapshots',
+        where: 'account_key = ? AND kind != ?',
+        whereArgs: [accountKey, 'content_safety']);
+    for (final row in rows) {
+      if (blocked(await _cipher.decryptJson(row['payload']! as String))) {
+        await removeSnapshot(
+            accountKey, row['kind']! as String, row['entity_key']! as String);
+      }
+    }
+  }
+
   Future<void> clearSnapshots(String accountKey, String kind) =>
       database.delete(
         'snapshots',

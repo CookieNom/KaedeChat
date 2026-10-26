@@ -567,7 +567,7 @@ def message_payload(
             "channel_id": str(message.forwarded_channel_id),
             "channel_domain": message.forwarded_channel_domain,
         }
-    return {
+    payload: dict[str, object] = {
         "id": str(message.id),
         "origin_domain": message.origin_domain,
         "channel_id": str(message.channel_id),
@@ -670,6 +670,49 @@ def message_payload(
         "created_at": message.created_at.isoformat(),
     }
 
+    state = getattr(message, "safety_state", None)
+    safety_updated_at = getattr(message, "safety_updated_at", None)
+    payload.update(
+        safety_state=state,
+        safety_reason=getattr(message, "safety_reason", None),
+        safety_updated_at=safety_updated_at.isoformat() if safety_updated_at else None,
+        safety_locked=bool(state),
+    )
+    if state:
+        payload.update(
+            content=message.safety_reason,
+            e2ee=None,
+            attachments=[],
+            embeds=[],
+            components=[],
+            sticker_items=[],
+            message_snapshots=[],
+            forward_snapshot=None,
+            forwarded_message_id=None,
+            forwarded_message_domain=None,
+            forwarded_message_ref=None,
+            forwarded_channel_id=None,
+            forwarded_channel_domain=None,
+            referenced_message_id=None,
+            referenced_message_domain=None,
+            message_reference=None,
+            application_id=None,
+            application_domain=None,
+            interaction_metadata=None,
+            view_version=0,
+            view_persistent=False,
+            view_expires_at=None,
+            tts=False,
+            flags=0,
+            message_type=0,
+            poll=None,
+            poll_result=None,
+            mention_user_refs=[],
+            mention_role_refs=[],
+            mention_everyone=False,
+        )
+    return payload
+
 
 async def render_message_payload(
     session: AsyncSession,
@@ -706,6 +749,8 @@ async def render_message_payload(
         view=await session.get(MessageView, (message.id, message.origin_domain)),
         include_forward_source=include_forward_source,
     )
+    if getattr(message, "safety_state", None):
+        return rendered
     flags = int(message.flags or 0)
     message_type = int(message.message_type or 0)
     if flags & (1 << 5) or message_type == 18:

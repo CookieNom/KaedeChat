@@ -2,6 +2,11 @@ import { readFileSync } from 'node:fs';
 import { beforeAll, expect, it, vi } from 'vitest';
 import type { Channel, Message, UserSummary } from '$lib/chat/types';
 import { buildTimeline } from '$lib/chat/timeline';
+import {
+  acceptAuthorizedMessage,
+  applyContentSafetyUpdate,
+  contentSafety
+} from '$lib/chat/content-safety.svelte';
 import { decryptConversationMessages, KaedeE2EEClient, MLS_PROTOCOL, MLS_SUITE } from './client';
 import { base64url, concatBytes, decodeUtf8, fromBase64url, sha256, utf8 } from './encoding';
 import { initSync, KaedeMlsClient } from './wasm/kaede_e2ee';
@@ -9,6 +14,7 @@ import {
   accountVaultChainRoot,
   accountVaultEnvelopeDigest,
   confirmedDeviceState,
+  openAccountVaultState,
   sealAccountVaultState,
   ZERO_VAULT_CHAIN,
   type DeviceState,
@@ -166,6 +172,7 @@ async function senderClient(recoverActivation: boolean) {
   io.checkpoint.mockResolvedValue({ revision: '1', digest: vault.digest, chainRoot });
   let activationAttempts = 0;
   io.api.mockImplementation(async (path: string, options?: RequestInit) => {
+    if (path === '/safety/content-status') return { items: [] };
     if (path === '/e2ee/devices')
       return {
         devices: [
@@ -224,13 +231,13 @@ async function senderClient(recoverActivation: boolean) {
   }
   const client = await KaedeE2EEClient.initialize(user);
   expect(activationAttempts).toBe(recoverActivation ? 3 : 0);
-  return { client, controls, other };
+  return { client, controls, other, key, getVault: () => vault };
 }
 
 it.each([false, true])(
-  'verifies sent text after vault restore (recover activation: %s)',
+  'verifies restored text then removes confirmed content from both vaults (recover activation: %s)',
   async (recoverActivation) => {
-    const { client, controls, other } = await senderClient(recoverActivation);
+    const { client, controls, other, key, getVault } = await senderClient(recoverActivation);
     try {
       const setup = await decryptConversationMessages(client, channel, controls);
       expect(buildTimeline(setup)).toEqual([]);
@@ -246,7 +253,7 @@ it.each([false, true])(
         received.free();
       }
       const message = {
-        id: '30',
+        id: recoverActivation ? '31' : '30',
         origin_domain: 'chat.example',
         channel_id: channel.id,
         channel_domain: channel.origin_domain,
@@ -282,6 +289,52 @@ it.each([false, true])(
         await expect(restored.decryptMessage(channel, message)).resolves.toMatchObject({
           content: 'Hello'
         });
+        const messageRef = `${message.id}@${message.origin_domain}`;
+        for (const state of ['pending_review', 'unavailable'] as const) {
+          applyContentSafetyUpdate({
+            state,
+            reason: 'Temporary',
+            message_refs: [messageRef],
+            attachment_refs: []
+          });
+          await restored.purgeSafetyCache();
+          await expect(restored.decryptMessage(channel, message)).resolves.toBeNull();
+          const retained = await openAccountVaultState('7@chat.example', key, getVault().envelope);
+          expect(
+            Object.values(retained.messageCache ?? {}).some(
+              (entry) => entry.messageRef === messageRef
+            )
+          ).toBe(true);
+          if (state === 'pending_review')
+            applyContentSafetyUpdate({
+              state: 'released',
+              reason: 'Dismissed',
+              message_refs: [messageRef],
+              attachment_refs: []
+            });
+          else acceptAuthorizedMessage(message, contentSafety.revision);
+          await expect(restored.decryptMessage(channel, message)).resolves.toMatchObject({
+            content: 'Hello'
+          });
+        }
+        applyContentSafetyUpdate({
+          state: 'removed',
+          reason: 'Confirmed',
+          message_refs: [messageRef],
+          attachment_refs: []
+        });
+        await restored.purgeSafetyCache();
+        const local = await io.state();
+        expect(
+          Object.values(local.messageCache ?? {}).some(
+            (entry) => (entry as { messageRef: string }).messageRef === messageRef
+          )
+        ).toBe(false);
+        const remote = await openAccountVaultState('7@chat.example', key, getVault().envelope);
+        expect(
+          Object.values(remote.messageCache ?? {}).some((entry) => entry.messageRef === messageRef)
+        ).toBe(false);
+        await expect(restored.decryptMessage(channel, message)).resolves.toBeNull();
       } finally {
         await restored.close();
       }

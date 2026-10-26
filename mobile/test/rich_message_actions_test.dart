@@ -47,6 +47,10 @@ void main() {
     expect(canDeleteMessage(channel, own, null), isFalse);
     expect(canEditMessage(channel, other, actor), isFalse);
     expect(canEditMessage(channel, own, actor), isTrue);
+    final safetyLocked =
+        own.copyWith(safetyState: 'pending_review', safetyLocked: true);
+    expect(canDeleteMessage(channel, safetyLocked, actor), isFalse);
+    expect(canEditMessage(channel, safetyLocked, actor), isFalse);
     for (final type in [6, 12, 46]) {
       expect(canEditMessage(channel, own.copyWith(messageType: type), actor),
           isFalse);

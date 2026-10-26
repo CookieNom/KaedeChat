@@ -24,6 +24,8 @@ import {
 import { attachmentMediaPath, authenticatedMediaBlob } from '$lib/media/authenticated';
 import { uploadChannelFile, type UploadTicket, type VoiceUploadMetadata } from '$lib/media/uploads';
 import { base64url, clearBytes, sha256 } from '$lib/e2ee/encoding';
+import { assertMediaAvailable } from '$lib/media/content-revocation';
+import { messageAvailabilityRestricted, safetyMessageRestriction } from './content-safety.svelte';
 
 const FORWARD_NONCE = /^[A-Za-z0-9._:-]{1,64}$/u;
 const CANONICAL_DIGEST = /^[A-Za-z0-9_-]{43}$/u;
@@ -630,6 +632,8 @@ async function destinationMessage(
   client: KaedeE2EEClient | null | undefined,
   signal?: AbortSignal
 ): Promise<Record<string, unknown>> {
+  if (safetyMessageRestriction(source.message_ref))
+    throw new Error('The source message is no longer available.');
   const sourceAttachments = snapshot.attachments as unknown[];
   const needsCopies = preparedForwardNeedsCopies(
     source.encryption_mode,
@@ -645,6 +649,7 @@ async function destinationMessage(
       // Rich-v2 canonicalizes attachment refs while the source commitment
       // preserves semantic order. Sequential tickets keep both orders equal.
       for (let index = 0; index < files.length; index += 1) {
+        assertMediaAvailable(attachmentBindingRef(sourceAttachments[index]));
         uploads.push(
           await uploadEncryptedChannelFile(
             destination.channel_id,
@@ -661,6 +666,7 @@ async function destinationMessage(
     } else {
       const tickets = [];
       for (let index = 0; index < files.length; index += 1) {
+        assertMediaAvailable(attachmentBindingRef(sourceAttachments[index]));
         tickets.push(
           await uploadChannelFile(
             destination.channel_id,
@@ -731,6 +737,8 @@ export async function executePreparedForward({
   }
   const sourceChannelRef = entityRef(sourceChannel);
   const sourceMessageRef = entityRef(source);
+  if (safetyMessageRestriction(sourceMessageRef) || messageAvailabilityRestricted(source))
+    throw new Error('The source message is no longer available.');
   if (!parseCanonicalEntityRef(requesterRef)) {
     throw new Error('The forwarding requester identity is invalid.');
   }
@@ -810,6 +818,8 @@ export async function executePreparedForward({
       message: { ...message, forward_source_proof: destination.authorization }
     };
   });
+  if (safetyMessageRestriction(sourceMessageRef) || messageAvailabilityRestricted(source))
+    throw new Error('The source message is no longer available.');
   return validateForwardMessageResult(
     await submitPreparedMessageForward(sourceChannelRef, sourceMessageRef, refreshedMessages),
     sourceMessageRef,

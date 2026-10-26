@@ -50,6 +50,7 @@ SENSITIVE_NAMES = {
     "KAEDE_PUSH_RELAY_FCM_SERVICE_ACCOUNT_B64",
     "KAEDE_PUSH_FCM_SERVICE_ACCOUNT_B64",
     "KAEDE_SECRET_KEY",
+    "KAEDE_SAFETY_EVIDENCE_KEY",
     "KAEDE_SEARCH_MASTER_KEY",
     "KAEDE_SMTP_URL",
     "LIVEKIT_API_KEY",
@@ -655,6 +656,15 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
     photodna_enabled = values.get("KAEDE_PHOTODNA_ENABLED", "false").strip().lower()
     if photodna_enabled not in {"true", "false"}:
         raise DeploymentConfigurationError("KAEDE_PHOTODNA_ENABLED must be true or false")
+    evidence_key = values.get("KAEDE_SAFETY_EVIDENCE_KEY", "").strip()
+    if (evidence_key or photodna_enabled == "true") and (
+        len(evidence_key) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in evidence_key)
+    ):
+        raise DeploymentConfigurationError(
+            "KAEDE_SAFETY_EVIDENCE_KEY must contain 64 hexadecimal characters; "
+            "it is required when PhotoDNA matching is enabled"
+        )
     if photodna_enabled == "true":
         subscription_key = values.get("KAEDE_PHOTODNA_SUBSCRIPTION_KEY", "").strip()
         if (

@@ -1954,6 +1954,9 @@ final class KaedeMessage {
     this.thread,
     this.referencedMessage,
     this.contentUnavailable = false,
+    this.safetyState,
+    this.safetyReason,
+    this.safetyLocked = false,
     this.createdAtAvailable = true,
     this.deletedAt,
     this.historyPageComplete = false,
@@ -2187,6 +2190,9 @@ final class KaedeMessage {
                 )
               : null,
       contentUnavailable: _boolean(json['content_unavailable']),
+      safetyState: _string(json['safety_state']),
+      safetyReason: _string(json['safety_reason']),
+      safetyLocked: _boolean(json['safety_locked']),
       deletedAt: _string(json['deleted_at']) == null
           ? null
           : DateTime.parse(json['deleted_at']! as String).toUtc(),
@@ -2301,6 +2307,9 @@ final class KaedeMessage {
   final KaedeChannel? thread;
   final KaedeMessage? referencedMessage;
   final bool contentUnavailable;
+  final String? safetyState;
+  final String? safetyReason;
+  final bool safetyLocked;
   final bool createdAtAvailable;
   final DateTime? deletedAt;
   final bool historyPageComplete;
@@ -2395,6 +2404,9 @@ final class KaedeMessage {
     KaedeMessage? referencedMessage,
     bool clearReferencedMessage = false,
     bool? contentUnavailable,
+    String? safetyState,
+    String? safetyReason,
+    bool? safetyLocked,
     bool? createdAtAvailable,
     DateTime? deletedAt,
     bool? historyPageComplete,
@@ -2481,6 +2493,9 @@ final class KaedeMessage {
             ? null
             : referencedMessage ?? this.referencedMessage,
         contentUnavailable: contentUnavailable ?? this.contentUnavailable,
+        safetyState: safetyState ?? this.safetyState,
+        safetyReason: safetyReason ?? this.safetyReason,
+        safetyLocked: safetyLocked ?? this.safetyLocked,
         createdAtAvailable: createdAtAvailable ?? this.createdAtAvailable,
         deletedAt: deletedAt ?? this.deletedAt,
         historyPageComplete: historyPageComplete ?? this.historyPageComplete,
@@ -2563,6 +2578,9 @@ final class KaedeMessage {
         'thread': thread?.toJson(),
         'referenced_message': referencedMessage?.toJson(),
         'content_unavailable': contentUnavailable,
+        'safety_state': safetyState,
+        'safety_reason': safetyReason,
+        'safety_locked': safetyLocked,
         'deleted_at': deletedAt?.toUtc().toIso8601String(),
         'history_page_complete': historyPageComplete,
         'history_page_error_code': historyPageErrorCode,

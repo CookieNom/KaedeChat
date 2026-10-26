@@ -2499,6 +2499,9 @@ class Message(Base, FederatedIdMixin):
     author_id: Mapped[int] = mapped_column(BigInteger)
     author_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
     content: Mapped[str | None] = mapped_column(Text)
+    safety_state: Mapped[str | None] = mapped_column(String(24))
+    safety_reason: Mapped[str | None] = mapped_column(String(500))
+    safety_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # SQL NULL means a plaintext message.  JSONB's default encodes Python None
     # as the JSON literal `null`, which is neither absent nor a valid envelope
     # and violates the object-only database invariant.
@@ -2588,6 +2591,10 @@ class Message(Base, FederatedIdMixin):
         # is evicted from a non-authoritative DM cache. Mutation paths validate
         # that a newly supplied reference belongs to this channel.
         CheckConstraint("id >= 0", name="nonnegative_id"),
+        CheckConstraint(
+            "safety_state IS NULL OR safety_state IN ('pending_review','removed','hidden')",
+            name="safety_state_value",
+        ),
         CheckConstraint(
             "(referenced_message_id IS NULL) = (referenced_message_domain IS NULL)",
             name="referenced_message_ref_complete",
@@ -3213,6 +3220,13 @@ class Attachment(Base, FederatedIdMixin, TimestampMixin):
             name="uq_attachments_message_source_attachment",
         ),
         Index("ix_attachments_report_id", "report_id"),
+        Index("ix_attachments_object_key", "object_key"),
+        Index(
+            "ix_attachments_variants_object_keys",
+            "variants",
+            postgresql_using="gin",
+            postgresql_ops={"variants": "jsonb_path_ops"},
+        ),
         Index(
             "ix_attachments_pending_gc",
             "upload_expires_at",
@@ -5364,6 +5378,7 @@ class InstanceBlock(Base):
 
 # Keep extension models registered when callers import this canonical module.
 from app.db import bot_models as bot_models  # noqa: E402, F401
+from app.safety import models as safety_models  # noqa: E402, F401
 
 ALL_MODEL_TABLES = tuple(Base.metadata.tables)
 

@@ -609,6 +609,9 @@ async def delete_guild(
             )
         ).tuples()
     )
+    from app.safety.enforcement import ensure_channels_deletable
+
+    await ensure_channels_deletable(session, list(channel_refs))
     if await announcement_dependencies_exist(session, channel_refs):
         raise HTTPException(
             status_code=409,

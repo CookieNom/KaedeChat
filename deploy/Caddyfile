@@ -74,28 +74,48 @@ http://{$KAEDE_DOMAIN} {
 }
 
 http://media.{$KAEDE_DOMAIN} {
-	@untrusted_edge not header X-Kaede-Edge-Secret {$KAEDE_EDGE_SECRET}
-	respond @untrusted_edge 403
+	route {
+		# Evidence is served only by the authenticated case API. Caddy matches decoded paths.
+		@private_evidence path_regexp private_evidence (^|/)evidence(/|$)
+		respond @private_evidence 404
+		@untrusted_edge not header X-Kaede-Edge-Secret {$KAEDE_EDGE_SECRET}
+		respond @untrusted_edge 403
 
-	header {
-		-Server
-		Referrer-Policy "no-referrer"
-		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
-		Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
-		Access-Control-Allow-Headers "Content-Type"
-	}
-	@media_upload method PUT OPTIONS
-	header @media_upload Access-Control-Allow-Origin "*"
-	# GET capabilities are bearer URLs with short-lived signatures. Wildcard
-	# CORS lets federated Web clients verify bytes from the guild authority.
-	@media_read method GET HEAD
-	header @media_read Access-Control-Allow-Origin "*"
-	@cors_preflight method OPTIONS
-	respond @cors_preflight 204
-	reverse_proxy garage:3900 {
-		header_up -X-Kaede-Edge-Secret
+		header {
+			-Server
+			Referrer-Policy "no-referrer"
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+			Access-Control-Allow-Methods "GET, HEAD, PUT, OPTIONS"
+			Access-Control-Allow-Headers "Content-Type"
+		}
+		@media_upload method PUT OPTIONS
+		header @media_upload Access-Control-Allow-Origin "*"
+		# GET capabilities are bearer URLs with short-lived signatures. Wildcard
+		# CORS lets federated Web clients verify bytes from the guild authority.
+		@media_read method GET HEAD
+		header @media_read Access-Control-Allow-Origin "*"
+		header @media_read Cache-Control "private, no-store"
+		@cors_preflight method OPTIONS
+		respond @cors_preflight 204
+		# Check each previously issued read capability against current safety state.
+		# Garage still verifies its signature; writes and preflight remain unchanged.
+		request_header @media_read X-Kaede-Media-Path {http.request.uri.path}
+		forward_auth @media_read api:8000 {
+			uri /api/v1/safety/media-access
+			header_up X-Kaede-Proxy-Secret {$KAEDE_PROXY_SECRET}
+			header_up X-Kaede-Media-Gate-Secret {$KAEDE_PROXY_SECRET}
+			header_up -X-Kaede-Edge-Secret
+			header_up -Authorization
+			header_up -Cookie
+			# Do not pass bearer query credentials to the authorization service.
+			header_up -X-Forwarded-Uri
+		}
+		reverse_proxy garage:3900 {
+			header_up -X-Kaede-Edge-Secret
+			header_up -X-Kaede-Media-Path
+		}
 	}
 }
 

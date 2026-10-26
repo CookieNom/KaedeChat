@@ -2458,6 +2458,9 @@ async def media_process(attachment_id: int, origin_domain: str) -> str:
             # a private interaction response, whose edit path locks in the
             # opposite (response -> attachment) order.
             await session.commit()
+            from app.chat.postcommit import publish_committed_dispatches
+
+            await publish_committed_dispatches(session, redis)
             attachment = await session.get(Attachment, (attachment_id, origin_domain))
             # Terminal verdict state, public projection invalidation, and all
             # signed outbox rows were committed atomically by
@@ -2909,6 +2912,8 @@ async def bot_interaction_expiry_sweep() -> int:
 async def media_processing_sweep() -> int:
     """Recover finalized uploads whose best-effort processing wake was lost."""
 
+    from app.safety.enforcement import pending_attachment_review
+
     settings = get_settings()
     engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
     try:
@@ -2920,6 +2925,7 @@ async def media_processing_sweep() -> int:
                         Attachment.origin_domain == settings.domain,
                         Attachment.finalized_at.is_not(None),
                         Attachment.deleted_at.is_(None),
+                        ~pending_attachment_review(),
                         or_(
                             Attachment.scan_status.in_(("pending", "failed")),
                             and_(
@@ -3433,6 +3439,108 @@ async def media_retention() -> int:
     try:
         async with sessionmaker() as session:
             return await retention_sweep(session, settings)
+    finally:
+        await engine.dispose()
+
+
+@broker.task(task_name="safety.evidence_retry", schedule=[{"cron": "* * * * *"}])
+@observed_job("safety.evidence_retry")
+async def safety_evidence_retry() -> int:
+    from app.safety.service import drain_buffered_evidence, import_legacy_reports
+
+    settings = get_settings()
+    if settings.safety_evidence_key is None:
+        return 0
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            await import_legacy_reports(session, settings)
+            copied = await drain_buffered_evidence(session, settings)
+            await session.commit()
+            return copied
+    finally:
+        await engine.dispose()
+
+
+@broker.task(task_name="safety.media_removal", schedule=[{"cron": "* * * * *"}])
+@observed_job("safety.media_removal")
+async def safety_media_removal() -> int:
+    from app.safety.removal import retry_case_removals
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    try:
+        async with sessionmaker() as session:
+            attempted = await retry_case_removals(session, settings)
+            await session.commit()
+            return attempted
+    finally:
+        await engine.dispose()
+
+
+@broker.task(task_name="safety.retention", schedule=[{"cron": "47 4 * * *"}])
+@observed_job("safety.retention")
+async def safety_retention() -> int:
+    from app.db.bot_models import InstanceAuditEvent
+    from app.safety.models import ChildSafetyCase
+    from app.safety.service import can_dispose, dispose_evidence
+
+    settings = get_settings()
+    if settings.safety_evidence_key is None:
+        return 0
+    snowflake = _worker_snowflake
+    if snowflake is None:
+        raise RuntimeError("safety retention requires the worker Snowflake lease")
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    disposed = 0
+    try:
+        async with sessionmaker() as session:
+            cases = list(
+                await session.scalars(
+                    select(ChildSafetyCase)
+                    .where(
+                        ChildSafetyCase.closed_at.is_not(None),
+                        ChildSafetyCase.disposed_at.is_(None),
+                        ChildSafetyCase.status.in_(["confirmed", "dismissed"]),
+                        or_(
+                            ChildSafetyCase.status == "dismissed",
+                            ChildSafetyCase.removal_completed_at.is_not(None),
+                        ),
+                        or_(
+                            ChildSafetyCase.status == "dismissed",
+                            ChildSafetyCase.completed_submission_at.is_not(None),
+                        ),
+                        text(
+                            "NOT jsonb_path_exists(child_safety_cases.holds, "
+                            "'$[*] ? (!exists(@.released_at) || @.released_at == null)')"
+                        ),
+                        or_(
+                            ChildSafetyCase.retain_until.is_(None),
+                            ChildSafetyCase.retain_until <= datetime.now(UTC),
+                        ),
+                    )
+                    .order_by(ChildSafetyCase.id)
+                    .with_for_update(skip_locked=True)
+                    .limit(100)
+                )
+            )
+            for case in cases:
+                if not can_dispose(case):
+                    continue
+                await dispose_evidence(session, settings, case)
+                session.add(
+                    InstanceAuditEvent(
+                        id=await snowflake.mint(),
+                        actor_kind="system",
+                        action="admin.safety.evidence.expired",
+                        target_type="child_safety_case",
+                        target_ref=str(case.id),
+                        detail={},
+                    )
+                )
+                disposed += 1
+            await session.commit()
+        return disposed
     finally:
         await engine.dispose()
 
@@ -4168,6 +4276,7 @@ async def delete_account_content() -> int:
                                         Message.author_id == User.id,
                                         Message.author_domain == User.origin_domain,
                                         Message.deleted_at.is_(None),
+                                        Message.safety_state.is_(None),
                                     ),
                                 ),
                             ),

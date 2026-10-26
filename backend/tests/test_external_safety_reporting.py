@@ -9,21 +9,23 @@ from pydantic import ValidationError
 from app.admin.auth import AdminPrincipal
 from app.api import admin_portal
 from app.api.admin_portal import ExternalReportSubmission
+from app.db.bot_models import AbuseReport
+from app.safety.models import ChildSafetyReport
 
 
-def case():
+def case(*, source="user"):
     now = datetime.now(UTC)
     return SimpleNamespace(
         id=42,
-        source="photodna",
+        source=source,
         evidence={"content_sha256": "a" * 64},
         target_type="attachment",
         target_ref="7@remote.test",
         message_ref="8@remote.test",
-        reporter_id=None,
-        reporter_domain=None,
+        reporter_id=9 if source == "user" else None,
+        reporter_domain="home.test" if source == "user" else None,
         category="illegal_content",
-        description="Automated match",
+        description="Reported illegal content",
         encryption_mode="plaintext",
         status="submitted",
         assigned_admin_id=None,
@@ -33,6 +35,17 @@ def case():
         updated_at=now,
         resolved_at=None,
     )
+
+
+def report_session(report):
+    async def get(model, key, **_kwargs):
+        assert key == report.id
+        if model is AbuseReport:
+            return report
+        assert model is ChildSafetyReport
+        return None
+
+    return SimpleNamespace(get=AsyncMock(side_effect=get), commit=AsyncMock(), refresh=AsyncMock())
 
 
 def principal(capabilities=frozenset({"reports.manage"})):
@@ -56,9 +69,7 @@ def test_external_submission_rejects_blank_fields_and_invalid_times():
 @pytest.mark.asyncio
 async def test_submission_appends_without_overwriting_evidence_and_is_audited(monkeypatch):
     report = case()
-    session = SimpleNamespace(
-        get=AsyncMock(return_value=report), commit=AsyncMock(), refresh=AsyncMock()
-    )
+    session = report_session(report)
     audit = AsyncMock()
     monkeypatch.setattr(admin_portal, "audit", audit)
     payload = ExternalReportSubmission(
@@ -70,13 +81,13 @@ async def test_submission_appends_without_overwriting_evidence_and_is_audited(mo
     assert len(report.evidence["external_submissions"]) == 2
     assert report.evidence["external_submissions"][0]["recorded_by"] == "1@home.test"
     assert audit.await_count == 2
-    assert session.get.call_args.kwargs["with_for_update"] is True
+    session.get.assert_any_await(AbuseReport, 42, with_for_update=True)
 
 
 @pytest.mark.asyncio
 async def test_export_includes_origin_evidence_and_audits_access(monkeypatch):
     report = case()
-    session = SimpleNamespace(get=AsyncMock(return_value=report), commit=AsyncMock())
+    session = report_session(report)
     audit = AsyncMock()
     monkeypatch.setattr(admin_portal, "audit", audit)
     monkeypatch.setattr(admin_portal, "report_identity_lookup", AsyncMock(return_value={}))
@@ -99,6 +110,34 @@ async def test_export_includes_origin_evidence_and_audits_access(monkeypatch):
             Response(),
         )
     assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["export", "submission"])
+async def test_legacy_photodna_report_requires_dedicated_safety_queue(monkeypatch, operation):
+    report = case(source="photodna")
+    session = report_session(report)
+    audit = AsyncMock()
+    monkeypatch.setattr(admin_portal, "audit", audit)
+    with pytest.raises(HTTPException) as error:
+        if operation == "export":
+            await admin_portal.export_report(
+                42, principal(), session, None, SimpleNamespace(domain="home.test"), Response()
+            )
+        else:
+            await admin_portal.record_external_submission(
+                42,
+                ExternalReportSubmission(
+                    destination="Authority", reference="receipt-1", submitted_at=datetime.now(UTC)
+                ),
+                principal(),
+                session,
+                None,
+            )
+    assert error.value.status_code == 404
+    assert report.evidence == {"content_sha256": "a" * 64}
+    audit.assert_not_awaited()
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

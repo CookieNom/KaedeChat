@@ -5,6 +5,7 @@
   import VoiceMessageFrame from './VoiceMessageFrame.svelte';
   import { decryptEncryptedAttachment, type EncryptedFileManifest } from '$lib/e2ee/media';
   import { onDestroy } from 'svelte';
+  import { createMediaObjectURL, revokeMediaObjectURL } from '$lib/media/content-revocation';
 
   let {
     manifest,
@@ -36,7 +37,7 @@
 
   function revokeObjectUrl(): void {
     if (!objectUrl) return;
-    URL.revokeObjectURL(objectUrl);
+    revokeMediaObjectURL(objectUrl);
     objectUrl = null;
   }
 
@@ -54,7 +55,7 @@
         targetAttachment?.private_media_url
       );
       if (!active || attempt !== generation || targetKey !== loadedKey) return;
-      const nextObjectUrl = URL.createObjectURL(plaintext);
+      const nextObjectUrl = createMediaObjectURL(plaintext);
       revokeObjectUrl();
       objectUrl = nextObjectUrl;
     } catch (caught) {

@@ -313,6 +313,7 @@ class Settings(BaseSettings):
     media_clamav_host: str = "clamav"
     media_clamav_port: int = Field(default=3310, ge=1, le=65535)
     photodna_enabled: bool = False
+    safety_evidence_key: SecretStr | None = None
     photodna_subscription_key: SecretStr | None = None
     photodna_sdk_root: str | None = Field(
         default=None,
@@ -415,6 +416,7 @@ class Settings(BaseSettings):
         "media_s3_secret_key",
         "media_s3_session_token",
         "photodna_subscription_key",
+        "safety_evidence_key",
         "photodna_sdk_root",
         "media_s3_create_buckets",
         "media_retention_days",
@@ -1191,6 +1193,21 @@ class Settings(BaseSettings):
             ):
                 raise ValueError("email_from_address must use a qualified domain in production")
         return self
+
+    @property
+    def safety_evidence_key_bytes(self) -> bytes:
+        if self.safety_evidence_key is None:
+            raise ValueError("KAEDE_SAFETY_EVIDENCE_KEY is required for child-safety evidence")
+        return bytes.fromhex(self.safety_evidence_key.get_secret_value())
+
+    @field_validator("safety_evidence_key")
+    @classmethod
+    def validate_safety_evidence_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            raw = value.get_secret_value()
+            if len(raw) != 64 or any(c not in "0123456789abcdefABCDEF" for c in raw):
+                raise ValueError("safety_evidence_key must contain 64 hexadecimal characters")
+        return value
 
     @property
     def secret_key_bytes(self) -> bytes:

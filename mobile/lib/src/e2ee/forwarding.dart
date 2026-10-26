@@ -598,7 +598,7 @@ Future<List<File>> _downloadSourceFiles(
         throw StateError('A forward source attachment is unavailable.');
       }
       final file = File(
-        '${directory.path}/kaede-forward-${DateTime.now().microsecondsSinceEpoch}-$index',
+        '${directory.path}/kaede-media-${projection.ref.id.value}-${projection.ref.domain.value}-forward-${DateTime.now().microsecondsSinceEpoch}-$index',
       );
       if (raw['protocol'] == 'kaede-file-v1') {
         await downloadEncryptedFile(

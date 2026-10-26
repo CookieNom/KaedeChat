@@ -8,6 +8,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
 import 'package:kaede_mobile/src/e2ee/native_mls.dart';
@@ -4476,6 +4477,7 @@ final class MobileE2EEClient {
     MobileE2EEStore store = const MobileE2EEStore(),
   }) async {
     final accountRef = user.ref.wire;
+    await _purgeStoredSafetyCache(store, accountRef);
     final vaultKey = await repository.passwordVault.read(accountRef);
     if (vaultKey == null) {
       throw StateError(
@@ -4518,7 +4520,7 @@ final class MobileE2EEClient {
               ancestry.checkpoint.chainRoot,
             );
       if (existing != null) {
-        await store.save(existing);
+        await store.save(_withoutSafetyCache(existing));
         if (ancestry != null) {
           await store.saveCheckpoint(ancestry.checkpoint);
         }
@@ -4582,7 +4584,8 @@ final class MobileE2EEClient {
           vault == null ? null : _requiredVaultDigest(vault),
           ancestry?.checkpoint.chainRoot,
         );
-        if (vault == null) await client._persist(leaseToken);
+        final purged = client._purgeSafetyCache();
+        if (vault == null || purged) await client._persist(leaseToken);
         if (device == null) {
           // A prior client committed this deterministic private identity to
           // the vault but did not receive/finish the device registration. The
@@ -4666,6 +4669,7 @@ final class MobileE2EEClient {
   Future<Map<String, Object?>> _persist(String leaseToken) async {
     final state = _mls.exportState();
     try {
+      _purgeSafetyCache();
       trimMobileMessageCache(_messageCache);
       final cursorEntries = _controlCursors.entries.toList();
       final recentCursors = cursorEntries.length > _maximumControlCursors
@@ -4892,6 +4896,7 @@ final class MobileE2EEClient {
     _messageCache
       ..clear()
       ..addAll(state.messageCache);
+    _purgeSafetyCache();
     _controlCursors
       ..clear()
       ..addAll(state.controlCursors);
@@ -4902,9 +4907,42 @@ final class MobileE2EEClient {
     _vaultRevision = ancestry.checkpoint.revision;
     _vaultDigest = ancestry.checkpoint.digest;
     _vaultChainRoot = ancestry.checkpoint.chainRoot;
-    await store.save(state);
+    await store.save(_withoutSafetyCache(state));
     await store.saveCheckpoint(ancestry.checkpoint);
   }
+
+  static MobileE2EEState _withoutSafetyCache(MobileE2EEState state) {
+    final cache = Map<String, MobileMessageCacheEntry>.of(state.messageCache)
+      ..removeWhere((_, entry) =>
+          contentSafety.purgesPlaintext(entry.messageRef, entry.plaintext));
+    if (cache.length == state.messageCache.length) return state;
+    // Cache entries are disposable. Preserve MLS state, checkpoints and the
+    // exact encrypted pending journal so interrupted writes remain recoverable.
+    return MobileE2EEState.fromJson({
+      ...state.toJson(),
+      'message_cache': cache.map((key, value) => MapEntry(key, value.toJson())),
+    });
+  }
+
+  static Future<void> _purgeStoredSafetyCache(
+      MobileE2EEStore store, String accountRef) async {
+    final state = await store.load(accountRef);
+    if (state == null) return;
+    final protected = _withoutSafetyCache(state);
+    if (!identical(state, protected)) await store.save(protected);
+  }
+
+  bool _purgeSafetyCache() {
+    final count = _messageCache.length;
+    _messageCache.removeWhere((_, entry) =>
+        contentSafety.purgesPlaintext(entry.messageRef, entry.plaintext));
+    _processed.clear();
+    return count != _messageCache.length;
+  }
+
+  Future<void> purgeSafetyCache() => _synchronized(() async {
+        _purgeSafetyCache();
+      }, rollbackOnOperationError: false);
 
   Future<T> _synchronized<T>(
     Future<T> Function() operation, {
@@ -4928,6 +4966,8 @@ final class MobileE2EEClient {
     _operationTail = completed.future;
     await previous;
     try {
+      _purgeSafetyCache();
+      await _purgeStoredSafetyCache(store, accountRef);
       final lease = await _acquireVaultLease(repository);
       final leaseToken = _requiredString(lease, 'lease_token');
       try {
@@ -6320,6 +6360,9 @@ final class MobileE2EEClient {
     KaedeMessage message,
   ) async {
     _requireEncrypted(channel);
+    if (message.safetyLocked || contentSafety.blocksValue(message.toJson())) {
+      return null;
+    }
     final envelope = message.e2ee;
     if (envelope == null || envelope['version'] != 2) return null;
     if (message.channelRef != channel.ref ||
@@ -6366,6 +6409,11 @@ final class MobileE2EEClient {
       Uint8List? expectedAad;
       try {
         var cached = _messageCache[ciphertextText];
+        if (cached != null &&
+            contentSafety.blocksPlaintext(
+                cached.messageRef, cached.plaintext)) {
+          return null;
+        }
         if (_processed.containsKey(processedKey) && cached == null) {
           throw const FormatException(
             'Encrypted message plaintext is no longer available in the safe cache.',
@@ -6619,6 +6667,9 @@ final class MobileE2EEClient {
     // Dart maps retain insertion order. Delete+set makes successful cache use
     // an actual LRU touch instead of a creation-order approximation.
     _messageCache.remove(ciphertext);
+    if (contentSafety.blocksPlaintext(entry.messageRef, entry.plaintext)) {
+      return;
+    }
     _messageCache[ciphertext] = entry;
     while (_messageCache.length > maximumMobileMessageCacheEntries) {
       _messageCache.remove(_messageCache.keys.first);

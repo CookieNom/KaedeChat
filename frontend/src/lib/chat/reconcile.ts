@@ -1,8 +1,10 @@
 import { entityKey } from './refs';
 import type { Message } from './types';
+import { permitsSafetyRestoration, protectMessage } from './content-safety.svelte';
 
 /** Only authenticated plaintext is eligible for encrypted message presentation. */
 export function verifiedMessageContent(message: Message): string | null {
+  message = protectMessage(message);
   if (message.deleted_at) return null;
   return message.e2ee
     ? message.e2ee_verified === true
@@ -17,8 +19,11 @@ export function mergeMessageUpdate(
   decryptedUpdate = false
 ): Message {
   if (entityKey(message) !== entityKey(update) || message.deleted_at) return message;
-  if (message.edited_at && update.edited_at && message.edited_at > update.edited_at) return message;
-  const merged = { ...message, ...update, e2ee: update.e2ee ?? message.e2ee };
+  if (staleSafetyUpdate(message, update)) return message;
+  const restoring = message.safety_state === 'pending_review' && permitsSafetyRestoration(update);
+  if (!restoring && message.edited_at && update.edited_at && message.edited_at > update.edited_at)
+    return message;
+  const merged = protectMessage({ ...message, ...update, e2ee: update.e2ee ?? message.e2ee });
   // Client verification belongs to this ciphertext, never to a previous edit
   // or a server-supplied field. Encryption cannot be removed by a dispatch.
   return merged.e2ee && !decryptedUpdate
@@ -31,6 +36,17 @@ export function mergeMessageUpdate(
         decrypted_forward_snapshot: null
       }
     : merged;
+}
+
+function staleSafetyUpdate(message: Message, update: Message): boolean {
+  return Boolean(
+    update.safety_state === 'pending_review' &&
+    message.safety_updated_at &&
+    (!update.safety_updated_at ||
+      Date.parse(update.safety_updated_at) < Date.parse(message.safety_updated_at) ||
+      (update.safety_updated_at === message.safety_updated_at &&
+        message.safety_state !== 'pending_review'))
+  );
 }
 
 export interface MessageReferenceTarget {
@@ -218,6 +234,12 @@ export function reconcileMessage(existing: Message[], incoming: Message, limit =
     const index = next.findIndex((item) => entityKey(item) === entityKey(incoming));
     if (index < 0) next.push(incoming);
     else if (
+      !staleSafetyUpdate(next[index], incoming) &&
+      (next[index].safety_state === 'pending_review' || next[index].safety_unavailable) &&
+      permitsSafetyRestoration(incoming)
+    ) {
+      next[index] = incoming;
+    } else if (
       incoming.e2ee &&
       incoming.e2ee_verified === true &&
       next[index].e2ee_verified !== true &&
@@ -276,7 +298,12 @@ export function mergeMessageSnapshot(
     return !oldest || compareMessages(message, oldest) < 0;
   });
   for (const message of snapshot) {
-    merged = reconcileMessage(merged, message, Number.MAX_SAFE_INTEGER);
+    const previous = existing.find((item) => entityKey(item) === entityKey(message));
+    merged = reconcileMessage(
+      merged,
+      previous && staleSafetyUpdate(previous, message) ? previous : message,
+      Number.MAX_SAFE_INTEGER
+    );
   }
   return [...merged].sort(compareMessages).slice(-limit);
 }

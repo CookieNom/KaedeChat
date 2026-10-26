@@ -1924,11 +1924,19 @@ async def known_photodna_match(
 ) -> bool:
     """Return the durable attachment-wide decision, never a variant decision."""
 
+    from app.safety.models import ChildSafetyCase, ChildSafetyReport
+
+    dismissed = (
+        select(ChildSafetyReport.report_id)
+        .join(ChildSafetyCase)
+        .where(ChildSafetyCase.status == "dismissed")
+    )
     return (
         await session.scalar(
             select(AbuseReport.id)
             .where(
                 AbuseReport.source == "photodna",
+                ~AbuseReport.id.in_(dismissed),
                 AbuseReport.target_type == "attachment",
                 AbuseReport.target_ref == f"{attachment_id}@{origin_domain}",
             )
@@ -2056,7 +2064,7 @@ async def require_remote_media_binding_live(
             (attachment.message_id, attachment.message_domain),
             populate_existing=True,
         )
-        if message is None or message.deleted_at is not None:
+        if message is None or message.deleted_at is not None or message.safety_state:
             raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
         channel = await session.get(
             Channel,
@@ -2301,7 +2309,11 @@ async def cache_remote_media(
                         status_code=503,
                         detail={"code": "REMOTE_MEDIA_UNAVAILABLE"},
                     ) from exc
-                if finding is not None:
+                from app.safety.enforcement import dismissed_digest
+
+                if finding is not None and not await dismissed_digest(
+                    session, f"{attachment_id}@{origin_domain}", digest_builder.hexdigest()
+                ):
                     if snowflake is None:
                         raise RuntimeError(
                             "PhotoDNA remote scanning requires a snowflake generator"
@@ -2358,7 +2370,52 @@ async def cache_remote_media(
                             index_where=text("source = 'photodna'"),
                         )
                     )
+                    from app.safety.enforcement import protect_message
+                    from app.safety.service import capture_finding
+
+                    report = await session.scalar(
+                        select(AbuseReport)
+                        .where(
+                            AbuseReport.source == "photodna",
+                            AbuseReport.target_ref == attachment_ref,
+                            AbuseReport.target_type == "attachment",
+                        )
+                        .with_for_update()
+                    )
+                    if report is None:
+                        raise RuntimeError("missing remote safety report")
+                    observed = Attachment(
+                        id=attachment_id,
+                        origin_domain=origin_domain,
+                        report_id=None,
+                        filename=f"remote-{attachment_id}-{variant}",
+                        content_type=detected_type,
+                        detected_content_type=detected_type,
+                    )
+                    message = (
+                        await session.get(Message, message_ref, with_for_update=True)
+                        if message_ref
+                        else None
+                    )
+                    case = await capture_finding(
+                        session,
+                        settings,
+                        report,
+                        observed,
+                        image_bytes,
+                        finding,
+                        provenance="federated_origin",
+                        message=message,
+                    )
+                    if message is not None:
+                        await protect_message(
+                            session, settings, case, message, state="pending_review"
+                        )
                     await session.commit()
+                    if redis is not None:
+                        from app.chat.postcommit import publish_committed_dispatches
+
+                        await publish_committed_dispatches(session, redis)
                     await increment_metric(redis, "media_photodna_matches")
                     await retire_remote_media_variants(
                         session,
@@ -2673,7 +2730,7 @@ async def authorized_attachment(
     if attachment.message_id is None or attachment.message_domain is None:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     message = await session.get(Message, (attachment.message_id, attachment.message_domain))
-    if message is None or message.deleted_at is not None:
+    if message is None or message.deleted_at is not None or message.safety_state:
         raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
     access = await load_channel_access(
         session,
@@ -2731,7 +2788,11 @@ async def authorized_attachment(
             .with_for_update(read=True)
             .execution_options(populate_existing=True)
         )
-        if locked_message is None or locked_message.deleted_at is not None:
+        if (
+            locked_message is None
+            or locked_message.deleted_at is not None
+            or locked_message.safety_state
+        ):
             raise HTTPException(status_code=404, detail={"code": "MEDIA_NOT_FOUND"})
         locked_access = await load_channel_access(
             session,

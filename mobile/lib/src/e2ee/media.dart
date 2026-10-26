@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/api/privacy_metadata.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:path_provider/path_provider.dart';
 
 const _chunkSize = 256 * 1024;
@@ -37,6 +38,8 @@ Future<File> downloadEncryptedFile({
     Snowflake('${manifest['attachment_id']}'),
     Domain('${manifest['attachment_domain']}'),
   );
+  contentSafety.trackFile(attachment, destination);
+  final generation = contentSafety.attachmentGeneration(attachment);
   final all = Uint8List.fromList(await repository.api.getBytes(
     attachmentMediaPath(
       attachment,
@@ -44,6 +47,7 @@ Future<File> downloadEncryptedFile({
       privateMediaUrl: privateMediaUrl,
     ),
   ));
+  contentSafety.requireAttachment(attachment, generation: generation);
   final expectedSize = (manifest['ciphertext_size'] as num?)?.toInt();
   final expectedPlainSize = (manifest['plaintext_size'] as num?)?.toInt();
   final expectedChunkSize = (manifest['chunk_size'] as num?)?.toInt();
@@ -82,6 +86,7 @@ Future<File> downloadEncryptedFile({
   var produced = 0;
   try {
     for (var index = 0; index < count; index++) {
+      contentSafety.requireAttachment(attachment, generation: generation);
       if (offset + 4 > all.length) {
         throw const FormatException('Encrypted file is truncated.');
       }
@@ -125,6 +130,7 @@ Future<File> downloadEncryptedFile({
       throw const FormatException('Encrypted file plaintext was modified.');
     }
     await output.flush();
+    contentSafety.requireAttachment(attachment, generation: generation);
     return destination;
   } catch (_) {
     await output.close();

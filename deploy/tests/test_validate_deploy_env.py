@@ -388,12 +388,15 @@ class DeploymentEnvironmentValidationTests(unittest.TestCase):
         )
         configured = self.production | {
             "KAEDE_PHOTODNA_ENABLED": "true",
+            "KAEDE_SAFETY_EVIDENCE_KEY": "a1" * 32,
             "KAEDE_PHOTODNA_SUBSCRIPTION_KEY": "p" * 32,
             "PHOTODNA_EDGEHASHGENERATOR": "/srv/private/photodna-sdk",
         }
         validate_values(configured, observability=False)
         for overrides in (
             {"KAEDE_PHOTODNA_ENABLED": "sometimes"},
+            {"KAEDE_SAFETY_EVIDENCE_KEY": ""},
+            {"KAEDE_SAFETY_EVIDENCE_KEY": "z" * 64},
             {"KAEDE_PHOTODNA_SUBSCRIPTION_KEY": ""},
             {"KAEDE_PHOTODNA_SUBSCRIPTION_KEY": "replace-with-photodna-key"},
             {"PHOTODNA_EDGEHASHGENERATOR": "relative/sdk"},

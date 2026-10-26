@@ -339,6 +339,7 @@ files `0640`). Set:
 ```env
 KAEDE_PHOTODNA_ENABLED=true
 KAEDE_PHOTODNA_SUBSCRIPTION_KEY=<Microsoft subscription key>
+KAEDE_SAFETY_EVIDENCE_KEY=<separate 64-character hexadecimal encryption key>
 PHOTODNA_EDGEHASHGENERATOR=/absolute/host/path/to/photodna-sdk
 ```
 
@@ -358,16 +359,64 @@ hash to Microsoft before any clean-key promotion. Plaintext images fetched
 from a federated home get the same PhotoDNA decision before they enter the
 local remote-media cache.
 
-On a match, the worker deletes the image from staging or the temporary remote
-spool, marks it quarantined internally, and opens one automated
-`illegal_content` case in Administration → Reports. The report retains the provider tracking ID, the
-source/violation/distance flags, attachment and optional uploader/message
-references, the MIME type, and the ordinary SHA-256 incident identifier. It
-retains no image bytes, thumbnail, object key, or PhotoDNA hash. Non-admin
-media APIs expose the same generic `rejected` state used for other terminal
-safety-policy decisions; they never reveal the internal quarantine state.
-Provider or generator failure is fail-closed: the object stays unavailable and
-normal task retries continue.
+On a match, delivery is blocked and the exact scanned bytes are encrypted and
+verified in the existing attachments bucket under `evidence/`. The dedicated
+**Administration → Child safety** case preserves the provider tracking ID,
+match flags, available account details and message/attachment references.
+PhotoDNA perceptual hashes are not retained. Ordinary media copies are removed
+only after preservation succeeds. Staff review the case to confirm removal or
+dismiss the finding; dismissal releases the held content through normal media
+processing. Reporter-supplied decrypted evidence is labeled as unverified and
+does not establish that the alleged sender uploaded those bytes. A match on
+that separate copy does not hide the alleged original from other users before
+staff verify and confirm the report.
+
+If object storage is unavailable, exact matched bytes are encrypted into a
+temporary database buffer in the case transaction. The worker retries copying
+that buffer into `evidence/` and clears it only after verifying the stored copy.
+Back up the database as well as the evidence bucket and its encryption key.
+
+`setup.sh` generates and preserves `KAEDE_SAFETY_EVIDENCE_KEY`. For an existing
+installation, generate a separate key with `openssl rand -hex 32` and store it
+in the protected operator configuration. Keep this key with protected backups
+for as long as any evidence remains; replacing or losing it makes retained
+evidence unreadable. Missing keys or preservation failures leave matching
+content unavailable. Keep the `evidence/` prefix out of ordinary media
+lifecycle expiry rules. It is served only by the authenticated staff evidence
+endpoint, never ordinary media links or the public media proxy.
+
+Evidence uses application encryption and separate staff capabilities within the
+same private bucket. The ordinary object-store credential still has bucket
+access; this arrangement does not protect evidence from a compromised storage
+credential. Retention and hold checks are enforced by the application.
+Provider or generator failures also fail closed and use normal task retries.
+
+Deploy the updated API, worker and media proxy together after applying migrations.
+The media proxy checks existing read links against current safety state and prevents
+browser caching. External S3 backends keep their existing direct download paths.
+Confirmed cases block new links and retry deletion of originals, thumbnails and
+locally cached copies, including stored versions and delete markers. The queue
+shows **Removal pending** until storage checks pass after outstanding upload
+permissions and the upload completion grace period expire. Existing direct links
+may work until deletion succeeds or the links expire; an access-gated proxy is
+still required if immediate revocation during storage outages is essential.
+
+External S3 credentials need `s3:ListBucketVersions`, `s3:DeleteObjectVersion`,
+`s3:DeleteObject` and object HEAD/read access for the ordinary media buckets.
+For Backblaze, use a key with list, read and delete file capabilities.
+Missing permissions, unsupported version listing, provider retention locks or
+storage failures leave removal pending and retry automatically every minute.
+Do not apply provider retention locks to ordinary media. Evidence is excluded
+from this removal job, and case evidence disposal is blocked until ordinary
+storage removal is verified. This checks this instance's storage, not remote
+origins, CDN copies, device exports or backups; configure any external CDN to
+avoid caching private media and purge existing cached copies when required.
+
+Older clients continue using ordinary message updates and deletion events. Updated
+clients also reconcile missed removals on reconnect and purge app-managed media and
+decrypted caches after confirmation. Offline clients cannot erase data until they
+reconnect, and the server cannot erase exported files, screenshots, or copies kept
+by older or modified clients. Deploy client updates alongside the server changes.
 
 The adapter terminally rejects images above 256 frames or 25 million decoded
 pixels in total without calling the provider or opening a report. This is a
@@ -377,11 +426,11 @@ so the API's Uvicorn processes and the media worker run only one native image
 decode at a time even though they are separate processes and containers. Keep
 the SDK on a local filesystem (or one with working POSIX `flock` semantics).
 
-PhotoDNA can't inspect an E2EE attachment: the server receives only
-ciphertext and has no room key. That's why the E2EE activation warning states
-that server-side file and malware scanning stops. A recipient can still
-submit a client-decrypted report, but Kaede never uploads E2EE
-plaintext to PhotoDNA.
+PhotoDNA cannot inspect an ordinary E2EE attachment: the server receives only
+ciphertext and has no room key. A recipient can explicitly disclose a decrypted
+attachment when reporting it. That separate plaintext evidence copy goes
+through malware and PhotoDNA checks; Microsoft receives its generated hash,
+not the image bytes or room keys.
 
 Kaede rejects images with either dimension below 50 pixels. Smaller eligible
 images are proportionally upscaled to the provider’s 160-pixel floor only

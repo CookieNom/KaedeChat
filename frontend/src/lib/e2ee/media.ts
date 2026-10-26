@@ -7,6 +7,11 @@ import {
 } from '$lib/media/authenticated';
 import { scrubImageMetadata } from '$lib/media/privacy-metadata';
 import {
+  assertMediaAvailable,
+  assertMediaBlobAvailable,
+  trackMediaBlob
+} from '$lib/media/content-revocation';
+import {
   base64url,
   clearBytes,
   concatBytes,
@@ -287,7 +292,10 @@ export async function decryptEncryptedAttachment(
     { path, contentType: 'application/octet-stream' },
     manifest.ciphertext_size
   );
-  return decryptFile(ciphertext, manifest);
+  assertMediaAvailable(path);
+  const plaintext = await decryptFile(ciphertext, manifest);
+  assertMediaBlobAvailable(ciphertext);
+  return trackMediaBlob(plaintext, path);
 }
 
 export async function downloadEncryptedFile(

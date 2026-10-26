@@ -213,6 +213,7 @@ class ReportCreate(UnambiguousInputModel):
         "privacy",
         "malware",
         "illegal_content",
+        "csam",
         "other",
     ]
     description: str | None = Field(default=None, max_length=2000)
@@ -1155,7 +1156,11 @@ async def create_report(
             evidence, report_encryption_mode = report_attachment_evidence(message, attachment)
     report_id = await snowflake.mint()
     report_status = "submitted"
-    if message_ref is not None and report_authority != settings.domain:
+    if (
+        message_ref is not None
+        and report_authority != settings.domain
+        and payload.category != "csam"
+    ):
         outbound = FederatedReportCreate(
             **payload.model_dump(),
             reporter_ref=EntityRef(f"{auth.user.id}@{auth.user.origin_domain}"),
@@ -1216,6 +1221,9 @@ async def create_report(
         status=report_status,
     )
     session.add(report)
+    from app.safety.enforcement import intake_report
+
+    await intake_report(session, settings, report)
     await session.commit()
     return reporter_report_payload(report)
 
@@ -1337,6 +1345,9 @@ async def create_federated_report(
         encryption_mode=encryption_mode,
     )
     session.add(report)
+    from app.safety.enforcement import intake_report
+
+    await intake_report(session, settings, report)
     await session.commit()
     return reporter_report_payload(report)
 
@@ -1760,7 +1771,15 @@ async def list_reports(
     status: str | None = Query(default=None, max_length=24),
 ) -> list[dict[str, object]]:
     principal.require("reports.read")
-    statement = select(AbuseReport).where(AbuseReport.evidence["report_authority"].astext.is_(None))
+    from app.safety.models import ChildSafetyReport
+
+    statement = select(AbuseReport).where(
+        AbuseReport.evidence["report_authority"].astext.is_(None),
+        AbuseReport.category != "csam",
+        AbuseReport.source != "photodna",
+        AbuseReport.evidence["photodna"].astext.is_(None),
+        ~AbuseReport.id.in_(select(ChildSafetyReport.report_id)),
+    )
     if status:
         statement = statement.where(AbuseReport.status == status)
     reports = list(await session.scalars(statement.order_by(AbuseReport.id.desc()).limit(500)))
@@ -1782,6 +1801,9 @@ async def view_report_attachment(
     report = await session.get(AbuseReport, report_id)
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    from app.safety.enforcement import require_regular_report
+
+    await require_regular_report(session, report)
     if report.source != "user" or report.target_type not in {"message", "attachment"}:
         raise HTTPException(status_code=404, detail={"code": "REPORT_ATTACHMENT_NOT_FOUND"})
     disclosed_ref = report.evidence.get("disclosed_attachment_ref")
@@ -1921,6 +1943,9 @@ async def export_report(
     report = await session.get(AbuseReport, report_id)
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    from app.safety.enforcement import require_regular_report
+
+    await require_regular_report(session, report)
     users = await report_identity_lookup(session, [report], settings.domain)
     package: dict[str, object] = {
         "schema": "kaede.safety-report.v1",
@@ -1950,6 +1975,9 @@ async def record_external_submission(
     report = await session.get(AbuseReport, report_id, with_for_update=True)
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    from app.safety.enforcement import require_regular_report
+
+    await require_regular_report(session, report)
     entry = {
         **payload.model_dump(mode="json"),
         "recorded_at": datetime.now(UTC).isoformat(),
@@ -1985,6 +2013,9 @@ async def patch_report(
     report = await session.get(AbuseReport, report_id, with_for_update=True)
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    from app.safety.enforcement import require_regular_report
+
+    await require_regular_report(session, report)
     report.status = payload.status
     report.resolution = payload.resolution
     report.assigned_admin_id = principal.user.id
@@ -2025,6 +2056,9 @@ async def enforce_report(
     report = await session.get(AbuseReport, report_id, with_for_update=True)
     if report is None:
         raise HTTPException(status_code=404, detail={"code": "REPORT_NOT_FOUND"})
+    from app.safety.enforcement import require_regular_report
+
+    await require_regular_report(session, report)
     subject_ref = report_subject_ref(report)
     if subject_ref is None:
         raise HTTPException(

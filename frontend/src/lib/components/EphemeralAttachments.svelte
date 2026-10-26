@@ -14,6 +14,7 @@
   import MediaViewer from './MediaViewer.svelte';
   import { onDestroy } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
+  import { createMediaObjectURL, revokeMediaObjectURL } from '$lib/media/content-revocation';
 
   let {
     attachments,
@@ -96,7 +97,7 @@
         attachment.private_media_url
       );
       if (generation !== encryptedGeneration) return;
-      const url = URL.createObjectURL(plaintext);
+      const url = createMediaObjectURL(plaintext);
       allocatedEncryptedUrls.add(url);
       encryptedUrls = { ...encryptedUrls, [attachmentKey]: url };
       const nextFailures = { ...failures };
@@ -121,7 +122,7 @@
   }
 
   function revokeEncryptedUrls(): void {
-    for (const url of allocatedEncryptedUrls) URL.revokeObjectURL(url);
+    for (const url of allocatedEncryptedUrls) revokeMediaObjectURL(url);
     allocatedEncryptedUrls.clear();
     encryptedUrls = {};
   }

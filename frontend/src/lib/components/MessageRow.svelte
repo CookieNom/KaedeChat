@@ -14,6 +14,7 @@
 <script lang="ts">
   import { chatEntities } from '$lib/stores/entities.svelte';
   import { verifiedMessageContent } from '$lib/chat/reconcile';
+  import { protectMessage } from '$lib/chat/content-safety.svelte';
   import { t } from '$lib/ui/locale';
 
   import AttachmentSpoiler from './AttachmentSpoiler.svelte';
@@ -292,8 +293,22 @@
   const reference = $derived(referencedMessage ?? message.referenced_message ?? null);
   const resolvedReference = $derived(chatEntities.isMessageBlocked(reference) ? null : reference);
   const presentedMessage = $derived(
-    message.message_type === 21 && resolvedReference ? resolvedReference : message
+    protectMessage(message.message_type === 21 && resolvedReference ? resolvedReference : message)
   );
+  const safetyRestricted = $derived(
+    Boolean(
+      presentedMessage.safety_state ||
+      presentedMessage.safety_hidden ||
+      presentedMessage.safety_unavailable
+    )
+  );
+  $effect(() => {
+    if (safetyRestricted) {
+      mediaViewer = null;
+      contextAttachment = null;
+      menuOpen = false;
+    }
+  });
   const pollResult = $derived(messagePollResult(presentedMessage, resolvedReference));
   const richPresentationVerified = $derived(
     !presentedMessage.e2ee || presentedMessage.e2ee_verified === true
@@ -332,7 +347,8 @@
   const interactionAttribution = $derived(interactionAttributionText(message));
 
   const editAvailable = $derived(
-    !groupSystemNotice &&
+    !safetyRestricted &&
+      !groupSystemNotice &&
       canEdit &&
       !message.poll &&
       !(message.flags & MESSAGE_FLAG_IS_VOICE_MESSAGE) &&
@@ -343,7 +359,9 @@
       !message.queued
   );
   const deleteAvailable = $derived(
-    (!groupSystemNotice || channelFollowSystemNotice) &&
+    !safetyRestricted &&
+      !message.safety_locked &&
+      (!groupSystemNotice || channelFollowSystemNotice) &&
       Boolean(onDelete) &&
       canDelete &&
       !message.deleted_at &&
@@ -351,10 +369,14 @@
       !message.queued
   );
   const publishAvailable = $derived(
-    Boolean(onPublish) && !message.deleted_at && !isPublishedAnnouncement(message)
+    !safetyRestricted &&
+      Boolean(onPublish) &&
+      !message.deleted_at &&
+      !isPublishedAnnouncement(message)
   );
   const menuAvailable = $derived(
-    (!groupSystemNotice || channelFollowSystemNotice) &&
+    !safetyRestricted &&
+      (!groupSystemNotice || channelFollowSystemNotice) &&
       !presentedMessage.content_unavailable &&
       actionsEnabled &&
       !message.pending &&
@@ -1082,6 +1104,16 @@
           <span>{renderedContent}</span>
           <time datetime={message.created_at} title={accessibleTime()}>{visibleTime()}</time>
         </div>
+      {:else if safetyRestricted}
+        <p class="message-removed" role="status">
+          {presentedMessage.safety_unavailable
+            ? 'This message is currently unavailable.'
+            : presentedMessage.safety_hidden
+              ? 'Message hidden after your child safety report.'
+              : presentedMessage.safety_state === 'pending_review'
+                ? 'Message unavailable while the child safety team reviews it.'
+                : 'Message removed for child safety.'}
+        </p>
       {:else if presentedMessage.deleted_at}
         <p class="message-removed">{$t('ui_message_removed_e82a13c0')}</p>
       {:else if presentedMessage.e2ee && presentedMessage.e2ee_verified !== true}
@@ -1438,7 +1470,7 @@
         </div>
       {/if}
     </div>
-    {#if !message.deleted_at && (reactionEntries.length || showPostFooter)}
+    {#if !safetyRestricted && !message.deleted_at && (reactionEntries.length || showPostFooter)}
       <div class:post-footer={showPostFooter} class="message-footer-actions">
         <div class="message-reactions" aria-label={$t('ui_message_reactions_db75b1a3')}>
           {#each reactionEntries as [emoji, count] (emoji)}

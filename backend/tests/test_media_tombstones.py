@@ -857,8 +857,16 @@ async def test_terminal_verdict_does_not_commit_when_tombstone_preparation_crash
         def __init__(self) -> None:
             self.commit = AsyncMock()
 
-        async def scalar(self, _statement: object) -> object:
-            return attachment
+        async def scalar(self, statement: object) -> object | None:
+            query = str(cast(Any, statement).compile(dialect=postgresql.dialect()))
+            if "advisory_xact_lock" in query:
+                return True
+            if "child_safety_cases" in query:
+                return None
+            if cast(Any, statement).column_descriptions[0]["expr"] is Attachment:
+                return attachment
+            assert "attachments.content_sha256" in query
+            return None
 
     storage_delete = AsyncMock()
 
@@ -882,6 +890,7 @@ async def test_terminal_verdict_does_not_commit_when_tombstone_preparation_crash
     configured = cast(
         Settings,
         SimpleNamespace(
+            domain=LOCAL_DOMAIN,
             media_attachments_bucket="attachments",
             media_derived_bucket="derived",
             media_max_attachment_bytes=1024,

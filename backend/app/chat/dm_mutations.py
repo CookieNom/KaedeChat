@@ -74,7 +74,15 @@ def authority_attested_dm_message_mutation(
             and message.get("channel_domain") == expected_authority
             and message.get("author_id") == actor_id
             and message.get("author_domain") == actor_domain
-            and isinstance(message.get("edited_at"), str)
+            and (
+                isinstance(message.get("edited_at"), str)
+                or (
+                    "safety_state" in message
+                    and message["safety_state"] is None
+                    and message.get("safety_locked") is False
+                    and message.get("edited_at") is None
+                )
+            )
         )
     if not common <= set(content):
         return False

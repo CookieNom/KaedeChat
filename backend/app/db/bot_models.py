@@ -2211,7 +2211,7 @@ class AbuseReport(Base, TimestampMixin):
             name="abuse_report_target_type_value",
         ),
         CheckConstraint(
-            "category IN ('spam','harassment','hate','sexual_content','violence','self_harm','impersonation','privacy','malware','illegal_content','other')",  # noqa: E501
+            "category IN ('spam','harassment','hate','sexual_content','violence','self_harm','impersonation','privacy','malware','illegal_content','csam','other')",  # noqa: E501
             name="abuse_report_category_value",
         ),
         CheckConstraint(

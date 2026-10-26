@@ -138,6 +138,9 @@ async def request_deletion(
     now = datetime.now(UTC)
     user.content_deletion = {"status": "pending", "before": now.isoformat(), "remote_failures": 0}
     if delete_account:
+        from app.safety.service import snapshot_subject_before_deletion
+
+        await snapshot_subject_before_deletion(session, settings, user)
         # Keep the identity row: its case-insensitive unique indexes permanently
         # reserve the email/username, and historical references remain valid.
         user.deleted_at = now

@@ -55,6 +55,12 @@ from app.db.models import (
     TerminalRoomDeletion,
     User,
 )
+from app.federation.content_safety import (
+    project_safety,
+    safety_projection,
+    safety_state,
+    safety_timestamp,
+)
 from app.federation.dm_storage import (
     admit_federated_dm_conversation,
     admit_federated_dm_message,
@@ -1226,7 +1232,7 @@ async def replicate_dm_message(
     author = await upsert_remote_user(
         session, settings, RemoteUserProfile.model_validate(content["author"])
     )
-    raw = content["message"]
+    raw = safety_projection(content["message"])
     message_id = database_snowflake(raw.get("id"), "message id")
     channel_id = database_snowflake(raw.get("channel_id"), "channel id")
     channel_domain = str(raw.get("channel_domain"))
@@ -1302,7 +1308,8 @@ async def replicate_dm_message(
         raw_results = raw_poll.get("results") if isinstance(raw_poll, dict) else None
         raw_counts = raw_results.get("answer_counts") if isinstance(raw_results, dict) else None
         if (
-            not isinstance(raw_results, dict)
+            not isinstance(raw_poll, dict)
+            or not isinstance(raw_results, dict)
             or raw_results.get("is_finalized") is not False
             or raw_poll.get("finalized_at") is not None
             or not isinstance(raw_counts, list)
@@ -1345,6 +1352,10 @@ async def replicate_dm_message(
     conversation = await session.get(DMConversation, (channel.id, channel.origin_domain))
     if conversation is None or conversation.type not in {"direct", "group"}:
         raise ValueError("DM conversation is not replicated")
+    if (
+        safety_state(raw) is not None or safety_timestamp(raw) is not None
+    ) and event_origin != conversation.authority_domain:
+        raise ValueError("DM safety projection did not originate at its authority")
     is_control, authority_control = authoritative_dm_control(
         e2ee,
         message_type=message_type,
@@ -1418,7 +1429,7 @@ async def replicate_dm_message(
         channel.encryption_epoch = encryption_policy["epoch"]
         if channel.encryption_mode == "e2ee" and channel.encryption_activated_at is None:
             channel.encryption_activated_at = created_at
-    if not authority_poll_result and not authority_pin_notice:
+    if not authority_poll_result and not authority_pin_notice and safety_state(raw) is None:
         validate_message_encryption_policy(
             channel.encryption_mode,
             content=message_content,
@@ -1625,6 +1636,9 @@ async def replicate_dm_message(
             author_id=author_id,
             author_domain=author_domain,
             content=message_content,
+            safety_state=safety_state(raw),
+            safety_reason=raw.get("safety_reason"),
+            safety_updated_at=safety_timestamp(raw),
             e2ee=e2ee,
             embeds=rich.embeds,
             components=rich.components,
@@ -1782,6 +1796,8 @@ async def replicate_dm_message(
         )
     )
     await advance_channel_cursor(session, channel, message.id, message.origin_domain)
+    if (message_safety_state := getattr(message, "safety_state", None)) is not None:
+        await project_safety(session, settings, message, message_safety_state)
     return message
 
 

@@ -1,3 +1,12 @@
+import {
+  cachedContentReferences,
+  cachedContentMustPurge,
+  cachedContentRestricted,
+  messageAvailabilityRestricted,
+  protectMessage,
+  reconcileSafetyReferences,
+  safetyMessageRestriction
+} from '$lib/chat/content-safety.svelte';
 import { api, ApiError } from '$lib/api/client';
 import type { Channel, Message, MessageSnapshot, UserSummary } from '$lib/chat/types';
 import { isNativeDesktop } from '$lib/platform/native';
@@ -3905,6 +3914,25 @@ export class KaedeE2EEClient {
   #vaultChainRoot: string;
   #operationTail: Promise<void> = Promise.resolve();
   #closed = false;
+  #safetyCheckedVaultRevision = '';
+
+  #purgeSafetyCache(): void {
+    let removed = false;
+    for (const [ciphertext, entry] of this.#messageCache) {
+      if (!cachedContentMustPurge(entry)) continue;
+      this.#messageCache.delete(ciphertext);
+      removed = true;
+    }
+    if (removed) this.#processed.clear();
+  }
+
+  async purgeSafetyCache(): Promise<void> {
+    this.#processed.clear();
+    this.#purgeSafetyCache();
+    await this.#synchronized(async () => {
+      this.#purgeSafetyCache();
+    });
+  }
 
   private constructor(
     state: DeviceState,
@@ -3979,6 +4007,16 @@ export class KaedeE2EEClient {
           } finally {
             clearBytes(identityKey);
           }
+          const refs = cachedContentReferences(stored.messageCache ?? {});
+          await reconcileSafetyReferences(refs.messageRefs, refs.attachmentRefs);
+          const removedUnsafeCache = Object.values(stored.messageCache ?? {}).some(
+            cachedContentMustPurge
+          );
+          stored.messageCache = Object.fromEntries(
+            Object.entries(stored.messageCache ?? {}).filter(
+              ([, entry]) => !cachedContentMustPurge(entry)
+            )
+          );
           await saveDeviceState(stored);
           if (ancestry) await saveVaultCheckpoint(ref, ancestry.checkpoint);
           const client = new KaedeE2EEClient(
@@ -4002,6 +4040,7 @@ export class KaedeE2EEClient {
                 recoveryAuthorization
               ).then(() => undefined)
           });
+          if (removedUnsafeCache) await client.#persistVault(lease.lease_token);
           await client.#reconcileRoomOperationsUnlocked(lease.lease_token);
           adopted = true;
           return client;
@@ -4090,6 +4129,14 @@ export class KaedeE2EEClient {
     if (state.deviceId !== this.deviceId || state.credential !== this.#credential) {
       throw new Error('The encrypted account identity changed unexpectedly. Sign in again.');
     }
+    if (this.#safetyCheckedVaultRevision !== record.revision) {
+      const refs = cachedContentReferences(state.messageCache ?? {});
+      await reconcileSafetyReferences(refs.messageRefs, refs.attachmentRefs);
+      this.#safetyCheckedVaultRevision = record.revision;
+    }
+    state.messageCache = Object.fromEntries(
+      Object.entries(state.messageCache ?? {}).filter(([, entry]) => !cachedContentMustPurge(entry))
+    );
     await saveDeviceState(state);
     await saveVaultCheckpoint(this.accountRef, ancestry.checkpoint);
     const module = await wasmModule();
@@ -4177,6 +4224,7 @@ export class KaedeE2EEClient {
   }
 
   async #persistVault(leaseToken: string): Promise<void> {
+    this.#purgeSafetyCache();
     const exported = ownedBytes(this.#mls.exportState());
     try {
       const state = compactDeviceState({
@@ -4228,6 +4276,7 @@ export class KaedeE2EEClient {
       );
       await saveVaultCheckpoint(this.accountRef, checkpoint);
       this.#vaultRevision = written.revision;
+      this.#safetyCheckedVaultRevision = written.revision;
       this.#vaultDigest = written.digest;
       this.#vaultChainRoot = chainRoot;
     } finally {
@@ -5495,6 +5544,7 @@ export class KaedeE2EEClient {
     // key instead of comparing them with only the channel's current policy.
     // Any altered group then misses both caches and fails MLS/AAD validation.
     const messageRef = `${message.id}@${message.origin_domain}`;
+    if (safetyMessageRestriction(messageRef) || messageAvailabilityRestricted(message)) return null;
     const authorRef = `${message.author_id}@${message.author_domain}`;
     const applicationRef =
       message.application_id && message.application_domain
@@ -5584,6 +5634,15 @@ export class KaedeE2EEClient {
       ? richMessageAuthenticatedData(rich.context)
       : messageContextBytes(expectedContext as MessageContext);
     const cached = this.#messageCache.get(envelope.ciphertext);
+    if (
+      cached &&
+      cachedContentRestricted({ ...cached, messageRef: cached.messageRef ?? messageRef })
+    ) {
+      clearBytes(groupId);
+      clearBytes(ciphertext);
+      clearBytes(expectedAad);
+      return null;
+    }
     if (this.#processed.has(processedKey) && !cached) {
       throw new Error('Encrypted message plaintext is no longer available in the safe cache.');
     }
@@ -5669,6 +5728,7 @@ export class KaedeE2EEClient {
             attachments: validatedEncryptedMessageAttachments(legacy.attachments)
           };
         }
+        if (cachedContentRestricted({ ...cached, messageRef })) return null;
         this.#processed.set(processedKey, application);
         return application;
       } finally {
@@ -5755,13 +5815,15 @@ export class KaedeE2EEClient {
         application = { content: legacy.content, attachments };
       }
       this.#messageCache.delete(envelope.ciphertext);
-      this.#messageCache.set(envelope.ciphertext, {
+      const cacheEntry = {
         plaintext: JSON.stringify(parsed),
         authorRef,
         messageRef,
         applicationRef,
         webhookRef
-      });
+      };
+      this.#messageCache.set(envelope.ciphertext, cacheEntry);
+      if (cachedContentRestricted(cacheEntry)) return null;
       this.#processed.set(processedKey, application);
       return application;
     } finally {
@@ -5854,6 +5916,21 @@ export async function clearActiveE2EEState(): Promise<void> {
   await clearAllLocalE2EEState();
 }
 
+export async function purgeSafetyE2EEState(user: UserSummary): Promise<void> {
+  const ref = accountRef(user);
+  const local = await loadDeviceState(ref);
+  const refs = cachedContentReferences(local?.messageCache ?? {});
+  await reconcileSafetyReferences(refs.messageRefs, refs.attachmentRefs);
+  const hasRestricted = Object.values(local?.messageCache ?? {}).some(cachedContentMustPurge);
+  if (!hasRestricted && !activeClient) return;
+  if (!(await loadAccountVaultKey(ref))) {
+    if (hasRestricted) throw new Error('Unlock encryption to finish removing unavailable content.');
+    return;
+  }
+  const client = await initializeE2EE(user);
+  await client.purgeSafetyCache();
+}
+
 function encryptedForwardSnapshotPresentation(value: unknown): MessageSnapshot {
   const snapshot = validateEncryptedForwardSnapshot(value);
   const attachments = (snapshot.attachments as unknown[]).map((item) => {
@@ -5908,6 +5985,8 @@ export async function decryptConversationMessages(
 ): Promise<Message[]> {
   const applications = await client.decryptMessages(channel, messages);
   return messages.map((message, index) => {
+    const protectedMessage = protectMessage(message);
+    if (protectedMessage !== message) return protectedMessage;
     const application = applications[index];
     const sealed = message.e2ee
       ? {

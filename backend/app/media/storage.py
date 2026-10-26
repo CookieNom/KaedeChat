@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote, urlsplit
+from xml.etree import ElementTree
 
 import httpx
 
@@ -182,6 +183,8 @@ class S3Storage:
         content_length: int | None = None,
         content_type: str | None = None,
     ) -> str:
+        if key.startswith("evidence/"):
+            raise StorageError("preserved evidence cannot use public storage capabilities")
         if not 1 <= expires <= 604_800:
             raise ValueError("presigned URL expiry must be between 1 second and 7 days")
         current = (now or datetime.now(UTC)).astimezone(UTC)
@@ -240,7 +243,9 @@ class S3Storage:
         ).hexdigest()
         return f"{target.url}?{_query(values)}"
 
-    def _headers_for_hash(self, method: str, target: _Target, payload_hash: str) -> dict[str, str]:
+    def _headers_for_hash(
+        self, method: str, target: _Target, payload_hash: str, query: str = ""
+    ) -> dict[str, str]:
         current = datetime.now(UTC)
         timestamp = current.strftime("%Y%m%dT%H%M%SZ")
         date = current.strftime("%Y%m%d")
@@ -257,7 +262,7 @@ class S3Storage:
             f"{name}:{signed_header_values[name]}\n" for name in sorted(signed_header_values)
         )
         canonical_request = "\n".join(
-            [method, target.path, "", canonical_headers, signed_headers, payload_hash]
+            [method, target.path, query, canonical_headers, signed_headers, payload_hash]
         )
         string_to_sign = "\n".join(
             [
@@ -494,3 +499,96 @@ class S3Storage:
             raise StorageError("object DELETE request failed") from exc
         if response.status_code not in {200, 204, 404}:
             raise StorageError(f"object DELETE failed with status {response.status_code}")
+
+    async def purge_verified(self, bucket: str, key: str) -> bool:
+        """Remove ordinary media and retained versions; never purge the evidence prefix.
+
+        Bounded passes leave unfinished work to the durable safety retry job.
+        Delete markers stay in place until every data version has been removed.
+        """
+        if not key or key.startswith("evidence/"):
+            raise StorageError("unsafe media removal key")
+        target = _target(self.endpoint, bucket, key, self.addressing_style)
+        root = _target(self.endpoint, bucket, "", self.addressing_style)
+        try:
+            async with httpx.AsyncClient(
+                timeout=10, follow_redirects=False, trust_env=False
+            ) as client:
+
+                async def request(
+                    method: str, destination: _Target, values: dict[str, str] | None = None
+                ) -> httpx.Response:
+                    query = _query(values or {})
+                    url = destination.url + ("?" + query if query else "")
+                    headers = self._headers_for_hash(method, destination, EMPTY_SHA256, query)
+                    async with client.stream(method, url, headers=headers) as response:
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > 2 * 1024 * 1024:
+                                raise StorageError("removal response exceeded limit")
+                        return httpx.Response(response.status_code, content=bytes(body))
+
+                head = await request("HEAD", target)
+                if head.status_code == 200:
+                    deleted = await request("DELETE", target)
+                    if deleted.status_code not in {200, 204, 404}:
+                        raise StorageError("media removal failed")
+                elif head.status_code != 404:
+                    raise StorageError("media removal HEAD verification failed")
+                if self.storage_backend != "garage":
+                    versions: list[str] = []
+                    markers: list[str] = []
+                    params = {"versions": "", "prefix": key, "max-keys": "100"}
+                    complete = False
+                    for _ in range(10):
+                        response = await request("GET", root, params)
+                        if response.status_code != 200:
+                            raise StorageError("media version listing failed")
+                        try:
+                            document = response.content.decode("utf-8")
+                            if (
+                                "<!DOCTYPE" in document.upper()
+                                or "<!ENTITY" in document.upper()
+                                or "\x00" in document
+                            ):
+                                raise StorageError("unsafe media version listing")
+                            # UTF-8 only, bounded size, and DTD/entity declarations rejected above.
+                            tree = ElementTree.fromstring(document)  # noqa: S314
+                        except (UnicodeError, ElementTree.ParseError) as exc:
+                            raise StorageError("invalid media version listing") from exc
+                        ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+                        if tree.tag != ns + "ListVersionsResult":
+                            raise StorageError("invalid media version listing")
+                        for kind, output in (("Version", versions), ("DeleteMarker", markers)):
+                            for item in tree.findall(ns + kind):
+                                listed_key = item.findtext(ns + "Key")
+                                version = item.findtext(ns + "VersionId")
+                                if not listed_key or not version:
+                                    raise StorageError("missing media version identity")
+                                if listed_key == key:
+                                    output.append(version)
+                        truncated = tree.findtext(ns + "IsTruncated")
+                        if truncated == "false":
+                            complete = True
+                            break
+                        next_key = tree.findtext(ns + "NextKeyMarker")
+                        next_version = tree.findtext(ns + "NextVersionIdMarker")
+                        if truncated != "true" or not next_key or next_version is None:
+                            raise StorageError("invalid media version pagination")
+                        params = {
+                            **params,
+                            "key-marker": next_key,
+                            "version-id-marker": next_version,
+                        }
+                    # Never remove a hiding marker while an older data version might remain.
+                    pending = versions or (markers if complete else [])
+                    for version in pending[:100]:
+                        response = await request("DELETE", target, {"versionId": version})
+                        if response.status_code not in {200, 204, 404}:
+                            raise StorageError("media version removal failed")
+                    if versions or markers or not complete:
+                        return False  # A later pass independently verifies the empty listing.
+                return (await request("HEAD", target)).status_code == 404
+        except httpx.HTTPError as exc:
+            raise StorageError("media removal request failed") from exc

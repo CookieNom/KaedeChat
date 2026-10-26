@@ -28,7 +28,16 @@ ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
         }
     ),
     "trust_safety": frozenset(
-        {"admin.read", "reports.read", "reports.manage", "users.manage", "instances.manage"}
+        {
+            "admin.read",
+            "reports.read",
+            "reports.manage",
+            "users.manage",
+            "instances.manage",
+            "safety.read",
+            "safety.manage",
+            "safety.evidence",
+        }
     ),
     "bot_reviewer": frozenset({"admin.read", "bots.manage", "audit.read"}),
     "operations": frozenset({"admin.read", "instances.manage", "audit.read"}),

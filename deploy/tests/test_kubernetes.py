@@ -238,6 +238,8 @@ class KubernetesTests(unittest.TestCase):
         self.assertNotIn("KAEDE_DATABASE_URL", env("scheduler"))
         self.assertNotIn("KAEDE_ADMIN_TOKEN", env("gateway"))
         self.assertNotIn("KAEDE_MEDIA_S3_SECRET_KEY", env("gateway"))
+        self.assertNotIn("KAEDE_SAFETY_EVIDENCE_KEY", env("gateway"))
+        self.assertNotIn("KAEDE_SAFETY_EVIDENCE_KEY", env("scheduler"))
         self.assertEqual(
             env("gateway")["KAEDE_SECRET_KEY"], self.values["KAEDE_GATEWAY_SECRET_KEY"]
         )

@@ -101,6 +101,9 @@ from app.federation.delivery import FederationOutboxCapacityExceeded
 from app.federation.identity_storage import FederationIdentityQuotaExceeded
 from app.federation.network import FederationInstanceQuotaExceeded
 from app.federation.security import bounded_request_body
+from app.safety.api import router as safety_router
+from app.safety.client_api import router as safety_client_router
+from app.safety.media_access import router as safety_media_router
 from app.voice.background import voice_coordinator
 from app.voice.rtc import configure_rtc_sessions
 from app.voice.rtc_webhooks import webhook_worker
@@ -171,6 +174,9 @@ app.include_router(support_router)
 app.include_router(automod_router)
 app.include_router(admin_router)
 app.include_router(admin_portal_router)
+app.include_router(safety_router)
+app.include_router(safety_client_router)
+app.include_router(safety_media_router)
 
 app.include_router(rtc_router)
 app.include_router(report_federation_router)

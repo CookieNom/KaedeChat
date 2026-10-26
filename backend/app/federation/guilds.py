@@ -96,6 +96,15 @@ from app.db.models import (
     User,
 )
 from app.federation.client import signed_request
+from app.federation.content_safety import (
+    apply_safety_delete,
+    apply_safety_update,
+    project_safety,
+    require_unprotected,
+    safety_projection,
+    safety_state,
+    safety_timestamp,
+)
 from app.federation.events import message_attachment_refs
 from app.federation.identity_storage import FederationIdentityQuotaExceeded
 from app.federation.message_content import (
@@ -825,7 +834,7 @@ async def apply_guild_message_event(
     if not stale_replay and seq != expected:
         guild.sync_status = "stale"
         raise GuildSequenceGap(expected, seq)
-    raw = event["content"]["message"]
+    raw = safety_projection(event["content"]["message"])
     # Authority events carry a strict federation profile alongside the rendered
     # client message. The embedded client author intentionally serializes
     # revision counters as decimal strings, so it is not a RemoteUserProfile.
@@ -928,7 +937,7 @@ async def apply_guild_message_event(
         raise ValueError(
             "guild message requires content, an attachment, rich content, or a forward"
         )
-    if not is_poll_result and not is_pin_notice:
+    if not is_poll_result and not is_pin_notice and safety_state(raw) is None:
         validate_message_encryption_policy(
             channel.encryption_mode or "plaintext",
             content=content,
@@ -1158,7 +1167,8 @@ async def apply_guild_message_event(
         raw_results = raw_poll.get("results") if isinstance(raw_poll, dict) else None
         raw_counts = raw_results.get("answer_counts") if isinstance(raw_results, dict) else None
         if (
-            not isinstance(raw_results, dict)
+            not isinstance(raw_poll, dict)
+            or not isinstance(raw_results, dict)
             or raw_results.get("is_finalized") is not False
             or raw_poll.get("finalized_at") is not None
             or not isinstance(raw_counts, list)
@@ -1186,6 +1196,9 @@ async def apply_guild_message_event(
             author_id=author.id,
             author_domain=author.origin_domain,
             content=content,
+            safety_state=safety_state(raw),
+            safety_reason=raw.get("safety_reason"),
+            safety_updated_at=safety_timestamp(raw),
             e2ee=e2ee,
             embeds=cast(list[dict[str, Any]], rich["embeds"]),
             components=cast(list[dict[str, Any]], rich["components"]),
@@ -1458,6 +1471,8 @@ async def apply_guild_message_event(
     await advance_channel_cursor(session, channel, message.id, message.origin_domain)
     if not stale_replay and authority_guild_version is not None:
         guild.updated_at = authority_guild_version
+    if (message_safety_state := getattr(message, "safety_state", None)) is not None:
+        await project_safety(session, settings, message, message_safety_state)
     return message
 
 
@@ -3080,6 +3095,8 @@ async def _apply_message_bulk_delete_mutation(
     )
     if any((message.channel_id, message.channel_domain) != channel_ref for message in messages):
         raise ValueError("message bulk deletion references the wrong channel")
+    for message in messages:
+        require_unprotected(message)
     active_deleted_count = 0
     for message in messages:
         if message.deleted_at is None and (
@@ -4593,7 +4610,17 @@ async def apply_guild_mutation_event(
                     and thread_detached
                 ):
                     raise ValueError("message thread attachment marker is invalid")
-                if thread_attached:
+                if await apply_safety_update(
+                    session,
+                    settings,
+                    channel,
+                    message,
+                    raw_message,
+                    event_timestamp_ms=int(event["ts"]),
+                ):
+                    content = dict(content)
+                    content["message"] = safety_projection(raw_message)
+                elif thread_attached:
                     incoming_flags = _bounded_event_int(raw_message.get("flags"), "message flags")
                     attached_thread = await session.get(Channel, message_ref)
                     if (
@@ -4840,15 +4867,25 @@ async def apply_guild_mutation_event(
                 deleted_at = _event_datetime(content.get("deleted_at"), "message deletion")
                 if deleted_at is None:
                     raise ValueError("message deletion timestamp is invalid")
+                protected_delete = (
+                    safety_state(content) == "removed"
+                    or getattr(message, "safety_state", None) == "removed"
+                )
+                if protected_delete:
+                    await apply_safety_delete(session, settings, message, deleted_at)
+                else:
+                    require_unprotected(message)
                 was_counted_thread_reply = (
-                    message.deleted_at is None
+                    not protected_delete
+                    and message.deleted_at is None
                     and channel.type in {10, 11, 12}
                     and (channel.starter_message_id, channel.starter_message_domain)
                     != (message.id, message.origin_domain)
                 )
-                message.content = None
-                message.e2ee = None
-                message.deleted_at = deleted_at
+                if not protected_delete:
+                    message.content = None
+                    message.e2ee = None
+                    message.deleted_at = deleted_at
                 if was_counted_thread_reply:
                     channel.message_count = max(0, int(channel.message_count or 0) - 1)
                 if (
@@ -4870,6 +4907,12 @@ async def apply_guild_mutation_event(
         }
         if event_type.endswith("update") and isinstance(content.get("message"), dict):
             dispatch.update(content["message"])
+        elif message is not None and getattr(message, "safety_state", None) == "removed":
+            from app.chat.payloads import message_payload
+
+            dispatch_type = "MESSAGE_UPDATE"
+            author = await session.get(User, (message.author_id, message.author_domain))
+            dispatch = message_payload(message, author, [])
     elif event_type == "guild.message.purge":
         author_ref = _event_ref(content.get("author"), "purged author")
         cutoff = _event_datetime(content.get("created_after"), "message purge cutoff")
@@ -4895,6 +4938,7 @@ async def apply_guild_mutation_event(
                     Message.author_domain == author_ref[1],
                     Message.created_at >= cutoff,
                     Message.deleted_at.is_(None),
+                    Message.safety_state.is_(None),
                 )
                 .distinct()
             )
@@ -4915,6 +4959,7 @@ async def apply_guild_mutation_event(
                     Message.author_domain == author_ref[1],
                     Message.created_at >= cutoff,
                     Message.deleted_at.is_(None),
+                    Message.safety_state.is_(None),
                     ~(
                         (Message.id == Channel.starter_message_id)
                         & (Message.origin_domain == Channel.starter_message_domain)
@@ -4932,6 +4977,7 @@ async def apply_guild_mutation_event(
                 Message.author_domain == author_ref[1],
                 Message.created_at >= cutoff,
                 Message.deleted_at.is_(None),
+                Message.safety_state.is_(None),
             )
             .values(content=None, e2ee=None, deleted_at=deleted_at)
         )
@@ -5939,6 +5985,7 @@ async def purge_replicated_channel_cache(
     await session.flush()
     await session.execute(
         delete(Message).where(
+            Message.safety_state.is_(None),
             Message.channel_id == channel.id,
             Message.channel_domain == channel.origin_domain,
             ~exists(

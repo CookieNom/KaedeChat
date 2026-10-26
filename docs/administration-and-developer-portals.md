@@ -193,26 +193,40 @@ Authorized staff can triage, review, request more information, record action or
 no action, mark duplicates, and reopen cases. Report creation is rate limited to
 10 per local user per hour.
 
-### External safety reporting
+### Child-safety review and external reporting
 
-In **Administration → Reports**, staff with `reports.manage` can export a
-PhotoDNA case as authenticated JSON, submit it through the destination's own
-process, and record its destination, receipt, submission time, and notes.
-Exports and submission records are audited. Recording a submission appends to
-the case without changing its review status or sending data to another service.
+CSAM reports and PhotoDNA matches are handled in **Administration → Child
+safety**, separate from the ordinary report queue. Reading cases, managing
+them and downloading preserved evidence require the `safety.read`,
+`safety.manage` and `safety.evidence` capabilities respectively. Evidence is
+encrypted and is not previewed automatically. Staff must explicitly download
+it through an authenticated, audited endpoint.
 
-Exports include case timestamps, available identities, message/attachment
-references, evidence, previous submissions, and the exporting instance and
-administrator. Remote matches may include the origin, observation time, scanned
-variant, size, conversation reference, and a federation-authorized source URL
-without access tokens. Remote identities are federation claims, not verified
-real-world identities; missing fields remain unavailable and older cases are
-not retroactively enriched.
+Review a pending case to confirm removal or dismiss the finding. An optional
+account suspension is available only for a local subject with verified
+provenance; reporter-disclosed E2EE evidence does not establish the alleged
+sender's responsibility. Confirming removal for an unverified source requires
+explicitly recording that you independently verified the source message.
+The original identity snapshot is retained alongside the account's current
+identity and available session device, IP address and activity metadata at deletion;
+passwords, MFA secrets, session IDs and authentication tokens are never copied.
+Remote account identities remain claims
+of their originating instance.
 
-The export does not retain matched image bytes or perceptual hashes, collect
-remote IP/account records, or submit automatically. The originating instance
-may hold additional information. Record the destination's receipt after manual
-submission.
+Submit the report through CyberTipline manually, then record the completed
+submission's receipt/reference, actual submission time, selected evidence and
+optional notes. This action records completion; it does not transmit anything
+to NCMEC. The retention deadline is at least one calendar year from completion
+and can be extended with a reason. Placing or releasing a hold also requires a
+reason and is audited.
+
+Closing a case does not delete its evidence. Deletion becomes available only
+after review and applicable reporting obligations are complete, the retention
+deadline has passed and every hold is released. Pending or unsubmitted
+confirmed cases cannot be expired by this action. Eligible disposal also
+removes preserved account/message snapshots. Ordinary account or message
+deletion does not dispose of retained case evidence.
+The daily retention task also disposes of closed cases once these conditions hold.
 
 ### Administration API
 

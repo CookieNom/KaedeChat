@@ -61,6 +61,25 @@ void main() {
       <String, Object?>{'content': 'other kind'},
     ]);
   });
+
+  test('safety purge reaches unopened cached rooms and isolates accounts',
+      () async {
+    final local = await seededDatabase();
+    addTearDown(local.close);
+    await local.putSnapshot('account', 'threads', 'thread', {
+      'starter_message': {'content': 'cached thread starter'},
+    });
+    await local.putSnapshot('account', 'content_safety', 'state', {
+      'messages': {'1@chat.example': 'removed'},
+    });
+    await local.purgeSafetySnapshots('account', (_) => true);
+    expect(await local.snapshots('account', 'messages:channel'), isEmpty);
+    expect(await local.snapshots('account', 'messages:other'), isEmpty);
+    expect(await local.snapshots('account', 'threads'), isEmpty);
+    expect(await local.snapshots('account', 'content_safety'), isNotEmpty);
+    expect(
+        await local.snapshots('other-account', 'messages:channel'), isNotEmpty);
+  });
 }
 
 Future<LocalDatabase> seededDatabase() async {

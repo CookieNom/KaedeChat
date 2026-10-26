@@ -79,6 +79,7 @@ def suspension_blocks_request(request: Request) -> bool:
         return False
     return not (
         path == "/api/v1/reports"
+        or path == "/api/v1/safety/content-status"
         or (path.startswith("/api/v1/reports/") and path.endswith("/attachment-evidence"))
     )
 

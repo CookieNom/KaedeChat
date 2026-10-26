@@ -14,6 +14,7 @@ from app.chat.message_references import validate_message_reference_projection
 from app.chat.pins import PIN_NOTICE_MESSAGE_TYPE
 from app.core.base64url import encode_base64url
 from app.core.settings import Settings
+from app.federation.content_safety import safety_projection, safety_state, safety_timestamp
 from app.federation.message_content import validate_replicated_rich_projection
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.replication import (
@@ -59,6 +60,27 @@ def merge_dm_history_messages(
         (str(item["id"]), str(item["origin_domain"])): item
         for item in [*remote_messages, *local_messages]
     }
+    for item in remote_messages:
+        if safety_state(item) is not None:
+            key = (str(item["id"]), str(item["origin_domain"]))
+            local = merged[key]
+            # Only the safety marker crosses the trust boundary for local
+            # messages; the authority cannot replace their original bodies.
+            remote_time = safety_timestamp(item)
+            local_time = safety_timestamp(local)
+            stale_pending = (
+                safety_state(item) == "pending_review"
+                and local_time is not None
+                and (remote_time is None or remote_time <= local_time)
+            )
+            if safety_state(local) != "removed" and not stale_pending:
+                merged[key] = safety_projection(
+                    {
+                        **local,
+                        "safety_state": safety_state(item),
+                        "safety_updated_at": item.get("safety_updated_at"),
+                    }
+                )
     return sorted(
         merged.values(),
         key=lambda item: (int(str(item["id"])), str(item["origin_domain"])),
@@ -408,6 +430,10 @@ def validate_dm_history_page(
     for raw in raw_messages:
         if not isinstance(raw, dict):
             raise FederationNetworkError("DM history authority returned an invalid message")
+        try:
+            raw = safety_projection(raw)
+        except (ValueError, TypeError) as exc:
+            raise FederationNetworkError("DM history safety projection is invalid") from exc
         message_type = raw.get("message_type", 0)
         if (
             isinstance(message_type, bool)
@@ -450,6 +476,23 @@ def validate_dm_history_page(
         # for bodies authored on this home. Advance the signed cursor past
         # these rows and use only the local durable copy during merge.
         if author_ref[1] == settings.domain:
+            if safety_state(raw) is not None or safety_timestamp(raw) is not None:
+                result.append(
+                    safety_projection(
+                        {
+                            "id": str(reference[0]),
+                            "origin_domain": reference[1],
+                            "channel_id": str(conversation_ref[0]),
+                            "channel_domain": conversation_ref[1],
+                            "author_id": str(author_ref[0]),
+                            "author_domain": author_ref[1],
+                            "created_at": raw.get("created_at"),
+                            "edited_at": raw.get("edited_at"),
+                            "safety_state": safety_state(raw),
+                            "safety_updated_at": raw.get("safety_updated_at"),
+                        }
+                    )
+                )
             ignored_local_refs.add(reference)
             seen.add(reference)
             previous = reference
@@ -662,6 +705,10 @@ def validate_dm_history_page(
                 "author_domain": author_ref[1],
                 "author": client_user_payload_from_profile(profile),
                 "content": None if deleted_at is not None else content,
+                "safety_state": safety_state(raw),
+                "safety_updated_at": raw.get("safety_updated_at"),
+                "safety_reason": raw.get("safety_reason"),
+                "safety_locked": safety_state(raw) is not None,
                 "e2ee": None if deleted_at is not None else e2ee,
                 "embeds": [] if deleted_at is not None else rich.embeds,
                 "components": [] if deleted_at is not None else rich.components,

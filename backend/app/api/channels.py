@@ -289,6 +289,7 @@ from app.federation.typing import (
 from app.media.payloads import federation_attachment_payload
 from app.media.service import attachments_for_messages, discard_attachment, finalize_attachment
 from app.media.tombstones import lock_media_tombstone_ref, queue_terminal_attachment_tombstone
+from app.safety.enforcement import ensure_message_mutable, protect_bound_attachments
 from app.tasks import (
     SET_LATEST_MESSAGE_SCRIPT,
     announcement_crosspost_deliver,
@@ -4089,6 +4090,25 @@ async def list_messages(
                         raise FederationNetworkError(
                             "DM history authority invented a locally-authored message"
                         )
+                safety_changed = False
+                for remote_message in remote_page.messages:
+                    if (
+                        remote_message.get("safety_state") not in {"pending_review", "removed"}
+                        and remote_message.get("safety_updated_at") is None
+                    ):
+                        continue
+                    retained = await session.get(
+                        Message,
+                        (int(str(remote_message["id"])), remote_message["origin_domain"]),
+                        with_for_update=True,
+                    )
+                    if retained is not None:
+                        from app.federation.content_safety import reconcile_safety_history
+
+                        await reconcile_safety_history(session, settings, retained, remote_message)
+                        safety_changed = True
+                if safety_changed:
+                    await session.commit()
                 remote_messages.extend(remote_page.messages)
                 remote_complete = remote_page.complete
                 if remote_complete or remote_page.next_before is None:
@@ -5832,6 +5852,8 @@ async def create_message(
             )
         except ValueError:
             proof_channel_ref = None
+        if source_message is not None:
+            ensure_message_mutable(source_message)
         if source_message is not None and source_message.deleted_at is not None:
             raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
         source_channel_ref = (
@@ -6641,6 +6663,7 @@ async def create_message(
     for attachment in message_attachments:
         attachment.message_id = message.id
         attachment.message_domain = message.origin_domain
+    await protect_bound_attachments(session, settings, message, message_attachments)
     remote_destinations: set[str] = set()
     if access.guild is None:
         conversation = dm_conversation
@@ -6938,6 +6961,7 @@ async def edit_message(
         # Moderation is intentionally delete-only. Editing another user's
         # content while preserving their authorship would be impersonation.
         raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
+    ensure_message_mutable(message)
     await require_editable_message(session, message)
     if access.guild is not None and mutation_options.webhook_id is None:
         await require_member_interactions_allowed(
@@ -7898,6 +7922,7 @@ async def commit_local_message_deletion(
     live dispatch cannot drift by authorization mechanism.
     """
 
+    ensure_message_mutable(message)
     channel = access.channel
     already_deleted = message.deleted_at is not None
     announcement_effects: AnnouncementSyncEffects | None = None
@@ -8144,6 +8169,8 @@ async def bulk_delete_messages(
     )
     if len(messages) != len(message_refs):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
+    for protected_candidate in messages:
+        ensure_message_mutable(protected_candidate)
     active_deleted_count = sum(
         message.deleted_at is None
         and (message.id, message.origin_domain)

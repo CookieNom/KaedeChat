@@ -40,6 +40,13 @@ from app.db.models import (
     Reaction,
     User,
 )
+from app.federation.content_safety import (
+    apply_safety_delete,
+    apply_safety_update,
+    project_safety,
+    require_unprotected,
+    safety_state,
+)
 from app.federation.message_content import (
     stored_poll_matches_projection,
     stored_view_matches_projection,
@@ -83,6 +90,10 @@ async def _apply_message_update(
     raw: dict[str, object],
     event_timestamp_ms: int,
 ) -> None:
+    if await apply_safety_update(
+        session, settings, channel, message, raw, event_timestamp_ms=event_timestamp_ms
+    ):
+        return
     if message.deleted_at is not None or message.message_type == 46:
         raise ValueError("DM message update references an immutable message")
     if (message.author_id, message.author_domain) != (actor.id, actor.origin_domain):
@@ -383,15 +394,6 @@ async def _mutation_scope(
     ):
         raise ValueError("DM mutation is not bound to a remote conversation authority")
     actor = await session.get(User, actor_ref)
-    if (
-        actor is None
-        or await session.get(
-            DMParticipant,
-            (conversation.id, conversation.origin_domain, actor.id, actor.origin_domain),
-        )
-        is None
-    ):
-        raise ValueError("DM mutation actor is not a participant")
     raw_message = content.get("message")
     message_id = (
         raw_message.get("id") if isinstance(raw_message, dict) else content.get("message_id")
@@ -408,6 +410,28 @@ async def _mutation_scope(
     message = await session.get(Message, message_ref, with_for_update=True)
     if message is None or (message.channel_id, message.channel_domain) != conversation_ref:
         raise ValueError("DM mutation source is unavailable")
+    is_safety = isinstance(raw_message, dict) and (
+        safety_state(raw_message) is not None
+        or (
+            "safety_state" in raw_message
+            and getattr(message, "safety_state", None) == "pending_review"
+        )
+    )
+    # An authority may remove a departed author's content. The envelope helper
+    # already requires delete/update attribution to that original author.
+    author_cleanup = (is_safety or "deleted_at" in content) and (
+        message.author_id,
+        message.author_domain,
+    ) == actor_ref
+    if actor is None or (
+        not author_cleanup
+        and await session.get(
+            DMParticipant,
+            (conversation.id, conversation.origin_domain, actor.id, actor.origin_domain),
+        )
+        is None
+    ):
+        raise ValueError("DM mutation actor is not a participant")
     return channel, message, actor
 
 
@@ -473,6 +497,15 @@ async def apply_dm_message_mutation(
         event_time = datetime.fromtimestamp(event_timestamp_ms / 1000, tz=UTC)
         if deleted_at < message.created_at or deleted_at > event_time + timedelta(milliseconds=1):
             raise ValueError("DM message deletion timestamp is invalid")
+        if (
+            safety_state(content) == "removed"
+            or getattr(message, "safety_state", None) == "pending_review"
+        ):
+            await apply_safety_delete(session, settings, message, deleted_at)
+            return DMMutationResult(channel, message, actor, render_message_update=True)
+        if getattr(message, "safety_state", None) == "removed":
+            return DMMutationResult(channel, message, actor)
+        require_unprotected(message)
         if message.deleted_at is not None:
             if message.deleted_at != deleted_at:
                 raise ValueError("DM message deletion conflicts with stored authority state")
@@ -480,6 +513,9 @@ async def apply_dm_message_mutation(
         message.content = None
         message.e2ee = None
         message.deleted_at = deleted_at
+        # Even legacy authorities delete without a reason. Invalidate retained
+        # plaintext/media on every deletion so offline app caches converge.
+        await project_safety(session, settings, message, "removed")
         await session.execute(
             delete(Pin).where(
                 Pin.message_id == message.id,

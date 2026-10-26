@@ -256,6 +256,13 @@ export interface MessageReference {
 }
 
 export interface Message {
+  safety_state?: 'pending_review' | 'removed' | null;
+  safety_reason?: string | null;
+  safety_updated_at?: string | null;
+  safety_locked?: boolean;
+  /** Client-only per-account report hiding. */
+  safety_hidden?: boolean;
+  safety_unavailable?: boolean;
   id: string;
   origin_domain: string;
   channel_id: string;

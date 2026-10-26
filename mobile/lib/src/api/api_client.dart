@@ -375,6 +375,7 @@ final class KaedeApiClient {
     String path,
     File destination, {
     Map<String, Object?>? query,
+    bool Function()? isCancelled,
   }) async {
     final session = _tokens;
     final generation = _sessionGeneration;
@@ -471,7 +472,22 @@ final class KaedeApiClient {
         await temporary.parent.create(recursive: true);
         final sink = temporary.openWrite();
         try {
-          await response.pipe(sink);
+          await for (final chunk in response) {
+            if (isCancelled?.call() == true) {
+              throw const KaedeException(
+                  code: 'CONTENT_UNAVAILABLE',
+                  message: 'This attachment is unavailable for safety reasons.',
+                  status: 410);
+            }
+            sink.add(chunk);
+          }
+          await sink.close();
+          if (isCancelled?.call() == true) {
+            throw const KaedeException(
+                code: 'CONTENT_UNAVAILABLE',
+                message: 'This attachment is unavailable for safety reasons.',
+                status: 410);
+          }
         } on Object {
           await sink.close();
           if (await temporary.exists()) await temporary.delete();

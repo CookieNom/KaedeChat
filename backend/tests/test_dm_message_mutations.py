@@ -110,6 +110,31 @@ def test_authority_attested_dm_mutation_rejects_actor_and_authority_swaps() -> N
     )
 
 
+def test_unedited_dm_restore_requires_explicit_safety_release() -> None:
+    message = {
+        "id": "123",
+        "origin_domain": "member.example",
+        "channel_id": "77",
+        "channel_domain": AUTHORITY,
+        "author_id": "42",
+        "author_domain": "member.example",
+        "edited_at": None,
+    }
+
+    def accepted(raw):
+        return authority_attested_dm_message_mutation(
+            "dm.message.update",
+            {"message": raw},
+            context(),
+            expected_authority=AUTHORITY,
+            actor=(str(ACTOR_REF[0]), ACTOR_REF[1]),
+        )
+
+    assert not accepted(message)
+    assert accepted(message | {"safety_state": None, "safety_locked": False})
+    assert not accepted(message | {"safety_state": "removed", "safety_locked": False})
+
+
 @pytest.mark.parametrize(
     "emoji",
     [
@@ -331,7 +356,9 @@ async def test_remote_home_canonicalizes_reaction_aliases_before_persist_and_dis
 
 
 @pytest.mark.asyncio
-async def test_remote_home_applies_message_tombstone_once() -> None:
+async def test_remote_home_applies_message_tombstone_once(monkeypatch) -> None:
+    safety = AsyncMock()
+    monkeypatch.setattr(dm_mutations, "project_safety", safety)
     conversation, channel, actor, message = mutation_objects()
     session = mutation_session(conversation, channel, actor, message)
     deleted_at = message.created_at + timedelta(minutes=1)
@@ -351,6 +378,9 @@ async def test_remote_home_applies_message_tombstone_once() -> None:
     assert message.deleted_at == deleted_at
     session.execute.assert_awaited_once()
     assert result.dispatches[0][0] == "MESSAGE_DELETE"
+    safety.assert_awaited_once_with(
+        session, SimpleNamespace(domain="local.example"), message, "removed"
+    )
 
     replay = await apply_dm_message_mutation(
         cast(Any, session),
@@ -364,6 +394,7 @@ async def test_remote_home_applies_message_tombstone_once() -> None:
     )
     assert message.content is None and message.deleted_at == deleted_at
     assert replay.dispatches == ()
+    assert safety.await_count == 1
     session.execute.assert_awaited_once()
 
 

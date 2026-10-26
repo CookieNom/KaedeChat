@@ -1239,7 +1239,10 @@ async def prepare_terminal_channel_media(
     )
     await session.flush()
     await session.execute(
-        delete(Message).where(tuple_(Message.id, Message.origin_domain).in_(message_refs))
+        delete(Message).where(
+            tuple_(Message.id, Message.origin_domain).in_(message_refs),
+            Message.safety_state.is_(None),
+        )
     )
     state_destinations.discard(settings.domain)
     return purge_refs, state_destinations, delivery_wakes

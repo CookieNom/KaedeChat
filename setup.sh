@@ -1287,6 +1287,7 @@ validate_quota_relationships
 note "Quota summary: DM rolling cache $(kaede_format_count "${QUOTA[KAEDE_FEDERATION_DM_REPLICA_CACHE_MESSAGES_PER_CONVERSATION]}") / $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_DM_REPLICA_CACHE_BYTES_PER_CONVERSATION]}") per conversation; remote guild $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_GUILD]}") per guild and $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_REPLICA_MAX_BYTES_PER_ORIGIN]}") per origin; history import $(kaede_format_count "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_MESSAGES]}") / $(kaede_format_bytes "${QUOTA[KAEDE_FEDERATION_HISTORY_MAX_BYTES]}"); remote media cache $(kaede_format_bytes "${QUOTA[KAEDE_MEDIA_REMOTE_CACHE_BYTES]}")."
 
 MASTER_KEY=$(preserve_or_generate KAEDE_SECRET_KEY b64)
+SAFETY_EVIDENCE_KEY=$(preserve_or_generate KAEDE_SAFETY_EVIDENCE_KEY hex32)
 GATEWAY_KEY=$(preserve_or_generate KAEDE_GATEWAY_SECRET_KEY b64)
 [[ $MASTER_KEY != "$GATEWAY_KEY" ]] || GATEWAY_KEY=$(random_base64url)
 PROXY_SECRET=$(preserve_or_generate KAEDE_PROXY_SECRET hex32)
@@ -1343,6 +1344,7 @@ emit() {
   emit KAEDE_DOMAIN "$DOMAIN"
   emit KAEDE_ENVIRONMENT production
   emit KAEDE_SECRET_KEY "$MASTER_KEY"
+  emit KAEDE_SAFETY_EVIDENCE_KEY "$SAFETY_EVIDENCE_KEY"
   emit KAEDE_GATEWAY_SECRET_KEY "$GATEWAY_KEY"
   emit KAEDE_PROXY_SECRET "$PROXY_SECRET"
   emit KAEDE_EDGE_SECRET "$EDGE_SECRET"

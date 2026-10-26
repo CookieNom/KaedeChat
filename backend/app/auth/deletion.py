@@ -7,7 +7,7 @@ from datetime import datetime
 
 import structlog
 from redis.asyncio import Redis
-from sqlalchemy import delete, or_, select, true, tuple_, update
+from sqlalchemy import delete, exists, or_, select, true, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import Settings
@@ -57,6 +57,7 @@ async def erase_content_batch(
                 m.Message.author_domain == user.origin_domain,
                 true() if user.deleted_at is not None else m.Message.created_at <= cutoff,
                 m.Message.deleted_at.is_(None),
+                m.Message.safety_state.is_(None),
             )
             .order_by(m.Message.id, m.Message.origin_domain)
             .limit(25)
@@ -156,6 +157,11 @@ async def erase_content_batch(
                 m.Attachment.uploader_domain == user.origin_domain,
                 true() if user.deleted_at is not None else m.Attachment.created_at <= cutoff,
                 m.Attachment.deleted_at.is_(None),
+                ~exists().where(
+                    m.Message.id == m.Attachment.message_id,
+                    m.Message.origin_domain == m.Attachment.message_domain,
+                    m.Message.safety_state.is_not(None),
+                ),
                 m.Attachment.origin_domain == settings.domain,
             )
             .order_by(m.Attachment.id)
@@ -191,6 +197,7 @@ async def erase_content_batch(
         )
     # Older single-message deletions may have retained ancillary body fields.
     authored = select(m.Message.id, m.Message.origin_domain).where(
+        m.Message.safety_state.is_(None),
         m.Message.author_id == user.id,
         m.Message.author_domain == user.origin_domain,
         true() if user.deleted_at is not None else m.Message.created_at <= cutoff,
@@ -201,6 +208,7 @@ async def erase_content_batch(
     await session.execute(
         update(m.Message)
         .where(
+            m.Message.safety_state.is_(None),
             m.Message.author_id == user.id,
             m.Message.author_domain == user.origin_domain,
             true() if user.deleted_at is not None else m.Message.created_at <= cutoff,

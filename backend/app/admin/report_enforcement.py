@@ -193,6 +193,7 @@ async def purge_author_messages(
         Message.author_id == target.id,
         Message.author_domain == target.origin_domain,
         Message.deleted_at.is_(None),
+        Message.safety_state.is_(None),
     ]
     if created_after is not None:
         base_conditions.append(Message.created_at >= created_after)
