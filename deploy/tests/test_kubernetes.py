@@ -22,6 +22,11 @@ class KubernetesTests(unittest.TestCase):
     def setUp(self):
         self.values = read_env_file(ROOT / "deploy/.env.schema")
 
+    def test_schema_evidence_key_is_32_bytes(self):
+        key = self.values["KAEDE_SAFETY_EVIDENCE_KEY"]
+        self.assertEqual(len(key), 64)
+        self.assertEqual(len(bytes.fromhex(key)), 32)
+
     def test_image_import_verifies_every_image_in_the_node(self):
         with patch("dev.run") as run:
             import_images("test", ["backend:test", "frontend:test"])

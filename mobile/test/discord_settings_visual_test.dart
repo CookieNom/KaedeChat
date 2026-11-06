@@ -472,12 +472,16 @@ void main() {
     SettingsRow setup(String title) => tester.widget<SettingsRow>(find.ancestor(
         of: find.text(title), matching: find.byType(SettingsRow)));
     expect(setup('Set up this device').enabled, isTrue);
-    await tester.tap(find.text('Set up this device'));
-    await tester.pumpAndSettle();
-    expect(setup('Set up this device').enabled, isTrue);
-    expect(
-        find.textContaining('Could not initialize encryption'), findsOneWidget);
-    controller.state = controller.state.copyWith(e2eeReady: true);
+    // A missing account fails deterministically without native encryption I/O.
+    controller.state = const MobileState();
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tester.tap(find.text('Set up this device'));
+      await tester.pumpAndSettle();
+      expect(setup('Set up this device').enabled, isTrue);
+      expect(find.textContaining('Could not initialize encryption'),
+          findsOneWidget);
+    }
+    controller.state = MobileState(user: user, e2eeReady: true);
     await tester.pumpAndSettle();
     expect(setup('Encryption enabled').enabled, isFalse);
     final ink = find.descendant(

@@ -242,6 +242,7 @@ async def test_remote_owner_can_delete_authority_guild_after_transfer(monkeypatc
         joined_at=datetime.now(UTC),
     )
     session = AsyncMock()
+    session.scalar.return_value = None
     session.get.side_effect = [remote_owner, remote_membership]
     session.scalars.return_value = [remote_owner]
     channel_result = Mock()
@@ -296,6 +297,7 @@ async def test_guild_delete_rejects_live_announcement_dependencies(monkeypatch) 
     guild = make_guild()
     owner = make_user(1)
     session = AsyncMock()
+    session.scalar.return_value = None
     channel_result = Mock()
     channel_result.tuples.return_value = [(30, "chat.example")]
     session.execute.return_value = channel_result

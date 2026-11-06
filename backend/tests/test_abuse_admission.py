@@ -239,6 +239,7 @@ async def test_remote_media_cache_hit_skips_fetch_admission(
         channel_id=7,
         channel_domain="beta.localhost",
         deleted_at=None,
+        safety_state=None,
     )
     channel = SimpleNamespace(
         id=7,
