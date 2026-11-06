@@ -252,6 +252,82 @@ final class GuildIcon extends StatelessWidget {
   }
 }
 
+/// Conversation artwork shared by forwarding and command destination pickers.
+final class ConversationAvatar extends StatelessWidget {
+  const ConversationAvatar({
+    super.key,
+    required this.channel,
+    this.guild,
+    this.size = 40,
+  });
+
+  final KaedeChannel channel;
+  final KaedeGuild? guild;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDm = channel.guildRef == null;
+    final group = channel.type == ChannelType.groupDm ||
+        channel.conversationType == 'group';
+    final recipients = channel.recipients;
+    final badge = isDm
+        ? (group ? Icons.group_rounded : Icons.chat_bubble_outline_rounded)
+        : channel.isThread
+            ? Icons.forum_outlined
+            : channel.type == ChannelType.voice ||
+                    channel.type == ChannelType.stage
+                ? Icons.volume_up_rounded
+                : Icons.tag_rounded;
+    final fallback = CircleAvatar(
+      radius: size / 2,
+      backgroundColor: context.kaede.raised,
+      child: Icon(
+          isDm
+              ? (group ? Icons.group_rounded : Icons.person_rounded)
+              : Icons.dns_rounded,
+          size: size * .55),
+    );
+    return ExcludeSemantics(
+      child: SizedBox.square(
+        dimension: size + 4,
+        child: Stack(
+          children: [
+            if (!isDm && guild != null)
+              GuildIcon(guild: guild!, size: size, borderRadius: size / 2)
+            else if (isDm && group && recipients.length >= 2) ...[
+              Positioned(
+                  left: 0,
+                  top: 0,
+                  child: UserAvatar(user: recipients[0], radius: size * .35)),
+              Positioned(
+                  right: 2,
+                  bottom: 2,
+                  child: UserAvatar(user: recipients[1], radius: size * .35)),
+            ] else if (isDm && recipients.isNotEmpty)
+              UserAvatar(user: recipients.first, radius: size / 2)
+            else
+              fallback,
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: context.kaede.panel,
+                  shape: BoxShape.circle,
+                ),
+                child:
+                    Icon(badge, size: size * .4, color: context.kaede.textSoft),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// Up to two letters: initials for multi-word names, otherwise the first two
 /// characters, so rail icons stay legible at 48px.
 String guildInitials(String name) {

@@ -1,7 +1,10 @@
 <script lang="ts">
+  import ConversationIcon from './ConversationIcon.svelte';
   import { t } from '$lib/ui/locale';
 
   import { userErrorMessage } from '$lib/api/client';
+  import { forwardingDestinationTitle } from '$lib/chat/forwarding';
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { entityRef } from '$lib/chat/refs';
   import type { Channel, Message } from '$lib/chat/types';
   import { portal } from '$lib/ui/portal';
@@ -21,6 +24,24 @@
 
   let selectedRefs = $state<string[]>([]);
   let note = $state('');
+  let query = $state('');
+  function detail(channel: Channel): string {
+    if (channel.guild_id === null) {
+      return (channel.recipients ?? []).map((user) => user.username).join(', ');
+    }
+    return (
+      chatEntities.guilds.get(`${channel.guild_id}@${channel.guild_domain}`)?.name ??
+      channel.guild_domain ??
+      ''
+    );
+  }
+  const filteredChannels = $derived(
+    channels.filter((channel) =>
+      `${forwardingDestinationTitle(channel)} ${detail(channel)}`
+        .toLocaleLowerCase()
+        .includes(query.trim().toLocaleLowerCase())
+    )
+  );
   let busy = $state(false);
   let error = $state('');
   let plaintextDisclosureAcknowledged = $state(false);
@@ -36,9 +57,7 @@
 
   onMount(() => {
     if (channels.length === 1) selectedRefs = [entityRef(channels[0])];
-    void tick().then(() =>
-      form?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.focus()
-    );
+    void tick().then(() => form?.querySelector<HTMLInputElement>('input[type="search"]')?.focus());
   });
 
   function toggle(channel: Channel, checked: boolean) {
@@ -78,6 +97,7 @@
     class="backdrop"
     type="button"
     aria-label={$t('ui_cancel_forward_c10a0603')}
+    disabled={busy}
     onclick={onClose}
   ></button>
   <form
@@ -95,22 +115,35 @@
         <h2>{$t('ui_forward_f1c65e14')}</h2>
       </div>
     </header>
-    <p>{$t('ui_forwarding_creates_an_immutable_author_free_s_db4c4415')}</p>
+    <p>{$t('forward_choose_destinations')}</p>
     <fieldset disabled={busy}>
       <legend>{$t('ui_send_to_value0_5_915ca61a', { value0: String(selectedRefs.length) })}</legend>
+      <input
+        class="search"
+        type="search"
+        bind:value={query}
+        placeholder={$t('ui_search_49c266ba')}
+        aria-label={$t('ui_search_49c266ba')}
+      />
       <div class="destinations">
-        {#each channels as channel (entityRef(channel))}
+        {#each filteredChannels as channel (entityRef(channel))}
           {@const ref = entityRef(channel)}
           {@const selected = selectedRefs.includes(ref)}
           <label class:selected>
+            <ConversationIcon {channel} />
             <input
               type="checkbox"
               checked={selected}
               disabled={!selected && selectedRefs.length >= 5}
               onchange={(event) => toggle(channel, event.currentTarget.checked)}
             />
-            <span>#{channel.name ?? $t('ui_direct_message_029adcf0')}</span>
+            <span class="destination-name">
+              <strong>{forwardingDestinationTitle(channel)}</strong>
+              <small>{detail(channel)}</small>
+            </span>
           </label>
+        {:else}
+          <p role="status">{$t('forward_no_destinations')}</p>
         {/each}
       </div>
     </fieldset>
@@ -168,7 +201,11 @@
   }
   .forward-dialog {
     position: relative;
+    display: block;
     width: min(480px, 100%);
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
+    box-sizing: border-box;
     border: 1px solid var(--line);
     border-radius: 14px;
     padding: 1rem;
@@ -226,7 +263,9 @@
     align-items: center;
     gap: 9px;
     border-radius: 7px;
-    padding: 8px 9px;
+    padding: 10px 9px;
+    min-height: 44px;
+    box-sizing: border-box;
     background: var(--surface-subtle);
     cursor: pointer;
   }
@@ -234,11 +273,16 @@
     background: color-mix(in srgb, var(--accent) 16%, var(--surface-subtle));
   }
   .destinations input {
-    width: 17px;
-    height: 17px;
-    margin: 0;
+    order: 1;
+    margin-left: auto;
+    width: 20px;
+    height: 20px;
+    min-height: 17px;
+    flex-shrink: 0;
+    margin: 0 0 0 auto;
     accent-color: var(--accent);
   }
+  .search,
   textarea,
   button {
     border: 1px solid var(--line);
@@ -247,12 +291,40 @@
     color: var(--text);
     background: var(--surface-subtle);
   }
+  .search {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 0.6rem;
+    font: inherit;
+  }
+  .destination-name {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    flex: 1;
+    overflow-wrap: anywhere;
+  }
+  .destination-name small {
+    color: var(--text-muted);
+  }
+  .destinations label:has(input:disabled) {
+    opacity: 0.55;
+    cursor: default;
+  }
+  button:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
   textarea {
     width: 100%;
     resize: vertical;
     font: inherit;
   }
   footer {
+    position: sticky;
+    bottom: -1rem;
+    padding: 0.6rem 0;
+    background: var(--surface-raised);
     display: flex;
     justify-content: flex-end;
     gap: 0.6rem;

@@ -1,4 +1,6 @@
 {
+  "forward_choose_destinations": "Choose up to five conversations, most recently active first.",
+  "forward_no_destinations": "No matching conversations.",
   "presence_offline": "Offline",
   "friend_connect_by_username": "Connect by username",
   "friend_username_help": "Use a username for someone on your home server, or a full address such as friend@example.net.",

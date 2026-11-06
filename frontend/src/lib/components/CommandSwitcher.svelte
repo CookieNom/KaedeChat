@@ -1,15 +1,20 @@
 <script lang="ts">
+  import ConversationIcon from './ConversationIcon.svelte';
   import { t } from '$lib/ui/locale';
 
   import { afterNavigate, goto } from '$app/navigation';
   import { api, userErrorMessage } from '$lib/api/client';
   import type { Channel, Guild } from '$lib/chat/types';
-  import { userDisplayName, userPublicHandle } from '$lib/chat/users';
+  import { compareChannelActivity } from '$lib/chat/channels';
+  import { dmTitle } from '$lib/chat/direct-messages';
+  import { userPublicHandle } from '$lib/chat/users';
   import { recordNavigation } from '$lib/navigation/history';
   import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
   import { onMount, tick } from 'svelte';
 
   interface Destination {
+    channel: Channel;
+    guild?: Guild;
     path: string;
     label: string;
     detail: string;
@@ -69,19 +74,26 @@
           (guild.channels ?? [])
             .filter((channel) => channel.type === 0 || channel.type === 2 || channel.type === 5)
             .map((channel) => ({
+              channel,
+              guild,
               path: guildChannelPath(guild, channel),
               label: `${channel.type === 2 ? $t('ui_voice_87bf2bc0') : '#'} ${channel.name ?? 'channel'}`,
               detail: guild.name
             }))
         ),
         ...dms.map((channel) => ({
+          channel,
           path: directMessagePath(channel),
-          label: userDisplayName(channel.recipients?.[0]) || $t('ui_direct_message_cd3e1605'),
+          label: dmTitle(channel),
           detail: channel.recipients?.[0]
             ? (userPublicHandle(channel.recipients[0]) ?? 'Profile unavailable')
             : 'Direct message'
         }))
-      ];
+      ].sort(
+        (left, right) =>
+          compareChannelActivity(left.channel, right.channel) ||
+          left.label.localeCompare(right.label)
+      );
       loaded = true;
     } catch (caught) {
       if (!controller.signal.aborted && generation === requestGeneration) {
@@ -258,7 +270,10 @@
             onmouseenter={() => setActive(index)}
             onclick={() => choose(destination)}
           >
-            <strong>{destination.label}</strong><small>{destination.detail}</small>
+            <ConversationIcon channel={destination.channel} guild={destination.guild} />
+            <span class="destination-copy"
+              ><strong>{destination.label}</strong><small>{destination.detail}</small></span
+            >
           </button>
         {/each}
       </div>
@@ -281,3 +296,19 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .destination-copy {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    text-align: left;
+    flex: 1;
+  }
+  .destination-copy small {
+    margin-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+</style>

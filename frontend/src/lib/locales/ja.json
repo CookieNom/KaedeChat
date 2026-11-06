@@ -1,4 +1,6 @@
 {
+  "forward_choose_destinations": "最近アクティブな順に表示しています。転送先を5件まで選択できます。",
+  "forward_no_destinations": "一致する会話はありません。",
   "presence_offline": "オフライン",
   "friend_connect_by_username": "ユーザー名でつながる",
   "friend_username_help": "同じホームサーバーの相手にはユーザー名を、別のサーバーの相手には friend@example.net のような完全なアドレスを入力してください。",

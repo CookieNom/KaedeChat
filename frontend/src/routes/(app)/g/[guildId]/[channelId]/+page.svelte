@@ -3617,7 +3617,7 @@
       if (selfModerationRetryTimer !== null) window.clearTimeout(selfModerationRetryTimer);
       selfModerationRetryTimer = null;
       setMessages([]);
-      setMembers([]);
+      // Members belong to the guild; channel changes reuse its existing subscription.
       resetUploads();
       resetForumUploads();
       activeDraftKey = targetAccount ? draftKey(targetAccount, targetChannel) : null;

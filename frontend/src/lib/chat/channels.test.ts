@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { entityKey } from './refs';
 import {
+  compareChannelActivity,
   channelOrderPermissionTargets,
   channelPositionRequest,
   firstNavigableChannel,
@@ -188,3 +189,15 @@ function flattenIds(groups: ReturnType<typeof groupChannels>): string[] {
       : group.channels.map((item) => item.id)
   );
 }
+
+it('orders channel activity precisely and leaves missing or invalid activity last', () => {
+  const values = [null, 'invalid', '9007199254740992', '9007199254740993'];
+  const candidates = values.map((last_message_id) => ({ last_message_id }));
+  expect([...candidates].sort(compareChannelActivity).map((item) => item.last_message_id)).toEqual([
+    '9007199254740993',
+    '9007199254740992',
+    null,
+    'invalid'
+  ]);
+  expect(compareChannelActivity(candidates[2], candidates[2])).toBe(0);
+});

@@ -48,6 +48,24 @@ describe('forwarding destinations', () => {
       })
     ).toBeNull();
   });
+  it('mixes DMs and channels by latest activity with exact snowflake precision', () => {
+    const source = channel({ last_message_id: '9007199254740992' });
+    const dm = channel({ id: '2', guild_id: null, type: 1, last_message_id: '9007199254740993' });
+    const remote = channel({
+      id: '2',
+      origin_domain: 'two.example',
+      last_message_id: '9007199254740994'
+    });
+    const empty = channel({ id: '3', name: 'aaa' });
+    const unavailable = channel({ id: '4', permissions: '0', last_message_id: '9007199254740995' });
+    expect(forwardingDestinations(source, [empty, source, dm, remote, dm, unavailable])).toEqual([
+      remote,
+      dm,
+      source,
+      empty
+    ]);
+  });
+
   it('keeps permitted DMs and channels across local and federated guilds', () => {
     const source = channel({});
     const remote = channel({
@@ -64,7 +82,7 @@ describe('forwarding destinations', () => {
       forwardingDestinations(source, [remote, dm, groupDm, voiceText, stageText]).map(
         (item) => item.id
       )
-    ).toEqual(['2', '3', '4', '5', '6']);
+    ).toEqual(['2', '5', '6', '3', '4']);
   });
 
   it('keeps mixed encrypted destinations and rejects non-sendable destinations', () => {

@@ -22,9 +22,27 @@ it('browses and searches channel and role options, preserving type restrictions 
       ],
       values: {},
       channels: [
-        { id: '1', origin_domain: 'chat.example', name: 'general', type: 0 },
-        { id: '2', origin_domain: 'chat.example', name: 'support', type: 0 },
-        { id: '3', origin_domain: 'chat.example', name: 'voice', type: 2 }
+        {
+          id: '1',
+          origin_domain: 'chat.example',
+          name: 'general',
+          type: 0,
+          last_message_id: '9007199254740992'
+        },
+        {
+          id: '2',
+          origin_domain: 'chat.example',
+          name: 'support',
+          type: 0,
+          last_message_id: '9007199254740993'
+        },
+        {
+          id: '3',
+          origin_domain: 'chat.example',
+          name: 'voice',
+          type: 2,
+          last_message_id: '9007199254740994'
+        }
       ] as Channel[],
       roles: [
         { id: '4', origin_domain: 'chat.example', name: 'Admin' },
@@ -40,8 +58,9 @@ it('browses and searches channel and role options, preserving type restrictions 
   channel.focus();
   flushSync();
   const labels = () =>
-    [...document.querySelectorAll('[role="option"]')].map((el) => el.textContent);
-  expect(labels()).toEqual(['#general', '#support']);
+    [...document.querySelectorAll('[role="option"]')].map((el) => el.textContent?.trim());
+  expect(labels()).toEqual(['#support', '#general']);
+  expect(document.querySelectorAll('[role="option"] .conversation-icon')).toHaveLength(2);
   channel.value = 'SUP';
   channel.dispatchEvent(new Event('input', { bubbles: true }));
   flushSync();
@@ -52,7 +71,7 @@ it('browses and searches channel and role options, preserving type restrictions 
   expect(channel.getAttribute('aria-expanded')).toBe('false');
   channel.click();
   flushSync();
-  expect(labels()).toEqual(['#general', '#support']);
+  expect(labels()).toEqual(['#support', '#general']);
   channel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   flushSync();
   expect(channel.getAttribute('aria-expanded')).toBe('false');

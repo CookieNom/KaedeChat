@@ -8,6 +8,7 @@ import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
+import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:mocktail/mocktail.dart';
@@ -20,6 +21,70 @@ import 'discord_settings_visual_test.dart'
 class _Recorder extends Mock implements RecordPlatform {}
 
 void main() {
+  testWidgets('destination artwork distinguishes guild channels and group DMs',
+      (tester) async {
+    final user = fixtureUser();
+    final guild = fixtureGuild(user);
+    final group = KaedeChannel(
+      ref: EntityRef.parse('500@chat.example'),
+      type: ChannelType.groupDm,
+      position: 0,
+      permissions: BigInt.zero,
+      conversationType: 'group',
+      recipients: [
+        user,
+        KaedeUser(
+          ref: EntityRef.parse('501@chat.example'),
+          username: 'friend',
+          handle: '@friend@chat.example',
+        ),
+      ],
+    );
+    await tester.pumpWidget(MaterialApp(
+      theme: kaedeTheme(),
+      home: Scaffold(
+        body: Row(children: [
+          ConversationAvatar(
+            channel: guild.channels
+                .firstWhere((item) => item.type == ChannelType.text),
+            guild: guild,
+          ),
+          ConversationAvatar(channel: group),
+        ]),
+      ),
+    ));
+    expect(find.byType(GuildIcon), findsOneWidget);
+    expect(find.byType(UserAvatar), findsNWidgets(2));
+    expect(find.byIcon(Icons.tag_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.group_rounded), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  test('forward destinations mix DMs and channels by latest message activity',
+      () {
+    KaedeChannel channel(String id, String? message, {bool dm = false}) =>
+        KaedeChannel(
+          ref: EntityRef.parse('$id@chat.example'),
+          type: dm ? ChannelType.dm : ChannelType.text,
+          guildRef: dm ? null : EntityRef.parse('10@chat.example'),
+          position: 0,
+          permissions: BigInt.from(Permission.sendMessages),
+          lastMessageRef:
+              message == null ? null : EntityRef.parse('$message@chat.example'),
+        );
+    final source = channel('1', '9007199254740992');
+    final dm = channel('2', '9007199254740993', dm: true);
+    final newest = channel('3', '9007199254740994');
+    final empty = channel('4', null);
+    expect(
+      forwardDestinationChannels(
+        MobileState(dms: [empty, source, dm, newest, dm]),
+        source,
+      ),
+      [newest, dm, source, empty],
+    );
+  });
+
   for (final width in [320.0, 600.0]) {
     testWidgets('composer overflow at width $width', (tester) async {
       tester.view.physicalSize = Size(width, 800);

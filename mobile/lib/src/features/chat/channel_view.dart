@@ -193,6 +193,12 @@ bool? _effectiveForwardNsfw(
   return parent == null ? null : channels[parent]?.nsfw;
 }
 
+int _compareChannelActivity(KaedeChannel left, KaedeChannel right) {
+  final leftActivity = BigInt.parse(left.lastMessageRef?.id.value ?? '0');
+  final rightActivity = BigInt.parse(right.lastMessageRef?.id.value ?? '0');
+  return rightActivity.compareTo(leftActivity);
+}
+
 List<KaedeChannel> forwardDestinationChannels(
   MobileState state,
   KaedeChannel source,
@@ -220,8 +226,8 @@ List<KaedeChannel> forwardDestinationChannels(
           channel.ref: channel,
   }.values.toList();
   unique.sort((left, right) {
-    if (left.ref == source.ref) return -1;
-    if (right.ref == source.ref) return 1;
+    final activityOrder = _compareChannelActivity(left, right);
+    if (activityOrder != 0) return activityOrder;
     return (left.name ?? '').toLowerCase().compareTo(
           (right.name ?? '').toLowerCase(),
         );
@@ -1016,7 +1022,12 @@ typedef _CommandAutocompleteRequest = ({
   Completer<List<MobileApplicationCommandChoice>> waiter,
 });
 typedef _CommandEntityChoice = ({String value, String label});
-typedef _CommandChannelChoice = ({String value, String label, int type});
+typedef _CommandChannelChoice = ({
+  String value,
+  String label,
+  int type,
+  Widget avatar
+});
 typedef _CommandAttachmentChoice = ({String key, String label});
 typedef _PreparedCommandFiles = ({
   CommandComposerValues values,
@@ -2053,22 +2064,33 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
             ))
         .toList()
       ..sort((left, right) => left.label.compareTo(right.label));
-    final channels = <EntityRef, KaedeChannel>{
+    final channelCandidates = <EntityRef, KaedeChannel>{
       if (state.activeGuild case final guild?)
         for (final item in guild.channels) item.ref: item,
       for (final item in state.threads)
         if (item.guildRef == channel.guildRef) item.ref: item,
       if (channel.guildRef == null) channel.ref: channel,
-    }
-        .values
+    }.values.toList()
+      ..sort((left, right) {
+        final activityOrder = _compareChannelActivity(left, right);
+        return activityOrder != 0
+            ? activityOrder
+            : (left.name ?? '').compareTo(right.name ?? '');
+      });
+    final channels = channelCandidates
         .map((item) => (
               value: item.ref.wire,
-              label: L10n.of(context)
-                  .ui_value0_ea2f080f((item.name ?? 'channel').toString()),
+              label: _forwardDestinationLabel(item),
               type: _channelTypeWireValue(item.type),
+              avatar: ConversationAvatar(
+                channel: item,
+                guild: state.guilds
+                    .where((guild) => guild.ref == item.guildRef)
+                    .firstOrNull,
+                size: 30,
+              ),
             ))
-        .toList()
-      ..sort((left, right) => left.label.compareTo(right.label));
+        .toList();
     final roles = (state.activeGuild?.roles ?? const <KaedeRole>[])
         .map((role) => (
               value: role.ref.wire,
@@ -4168,11 +4190,19 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
 
   Future<({List<KaedeChannel> destinations, String note})?>
       _forwardDestinationPicker(
-    KaedeChannel source,
     List<KaedeChannel> destinations,
   ) async {
     final selected = <EntityRef>{};
     final note = TextEditingController();
+    final guilds = ref.read(mobileControllerProvider).guilds;
+    String detail(KaedeChannel channel) => channel.guildRef == null
+        ? channel.recipients.map((user) => user.username).join(', ')
+        : guilds
+                .where((guild) => guild.ref == channel.guildRef)
+                .map((guild) => guild.name)
+                .firstOrNull ??
+            channel.guildRef!.domain.value;
+    var visible = destinations;
     try {
       return await showModalBottomSheet<
           ({List<KaedeChannel> destinations, String note})>(
@@ -4185,99 +4215,125 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
             constraints: BoxConstraints(
               maxHeight: min(MediaQuery.sizeOf(context).height * .8, 680),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListTile(
-                  title: Text(
-                    L10n.of(context).ui_forward_message_b328e70d,
-                    style: TextStyle(fontWeight: FontWeight.w800),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    title: Text(
+                      L10n.of(context).ui_forward_message_b328e70d,
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    subtitle: Text(
+                      L10n.of(context)
+                          .ui_choose_up_to_5_destinations_value0_5_the_snap_42f7b8f0(
+                              (selected.length).toString()),
+                    ),
                   ),
-                  subtitle: Text(
-                    L10n.of(context)
-                        .ui_choose_up_to_5_destinations_value0_5_the_snap_42f7b8f0(
-                            (selected.length).toString()),
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: TextField(
+                      decoration: InputDecoration(
+                        labelText: L10n.of(context).ui_search_c646a2c9,
+                        prefixIcon: const Icon(Icons.search),
+                      ),
+                      onChanged: (value) => setSheetState(() {
+                        final query = value.trim().toLowerCase();
+                        visible = destinations
+                            .where((channel) =>
+                                '${_forwardDestinationLabel(channel)} ${detail(channel)}'
+                                    .toLowerCase()
+                                    .contains(query))
+                            .toList();
+                      }),
+                    ),
                   ),
-                ),
-                Flexible(
-                  child: ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: destinations.length,
-                    itemBuilder: (context, index) {
-                      final destination = destinations[index];
-                      final checked = selected.contains(destination.ref);
-                      return CheckboxListTile(
-                        key: ValueKey(
-                            'forward-destination-${destination.ref.wire}'),
-                        value: checked,
-                        secondary: Icon(destination.isThread
-                            ? Icons.forum_outlined
-                            : destination.guildRef == null
-                                ? Icons.chat_bubble_outline_rounded
-                                : Icons.tag_rounded),
-                        title: Text(_forwardDestinationLabel(destination)),
-                        subtitle: destination.ref == source.ref
-                            ? Text(L10n.of(context)
-                                .ui_current_conversation_85ea25c5)
-                            : destination.isThread
-                                ? Text(L10n.of(context).ui_thread_ea904991)
-                                : null,
-                        onChanged: !checked && selected.length >= 5
-                            ? null
-                            : (value) => setSheetState(() {
-                                  if (value == true) {
-                                    selected.add(destination.ref);
-                                  } else {
-                                    selected.remove(destination.ref);
-                                  }
-                                }),
-                      );
-                    },
+                  if (visible.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                          L10n.of(context).ui_no_matching_channels_f908cc3b),
+                    ),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 240),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: visible.length,
+                      itemBuilder: (context, index) {
+                        final destination = visible[index];
+                        final checked = selected.contains(destination.ref);
+                        return CheckboxListTile(
+                          key: ValueKey(
+                              'forward-destination-${destination.ref.wire}'),
+                          value: checked,
+                          secondary: ConversationAvatar(
+                            channel: destination,
+                            guild: guilds
+                                .where((guild) =>
+                                    guild.ref == destination.guildRef)
+                                .firstOrNull,
+                          ),
+                          controlAffinity: ListTileControlAffinity.trailing,
+                          title: Text(_forwardDestinationLabel(destination)),
+                          subtitle: Text(detail(destination)),
+                          onChanged: !checked && selected.length >= 5
+                              ? null
+                              : (value) => setSheetState(() {
+                                    if (value == true) {
+                                      selected.add(destination.ref);
+                                    } else {
+                                      selected.remove(destination.ref);
+                                    }
+                                  }),
+                        );
+                      },
+                    ),
                   ),
-                ),
-                Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    16,
-                    8,
-                    16,
-                    12 + MediaQuery.viewInsetsOf(context).bottom,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      TextField(
-                        controller: note,
-                        maxLength: 3000,
-                        minLines: 1,
-                        maxLines: 3,
-                        decoration: InputDecoration(
-                          labelText:
-                              L10n.of(context).ui_add_a_note_optional_7cca8138,
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      16,
+                      8,
+                      16,
+                      12 + MediaQuery.viewInsetsOf(context).bottom,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextField(
+                          controller: note,
+                          maxLength: 3000,
+                          minLines: 1,
+                          maxLines: 3,
+                          decoration: InputDecoration(
+                            labelText: L10n.of(context)
+                                .ui_add_a_note_optional_7cca8138,
+                          ),
                         ),
-                      ),
-                      SizedBox(height: 8),
-                      ActionButton(
-                        onPressed: selected.isEmpty
-                            ? null
-                            : () => Navigator.pop(
-                                  context,
-                                  (
-                                    destinations: destinations
-                                        .where((item) =>
-                                            selected.contains(item.ref))
-                                        .toList(growable: false),
-                                    note: note.text,
+                        SizedBox(height: 8),
+                        ActionButton(
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () => Navigator.pop(
+                                    context,
+                                    (
+                                      destinations: destinations
+                                          .where((item) =>
+                                              selected.contains(item.ref))
+                                          .toList(growable: false),
+                                      note: note.text,
+                                    ),
                                   ),
-                                ),
-                        child: Text(selected.length > 1
-                            ? L10n.of(context).ui_send_value0_6ed7a9dd(
-                                (selected.length).toString())
-                            : L10n.of(context).ui_send_f28e14cf),
-                      ),
-                    ],
+                          child: Text(selected.length > 1
+                              ? L10n.of(context).ui_send_value0_6ed7a9dd(
+                                  (selected.length).toString())
+                              : L10n.of(context).ui_send_f28e14cf),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -4884,7 +4940,6 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
           break;
         case 'forward':
           final selection = await _forwardDestinationPicker(
-            channel,
             forwardDestinations,
           );
           if (selection == null || !mounted) break;
@@ -12294,6 +12349,9 @@ final class _ApplicationCommandSheetState
         error: error,
         emptyLabel: 'Select a channel',
         choices: choices,
+        avatars: {
+          for (final channel in widget.channels) channel.value: channel.avatar
+        },
       );
     }
     if (option.type == 'role') {
@@ -12445,6 +12503,7 @@ final class _ApplicationCommandSheetState
     required String? error,
     required String emptyLabel,
     required List<_CommandEntityChoice> choices,
+    Map<String, Widget> avatars = const {},
   }) {
     final selected = '${_values[path] ?? ''}';
     final valid =
@@ -12463,7 +12522,16 @@ final class _ApplicationCommandSheetState
         for (final choice in choices)
           DropdownMenuItem(
             value: choice.value,
-            child: Text(choice.label, overflow: TextOverflow.ellipsis),
+            child: Row(
+              children: [
+                if (avatars[choice.value] case final avatar?) ...[
+                  avatar,
+                  const SizedBox(width: 10),
+                ],
+                Expanded(
+                    child: Text(choice.label, overflow: TextOverflow.ellipsis)),
+              ],
+            ),
           ),
       ],
       onChanged: _submitting ? null : (value) => _setValue(path, value ?? ''),

@@ -12,6 +12,8 @@
     commandOptionAllowsChannelType,
     localizedCommandText
   } from '$lib/chat/application-commands';
+  import { dmTitle } from '$lib/chat/direct-messages';
+  import { compareChannelActivity } from '$lib/chat/channels';
   import { entityRef } from '$lib/chat/refs';
   import { fileUploadAccept, fileUploadMatches } from '$lib/chat/rich-content';
   import type { Channel, Role, UserSummary } from '$lib/chat/types';
@@ -212,9 +214,15 @@
         <GuildMemberPicker
           staticOptions={channels
             .filter((channel) => commandOptionAllowsChannelType(option, channel.type))
+            .sort(
+              (left, right) =>
+                compareChannelActivity(left, right) ||
+                (left.name ?? '').localeCompare(right.name ?? '')
+            )
             .map((channel) => ({
+              channel,
               value: entityRef(channel),
-              label: `#${channel.name ?? 'channel'}`
+              label: channel.guild_id === null ? dmTitle(channel) : `#${channel.name ?? 'channel'}`
             }))}
           value={String(values[field.path] ?? '') ? [String(values[field.path])] : []}
           optional={!option.required}
@@ -399,5 +407,22 @@
   button:hover {
     color: var(--text);
     background: var(--surface-hover);
+  }
+  @media (max-width: 600px) {
+    .command-fields {
+      flex-wrap: wrap;
+      overflow-x: visible;
+    }
+
+    label {
+      flex: 1 0 100%;
+      min-width: 0;
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    label > span {
+      white-space: normal;
+    }
   }
 </style>

@@ -1,16 +1,18 @@
 <script lang="ts">
+  import ConversationIcon from './ConversationIcon.svelte';
   import { t } from '$lib/ui/locale';
 
   import { api, userErrorMessage } from '$lib/api/client';
   import { guildMemberSearchPath, mergeGuildMemberPage } from '$lib/chat/members';
   import { entityRef } from '$lib/chat/refs';
-  import type { GuildMemberSummary, UserSummary } from '$lib/chat/types';
+  import type { Channel, GuildMemberSummary, UserSummary } from '$lib/chat/types';
   import { userDisplayName } from '$lib/chat/users';
 
   export interface StaticEntityOption {
     value: string;
     label: string;
     group?: string;
+    channel?: Channel;
   }
 
   let {
@@ -308,9 +310,13 @@
           role="option"
           aria-selected="false"
           class:highlighted={index === highlighted}
+          class:channel-option={Boolean(option.channel)}
           disabled={disabled || (multiple && value.length >= maxValues)}
           onmouseenter={() => (highlighted = index)}
-          onclick={() => choose(option)}>{option.label}</button
+          onclick={() => choose(option)}
+          >{#if option.channel}<ConversationIcon channel={option.channel} compact />{/if}<span
+            class="option-label">{option.label}</span
+          ></button
         >
       {:else}
         {#if !loading}<small
@@ -393,6 +399,16 @@
     border: 0;
     text-align: left;
     background: transparent;
+  }
+  .member-results button.channel-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 48px;
+  }
+  .option-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .member-results button:hover,
   .member-results button.highlighted {

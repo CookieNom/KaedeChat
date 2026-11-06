@@ -9,12 +9,28 @@ import { interactionResponses } from './interaction-responses.svelte';
 import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
 const network = vi.hoisted(() => ({
   api: vi.fn(),
+  setParams: (_params: { guildId: string; channelId: string }) => {},
   page: {
     params: { guildId: '1@chat.example', channelId: '2@chat.example' },
     url: new URL('https://chat.example/g/1/2')
   }
 }));
-vi.mock('$app/state', () => ({ page: network.page }));
+vi.mock('$app/state', async () => {
+  const { writable, fromStore } = await import('svelte/store');
+  const params = writable(network.page.params);
+  const reactiveParams = fromStore(params);
+  network.setParams = params.set;
+  return {
+    page: {
+      get params() {
+        return reactiveParams.current;
+      },
+      get url() {
+        return network.page.url;
+      }
+    }
+  };
+});
 vi.mock('$lib/api/client', async (original) => ({
   ...(await original<typeof import('$lib/api/client')>()),
   api: network.api
@@ -110,6 +126,8 @@ async function render() {
   await tick();
 }
 beforeEach(() => {
+  network.setParams({ guildId: '1@chat.example', channelId: '2@chat.example' });
+  vi.mocked(authenticatedGateway.client.subscribeMembers).mockClear();
   commands = [];
   occupants = {};
   const permissions = (
@@ -183,6 +201,45 @@ afterEach(async () => {
 });
 
 describe('live channel route permissions', () => {
+  it('keeps guild members visible when switching channels without resubscribing', async () => {
+    guild.channels!.push({ ...guild.channels![0], id: '3', name: 'other' });
+    const originalApi = network.api.getMockImplementation()!;
+    network.api.mockImplementation(async (path: string, ...args: unknown[]) => {
+      if (path === '/channels/3%40chat.example') return structuredClone(guild.channels![1]);
+      if (path === '/channels/3%40chat.example/messages') return [];
+      return originalApi(path, ...args);
+    });
+    await render();
+    dispatch('GUILD_MEMBER_LIST_UPDATE', {
+      guild_id: '1',
+      guild_domain: 'chat.example',
+      ops: [
+        {
+          op: 'SYNC',
+          range: [0, 99],
+          items: [
+            {
+              guild_id: '1',
+              guild_domain: 'chat.example',
+              user: actor,
+              role_ids: [],
+              presence: 'online'
+            }
+          ]
+        }
+      ]
+    });
+    await tick();
+    expect(document.querySelector('.member-roster')?.textContent).toContain('Actor');
+
+    network.setParams({ guildId: '1@chat.example', channelId: '3@chat.example' });
+    await vi.waitFor(() => expect(network.api).toHaveBeenCalledWith('/channels/3%40chat.example'));
+    await tick();
+    expect(document.querySelector('.member-roster')?.textContent).toContain('Actor');
+    expect(chatEntities.members.values).toHaveLength(1);
+    expect(authenticatedGateway.client.subscribeMembers).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves the draft without reloading when the same account profile refreshes', async () => {
     await render();
     const composer = document.querySelector('textarea')!;

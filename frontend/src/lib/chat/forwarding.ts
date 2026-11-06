@@ -1,3 +1,5 @@
+import { compareChannelActivity } from './channels';
+import { dmTitle } from './direct-messages';
 import { entityRef } from './refs';
 import type { Channel, Message } from './types';
 import { Permission } from '$lib/generated/permissions';
@@ -84,9 +86,13 @@ export function forwardingDestinations(source: Channel, channels: Iterable<Chann
       unique.set(entityRef(channel), channel);
     }
   }
-  return [...unique.values()].sort((left, right) => {
-    if (entityRef(left) === entityRef(source)) return -1;
-    if (entityRef(right) === entityRef(source)) return 1;
-    return (left.name ?? '').localeCompare(right.name ?? '');
-  });
+  return [...unique.values()].sort(
+    (left, right) =>
+      compareChannelActivity(left, right) ||
+      forwardingDestinationTitle(left).localeCompare(forwardingDestinationTitle(right))
+  );
+}
+
+export function forwardingDestinationTitle(channel: Channel): string {
+  return channel.guild_id === null ? dmTitle(channel) : `#${channel.name ?? 'Channel'}`;
 }

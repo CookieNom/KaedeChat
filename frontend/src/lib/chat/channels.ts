@@ -245,3 +245,17 @@ export function moveChannel(
   next.splice(insertAt, 0, moved, ...moving.slice(1));
   return normalized(next);
 }
+
+/** Newest message first; preserve exact snowflake precision across instances. */
+export function compareChannelActivity(
+  left: Pick<Channel, 'last_message_id'>,
+  right: Pick<Channel, 'last_message_id'>
+): number {
+  const leftActivity = /^\d+$/.test(left.last_message_id ?? '')
+    ? BigInt(left.last_message_id!)
+    : 0n;
+  const rightActivity = /^\d+$/.test(right.last_message_id ?? '')
+    ? BigInt(right.last_message_id!)
+    : 0n;
+  return leftActivity === rightActivity ? 0 : leftActivity > rightActivity ? -1 : 1;
+}
