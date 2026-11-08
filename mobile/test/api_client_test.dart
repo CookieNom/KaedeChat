@@ -14,6 +14,40 @@ import 'package:kaede_mobile/src/domain/models.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('friend requests qualify local usernames using the signed-in instance',
+      () async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final adapter = _JsonAdapter('{}');
+    final api = KaedeApiClient(
+      vault: const SessionVault(),
+      httpClient: Dio()..httpClientAdapter = adapter,
+    );
+    await api.useTokens(SessionTokens(
+      instance: Domain('chat.example'),
+      userRef: EntityRef.parse('1@chat.example'),
+      accessToken: 'access',
+      refreshToken: 'refresh',
+    ));
+    final repository = KaedeRepository(api);
+
+    for (final entry in {
+      'cookie': 'cookie@chat.example',
+      ' @Cookie ': 'Cookie@chat.example',
+      'cookie.name': 'cookie.name@chat.example',
+      'ab': 'ab@chat.example',
+      ' cookie@remote.example ': 'cookie@remote.example',
+      '@cookie@remote.example': '@cookie@remote.example',
+      'cookie@': 'cookie@',
+      'cookie name': 'cookie name',
+    }.entries) {
+      await repository.requestFriend(entry.key);
+      expect(adapter.request?.method, 'POST');
+      expect(adapter.request?.path, '/api/v1/users/@me/relationships');
+      expect(adapter.request?.data, {'handle': entry.value});
+      expect(adapter.request?.baseUrl, 'https://chat.example');
+    }
+  });
+
   group('session refresh', () {
     const vault = SessionVault();
     final original = SessionTokens(

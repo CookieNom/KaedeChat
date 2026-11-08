@@ -1529,9 +1529,18 @@ final class KaedeRepository {
       );
   Future<List<Map<String, Object?>>> relationships() =>
       api.getList('/api/v1/users/@me/relationships');
-  Future<Map<String, Object?>> requestFriend(String handle) =>
-      api.sendJson('POST', '/api/v1/users/@me/relationships',
-          data: <String, Object?>{'handle': handle});
+  Future<Map<String, Object?>> requestFriend(String handle) {
+    var address = handle.trim();
+    final instance = api.tokens?.instance;
+    // Qualify local usernames for servers that still require a full handle.
+    if (instance != null &&
+        RegExp(r'^@?[a-zA-Z0-9_.]{2,32}$').hasMatch(address)) {
+      address = '${address.replaceFirst(RegExp(r'^@'), '')}@${instance.value}';
+    }
+    return api.sendJson('POST', '/api/v1/users/@me/relationships',
+        data: <String, Object?>{'handle': address});
+  }
+
   Future<Map<String, Object?>> acceptFriend(EntityRef user) =>
       api.sendJson('PUT', '/api/v1/users/@me/relationships/${user.wire}');
   Future<void> removeRelationship(EntityRef user) =>
