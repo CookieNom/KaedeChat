@@ -423,7 +423,7 @@ mod tests {
         digest.update(&key);
         let expected = json!({"account": "bot:20@apps.example:worker:40", "application_ref": "20@apps.example", "credential_type": "kaede-bot-device-v2", "device_id": format!("kbe_{}", encode(&digest.finalize())), "worker_id": "40"});
         assert_eq!(
-            decode(&inspected, "credential", 16_384)?,
+            decode(&inspected, "credential", 16_384)?.as_slice(),
             expected.to_string().as_bytes()
         );
         kaede_e2ee_close(handle);
