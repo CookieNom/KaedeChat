@@ -1748,6 +1748,29 @@ class NativeOpenMLSProvider:
         return cls(library, cls._handle_value(result))
 
     @classmethod
+    def generate_bot(
+        cls,
+        application_ref: EntityRef,
+        worker_id: int,
+        *,
+        library_path: str | os.PathLike[str] | None = None,
+    ) -> Self:
+        """Generate a bot identity and bind its credential to the new public key."""
+        if isinstance(worker_id, bool) or not 1 <= worker_id <= 2**63 - 1:
+            raise ValueError("worker_id must be a positive signed 64-bit integer")
+        library = _load_library(library_path)
+        result = cls._invoke_raw(
+            library,
+            0,
+            "generate_bot",
+            {
+                "application_ref": str(application_ref),
+                "worker_id": str(worker_id),
+            },
+        )
+        return cls(library, cls._handle_value(result))
+
+    @classmethod
     def restore(
         cls,
         state: bytes,
@@ -5005,7 +5028,8 @@ def _validate_message_sender_credential(
             webhook_ref is None
             or application_ref is not None
             or not isinstance(parsed, dict)
-            or parsed != {
+            or parsed
+            != {
                 "account": f"webhook:{webhook_ref}",
                 "credential_type": "kaede-webhook-device-v1",
                 "device_id": sender_device_id,

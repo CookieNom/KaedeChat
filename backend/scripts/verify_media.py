@@ -102,6 +102,7 @@ def register(client: TestClient, emails: list[str], deliver_mail: Callable[[], N
             "X-Kaede-Proxy-Secret": proxy_secret.get_secret_value(),
         },
         json={
+            "accepted_terms": True,
             "username": "mediaowner",
             "email": "mediaowner@example.com",
             "password": authentication_secret(PASSWORD, settings.domain, AUTH_SALT),

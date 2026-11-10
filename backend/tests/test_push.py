@@ -609,3 +609,50 @@ async def test_apns_http2_client_can_start_without_network() -> None:
     # dependency fails here rather than dropping every background iOS call.
     async with httpx.AsyncClient(http2=True) as client:
         assert not client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_redeem_suppresses_message_blocked_after_enqueue(monkeypatch) -> None:
+    from app.db.models import Channel, Message, ReadState, UserSettings
+
+    redis = MemoryRedis()
+    device_id = uuid4()
+    recipient = SimpleNamespace(id=123, origin_domain="home.example")
+    author = SimpleNamespace(id=456, origin_domain="remote.example")
+    message = SimpleNamespace(
+        id=789,
+        origin_domain="remote.example",
+        author_id=456,
+        author_domain="remote.example",
+        channel_id=10,
+        channel_domain="home.example",
+        deleted_at=None,
+    )
+    channel = SimpleNamespace(id=10, origin_domain="home.example", type=1)
+    rows = {Message: message, Channel: channel, User: author, UserSettings: None, ReadState: None}
+    session = SimpleNamespace(
+        scalar=AsyncMock(side_effect=[SimpleNamespace(enabled=True), recipient.id]),
+        get=AsyncMock(side_effect=lambda model, _key: rows[model]),
+    )
+    blocked = AsyncMock(return_value=True)
+    monkeypatch.setattr(push_api, "blocked_between", blocked)
+    token = await issue_push_sync(
+        redis,
+        PushSyncEvent(
+            device_id=str(device_id),
+            user_id=recipient.id,
+            user_domain=recipient.origin_domain,
+            message_id=message.id,
+            message_domain=message.origin_domain,
+            kind="direct_message",
+        ),
+    )
+    response = await push_api.redeem_push_notification(
+        PushNotificationRedeem(installation_id=device_id, event_token=token),
+        SimpleNamespace(user=recipient),
+        session,
+        redis,
+    )
+    assert response.status_code == 204
+    blocked.assert_awaited_once_with(session, recipient, author)
+    assert await load_push_sync(redis, token) is None

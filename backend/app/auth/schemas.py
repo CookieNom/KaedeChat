@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     EmailStr,
     Field,
+    StrictBool,
     field_validator,
     model_validator,
 )
@@ -40,6 +41,8 @@ class PasswordKdfLookupRequest(UnambiguousInputModel):
 
 
 class RegisterRequest(UnambiguousInputModel):
+    # Required by the register handler only when the instance publishes policies.
+    accepted_terms: StrictBool = False
     username: str
     email: EmailStr | None = None
     password: str = Field(min_length=10, max_length=256)

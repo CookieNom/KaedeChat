@@ -11,6 +11,7 @@ import 'package:kaede_mobile/src/features/auth/turnstile_challenge.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 final class AuthScreen extends ConsumerStatefulWidget {
   const AuthScreen({super.key, this.initialInstance, this.notice});
@@ -33,9 +34,18 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
   final email = TextEditingController();
   final confirmation = TextEditingController();
   var register = false;
+  var acceptedTerms = false;
   var obscure = true;
   final Map<Domain, Map<String, Object?>> _configs = {};
   var _submitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    instance.addListener(() {
+      if (acceptedTerms) setState(() => acceptedTerms = false);
+    });
+  }
 
   @override
   void dispose() {
@@ -48,11 +58,29 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     super.dispose();
   }
 
+  /// Unknown servers fail closed until their auth configuration is loaded.
+  bool get _legalAgreementRequired {
+    final Domain domain;
+    try {
+      domain = Domain(instance.text);
+    } on FormatException {
+      return true;
+    }
+    return _configs[domain]?['legal_agreement_required'] != false;
+  }
+
+  Future<void> _prefetchConfig() async {
+    try {
+      await _config(_domain());
+    } on Object {/* Submit retries and reports configuration errors. */}
+  }
+
   bool get _canSubmit =>
       instance.text.trim().isNotEmpty &&
       password.text.isNotEmpty &&
       (register
-          ? username.text.trim().isNotEmpty &&
+          ? (!_legalAgreementRequired || acceptedTerms) &&
+              username.text.trim().isNotEmpty &&
               password.text == confirmation.text
           : identifier.text.trim().isNotEmpty);
 
@@ -97,7 +125,13 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
           );
           if (challenge == null) return;
         }
+        final legalRequired = serverConfig['legal_agreement_required'] != false;
+        if (legalRequired && !acceptedTerms) {
+          throw UserInputException(L10n.current
+              .ui_agree_to_the_terms_of_service_and_privacy_pol_b2e2a2e4);
+        }
         final created = await ref.read(repositoryProvider).register(
+              acceptedTerms: legalRequired && acceptedTerms,
               instance: domain,
               username: username.text.trim(),
               email: email.text.trim(),
@@ -186,6 +220,21 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
     final loaded = await ref.read(repositoryProvider).authConfig(domain);
     if (mounted) setState(() => _configs[domain] = loaded);
     return loaded;
+  }
+
+  Future<void> _openLegal(String page) async {
+    try {
+      final url = Uri.https(_domain().value, '/$page');
+      if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
+        throw UserInputException(
+            L10n.current.ui_could_not_open_this_server_s_policy_1ed3947d);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+    }
   }
 
   Domain _domain() {
@@ -398,8 +447,10 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                     showSelectedIcon: false,
                     onSelectionChanged: _submitting
                         ? null
-                        : (selection) =>
-                            setState(() => register = selection.first),
+                        : (selection) {
+                            setState(() => register = selection.first);
+                            if (register) _prefetchConfig();
+                          },
                   ),
                   SizedBox(height: 26),
                   Text(
@@ -423,15 +474,20 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                   ),
                   SizedBox(height: 28),
                   const _Label('Home server'),
-                  TextField(
-                    controller: instance,
-                    keyboardType: TextInputType.url,
-                    textInputAction: TextInputAction.next,
-                    decoration: InputDecoration(
-                      hintText: 'kaede.chat',
-                      helperText: L10n.of(context)
-                          .ui_not_sure_kaede_chat_is_the_recommended_public_347c0eb6,
-                      prefixIcon: Icon(Icons.language_rounded),
+                  Focus(
+                    onFocusChange: (focused) {
+                      if (!focused && register) _prefetchConfig();
+                    },
+                    child: TextField(
+                      controller: instance,
+                      keyboardType: TextInputType.url,
+                      textInputAction: TextInputAction.next,
+                      decoration: InputDecoration(
+                        hintText: 'kaede.chat',
+                        helperText: L10n.of(context)
+                            .ui_not_sure_kaede_chat_is_the_recommended_public_347c0eb6,
+                        prefixIcon: Icon(Icons.language_rounded),
+                      ),
                     ),
                   ),
                   SizedBox(height: 18),
@@ -478,6 +534,31 @@ final class _AuthScreenState extends ConsumerState<AuthScreen> {
                         obscureText: obscure,
                         textInputAction: TextInputAction.done,
                         onSubmitted: (_) => submit()),
+                  ],
+                  if (register && _legalAgreementRequired) ...[
+                    Wrap(spacing: 8, children: [
+                      TextButton(
+                          onPressed:
+                              _submitting ? null : () => _openLegal('terms'),
+                          child: Text(
+                              L10n.of(context).ui_terms_of_service_4afa55bf)),
+                      TextButton(
+                          onPressed:
+                              _submitting ? null : () => _openLegal('privacy'),
+                          child: Text(
+                              L10n.of(context).ui_privacy_policy_506ff394)),
+                    ]),
+                    CheckboxListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: acceptedTerms,
+                      onChanged: _submitting
+                          ? null
+                          : (value) =>
+                              setState(() => acceptedTerms = value ?? false),
+                      title: Text(L10n.of(context)
+                          .ui_i_agree_to_this_server_s_terms_of_service_and_0b72cb35),
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
                   ],
                   if (state.error case final error?) ...[
                     SizedBox(height: 18),

@@ -140,3 +140,19 @@ def test_loader_rejects_world_writable_library(tmp_path: Path) -> None:
 
     with pytest.raises(E2EEUnavailableError, match="world-writable"):
         e2ee._load_library(library)
+
+
+def test_bot_provider_generates_key_bound_credential(monkeypatch) -> None:
+    invoke = []
+
+    def create(library, handle, method, payload):
+        invoke.append((handle, method, payload))
+        return {"handle": "7"}
+
+    monkeypatch.setattr(e2ee, "_load_library", lambda _path: FakeNativeLibrary())
+    monkeypatch.setattr(NativeOpenMLSProvider, "_invoke_raw", staticmethod(create))
+    provider = NativeOpenMLSProvider.generate_bot(EntityRef(20, "apps.example"), 40)
+    assert invoke == [
+        (0, "generate_bot", {"application_ref": "20@apps.example", "worker_id": "40"})
+    ]
+    provider.close()

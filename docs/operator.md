@@ -44,18 +44,21 @@ make setup
 The wizard generates compatible keys securely and preserves existing durable
 secrets. It configures Garage or an external S3 provider, the email mode, and
 the optional services, and it can render a configuration for host-level
-nginx. It never starts the topology or reloads host nginx. If you select
-automatic updates, it installs or removes only the current user's systemd
-timer. See [the deployment-wizard guide](deployment-wizard.md) for every
+nginx. It never starts the topology or reloads host nginx. It installs only the
+current user's systemd update timer, which stays notification-only unless you
+select automatic updates. See [the deployment-wizard guide](deployment-wizard.md) for every
 option and generated file. If you used the wizard, follow the commands in `deploy/generated/README.txt`.
 
 Rerunning the wizard preserves existing quota tuning. As a one-time upgrade,
 it recognizes the exact defaults written by older Kaede setup versions and
 raises `KAEDE_FEDERATION_HISTORY_MAX_MESSAGES` from 250,000 to 2,000,000 and
 `KAEDE_MEDIA_REMOTE_CACHE_BYTES` from 20 GiB to 100 GiB. It leaves other
-values alone. If you maintain `.env` by hand, remove those two old
+quota values alone. If you maintain `.env` by hand, remove those two old
 assignments to inherit the current defaults, or set them yourself after
 checking available PostgreSQL and object-storage capacity.
+
+Setup preserves settings it does not manage, including homepage and legal
+settings, and defaults to the existing push delivery choice.
 
 The quota menu is optional. Keep the current or recommended limits and it
 asks no sizing questions at all. Common mode covers the rolling DM cache,
@@ -75,6 +78,8 @@ are disabled too. Document an operator-assisted recovery policy before
 choosing it.
 
 For a manual setup instead, copy the template and replace every placeholder.
+Manual deployments also need `.kaede-kubernetes.json` with `kubeconfig`, `context`,
+`namespace`, `cluster_uid` (the kube-system namespace UID), and `image_repository`.
 
 Copy `.env.example` to `.env`, restrict it to the service operator, and never
 commit it:
@@ -85,6 +90,17 @@ chmod 600 .env
 ```
 
 ## Public landing and operator policies
+
+Once the operator legal fields below are configured, registration requires
+explicit agreement to the instance’s terms and an acknowledgment of its privacy
+policy. Without them, signup shows no agreement step, because there's no policy
+to agree to. Deploy updated clients with the backend: on an instance with
+published policies, older clients can't register without the new agreement
+field and should use the updated web signup page.
+
+When you change the policy text, or deploy a Kaede release that changes it,
+update `KAEDE_LEGAL_EFFECTIVE_DATE` and run `make deploy` so the pages show the
+new date.
 
 `KAEDE_LANDING_PAGE=default` keeps the project homepage. With no operator legal
 configuration, direct visits to `/terms` and `/privacy` show an explicit
@@ -106,13 +122,17 @@ copy for its jurisdiction and supplied all six public build-time fields:
 These values are embedded into the public static frontend and are not secrets.
 A custom build fails if any field is absent or malformed; a partially filled
 policy also fails under the default landing. Changing the landing variant or
-any legal field requires rebuilding `frontend-build`. Kaede currently has no
-full account export, account migration, or self-service account-deletion
-control. The supplied policy says so and directs privacy and account-disabling
-requests to `KAEDE_LEGAL_CONTACT_EMAIL`; it does not promise that contacting the
-operator automatically deletes stored or federated data. Do not claim a
-settings workflow or deletion outcome unless the deployment actually adds and
-verifies one.
+any legal field requires `make deploy` to rebuild the frontend image. Kaede has no
+full account export or account migration.
+
+Users can delete their content or their whole account in Settings after
+re-entering their password and any MFA code. Guild and developer-team owners must
+transfer or delete those first. Deletion isn't total: the account's identity row
+keeps its email and username reserved, retained child-safety records stay until
+their retention ends, and removal on other instances is best effort. Review the
+supplied policy against this behavior before you publish it. It sends privacy and
+account-disabling requests to `KAEDE_LEGAL_CONTACT_EMAIL` and doesn't promise that
+contacting the operator deletes stored or federated data.
 
 The custom homepage links to `/support`, a public form with a support-reason
 selector. Requests go to `KAEDE_LEGAL_CONTACT_EMAIL`, which must also be set
@@ -131,8 +151,7 @@ and are not verified.
 
 ## Manual environment configuration
 
-Before starting any service, validate both the file itself and the effective
-application environment:
+Before starting any service, validate the file:
 
 ```sh
 make env-check
@@ -140,7 +159,8 @@ make env-check
 
 The target rejects duplicate assignments, group/world-readable production
 files, documented placeholder credentials, disabled production malware
-scanning, and invalid settings. Application preflight also rejects unknown
+scanning, and invalid settings. It reads only the file. The application preflight
+during `make deploy` checks the effective environment and also rejects unknown
 `KAEDE_` settings. For another file, pass `ENV_FILE=/absolute/path/to/kaede.env`
 to both validation and deployment targets.
 
@@ -162,6 +182,7 @@ openssl rand -hex 32                          # KAEDE_MEDIA_S3_SECRET_KEY (Garag
 openssl rand -base64 32 | tr '+/' '-_' | tr -d '=' # GRAFANA_ADMIN_PASSWORD
 printf 'LK%s\n' "$(openssl rand -hex 8)"      # LIVEKIT_API_KEY
 openssl rand -hex 32                          # LIVEKIT_API_SECRET
+openssl rand -hex 32                          # KAEDE_SEARCH_MASTER_KEY (when search is enabled)
 ```
 
 Use a different value for every line. The PostgreSQL password goes into both
@@ -195,15 +216,15 @@ Guild stickers use the ordinary scanned media pipeline. Configure the per-guild
 and per-file bounds with `KAEDE_MEDIA_STICKER_LIMIT` and
 `KAEDE_MEDIA_MAX_STICKER_BYTES`. Cropping is always available and preserves GIF
 animation. Background removal is opt-in because rembg loads an
-ONNX model and materially increases worker memory: set `REMBG_HOME`, preseed that model cache
-for every media worker, size worker memory for the selected model, then set
+ONNX model and materially increases worker memory: preseed the model into the worker's
+`rembg-models` volume (mounted at `/models/rembg`), size worker memory for the selected model, then set
 `KAEDE_MEDIA_STICKER_BACKGROUND_REMOVAL_ENABLED=true`. Keep it disabled when the
 model is not locally available; production workers must not depend on a runtime
 model download.
 
-Closed-app notifications normally use the public Kaede relay. Set
-`KAEDE_PUSH_RELAY_ENABLED=true`; an ordinary home needs no Firebase
-credential. The relay URL and logical origin are pinned separately because
+Closed-app notifications normally use the public Kaede relay. It's on by default
+(`KAEDE_PUSH_RELAY_ENABLED=true`), and an ordinary home needs no Firebase
+credential. Set it to `false` to stop sending wakes to the relay. The relay URL and logical origin are pinned separately because
 `push.kaede.chat` serves transport for the `kaede.chat` signing authority.
 Provider tokens go from the official app straight to the relay. Your home
 keeps only opaque subscriptions and wake secrets.
@@ -243,15 +264,16 @@ selective-disclosure reports, and active encrypted rooms keep working.
 Set the same `KAEDE_EDGE_SECRET` in `.env` and in the nginx
 `X-Kaede-Edge-Secret` header. It must differ from `KAEDE_PROXY_SECRET`. The
 internal edge receives only the domain and these two edge credentials.
-Application processes don't receive Garage administration, LiveKit, or
-host-edge secrets.
+API and worker processes receive LiveKit credentials to mint tokens, but not
+Garage administration or host-edge secrets. The short-lived preflight and
+`storage-init` Jobs receive the complete `.env`.
 
 ## Object storage
 
 Kaede requires an S3-compatible object store; Garage is only the default.
 Pick exactly one deployment mode.
 
-For self-hosted Garage, keep `KAEDE_MEDIA_STORAGE_BACKEND=garage`. The provider-neutral `storage-init` service
+For self-hosted Garage, keep `KAEDE_MEDIA_STORAGE_BACKEND=garage`. The provider-neutral `storage-init` Job
 creates all three private buckets idempotently. Single-node Garage has no
 replica redundancy, so back up both its metadata and data volumes
 independently.
@@ -317,7 +339,8 @@ bytes and the cleanup sweep deletes it. Third-party upload clients must enforce
 the same 15-minute request bound, or the object store must enforce equivalent
 staging-prefix lifecycle cleanup.
 
-The nginx example gives only the media virtual host a 101 MiB body allowance,
+The nginx example gives only the media virtual host a body allowance of the maximum
+attachment size plus 1 MiB (16 MiB by default),
 bounded concurrent connections, request rate, and five-minute proxy timeouts.
 The main API/federation host stays limited to 2 MiB. The media path streams
 request bodies instead of buffering them on host disk. If you raise
@@ -582,7 +605,7 @@ without allowing a duplicate federation authority to contact public peers.
 The one-time cutover needs downtime. Keep the old checkout, containers, and
 volumes until the new instance is verified. Do not run old and new writers
 against the same identity or object store simultaneously. First prepare K3s,
-disable the old update timer, run setup (retaining secrets and domain),
+turn off automatic installs, run setup (retaining secrets and domain),
 install the image helper, and build
 images before the outage:
 
@@ -596,10 +619,10 @@ docker compose ls
 python3 deploy/kubernetes/legacy.py inspect --project kaede-chat
 ```
 
-Disable the old update timer. Put nginx in maintenance mode, then export:
+Stop the update timer. Put nginx in maintenance mode, then export:
 
 ```sh
-make auto-update-disable
+deploy/install-auto-update.sh stop
 python3 deploy/kubernetes/legacy.py export --project kaede-chat --backup /path/to/new-backup
 ```
 
@@ -638,8 +661,9 @@ old project first so its HTTP and LiveKit ports can be reused.
 tracked checkout on the configured branch and accepts only fast-forward Git
 updates. It builds/imports images, runs preflight and the executable
 `AUTO_UPDATE_BACKUP_HOOK` if configured, then rolls compatible applications.
-The hook receives `KAEDE_UPDATE_FROM`, `KAEDE_UPDATE_TO`, and `KAEDE_ROOT` during
-an auto-update. Nonzero exit stops deployment. Image builds/imports happen before
+The hook runs on every deployment after preflight, while writers are still running.
+It receives `KAEDE_UPDATE_FROM`, `KAEDE_UPDATE_TO`, and `KAEDE_ROOT` only during an
+auto-update. Nonzero exit stops deployment. Image builds/imports happen before
 any workload replacement; Docker build failure leaves the running application alone.
 
 New API/gateway pods must pass readiness before old pods terminate. Old gateway
@@ -694,7 +718,8 @@ For an existing installation, run `make auto-update-disable` to install the
 notification-only timer, or keep an already enabled auto-update timer. Run
 `make update-notices` to check immediately without installing anything.
 
-Current local instance owners receive one DM per available upstream commit from
+Current local instance owners receive one DM per detected upstream revision (the
+branch head at check time) from
 **Kaede System**, marked **SYSTEM**. This local-only account cannot log in,
 receive replies, or participate in federation. Its dedicated notification DM is
 plaintext; ordinary encrypted conversations are unaffected. Delivery receipts
@@ -719,8 +744,9 @@ The same updater locks prevent overlapping timer/cron runs. Intervals are
 
 ### Manual upgrade and rollback
 
-For a reviewed schema/infrastructure change, back up and put nginx in
-maintenance mode, then run:
+For a reviewed schema/infrastructure change, update the checkout to that revision
+unless the updater already fast-forwarded it. Back up and put nginx in maintenance
+mode, then run:
 
 ```sh
 make env-check
@@ -797,13 +823,12 @@ make exec SERVICE=api COMMAND='kaede rotate-key'
 
 The command takes a database-wide identity lock, verifies the stored keypair
 with the current `KAEDE_SECRET_KEY`, and atomically installs a uniquely named
-Ed25519 key. The former key stays in `old_verify_keys`. Keep it for at least
-the configured federation event-retention window before a future reviewed
-retirement workflow.
+Ed25519 key. The former key stays in `old_verify_keys`. Keep it for the overlap
+window, which is the longer of the federation event-retention window and 8 days.
 
-After the command's reported overlap deadline, retire that exact historical
-key with `kaede retire-key <key-id>`. The command refuses the current key and
-refuses early retirement. `--force-compromised` bypasses the overlap only for
+After that, retire the exact historical key with `kaede retire-key <key-id>`. The
+command refuses the current key, refuses early retirement and reports the earliest
+allowed time, and refuses keys still authenticating pending deletion proofs. `--force-compromised` bypasses the overlap only for
 an active key compromise and can make queued historical envelopes
 unverifiable. Record the incident and notify federation peers before using
 it.
@@ -1034,8 +1059,8 @@ Meilisearch service. It binds only to the instance namespace, behind a private S
 its master key is generated into the mode-0600 operator `.env`. The key is
 never sent to browsers, mobile clients, desktop clients, or federation peers.
 Disable search with `KAEDE_SEARCH_ENABLED=false`. On an existing deployment,
-rerun `make setup`, choose search, then apply the generated configuration and
-migrations normally. `KAEDE_SEARCH_ENABLED=true` activates the
+rerun `make setup`, choose search, back up, and run `make deploy MAINTENANCE=1`,
+because adding a bundled service is an infrastructure change. `KAEDE_SEARCH_ENABLED=true` activates the
 bundled service only when search is enabled, so opting out doesn't leave an
 idle search container running.
 
@@ -1072,9 +1097,8 @@ This does not import missing messages or make evicted history locally readable.
 Only plaintext channels are indexed. Setting a channel encryption policy to
 `e2ee` queues removal of all of its indexed documents, and API/SQL/federation
 authorization independently prevents stale candidates from being returned
-while that removal drains. Future encrypted-room support must not reuse this
-plaintext index or upload search tokens/terms without a separate reviewed
-protocol.
+while that removal drains. End-to-end encrypted rooms never use this plaintext
+index. Encrypted search would need a separate reviewed protocol.
 
 ## Federated retained history
 
@@ -1094,7 +1118,7 @@ imports on this instance. You can also bound grants and resource use with:
 - `KAEDE_FEDERATION_HISTORY_MERGE_CHUNK_SIZE`
 - `KAEDE_FEDERATION_HISTORY_MAX_MESSAGES`
 
-Current peers advertise `guild-history-sync/2-recent-first`; version 1
+Current peers advertise `guild-history-sync/2`, which sends recent messages first; version 1
 remains available for rolling upgrades. Defaults cap one import at two
 million messages, ten million reactions, 250,000 pages, 32 GiB of validated
 payloads, and two hours. A larger replica ceiling doesn't make an individual
@@ -1183,6 +1207,6 @@ not publish application ports or validate an existing production deployment.
 | `make release-check` | Readiness warmup, rate limits, shared-stream fanout, and federation storage amplification |
 | `make migration-check` | Migration up/down/up, guarded downgrades, database invariants, and schema drift |
 
-`make check` covers backend and frontend lint, types, unit tests, and the web
-build. `make audit` checks locked dependencies. Live-device media quality and
+`make check` covers backend and frontend lint, types, and the web build. `make
+test` runs backend and frontend tests. `make audit` checks locked dependencies. Live-device media quality and
 platform signing still need the checks in the client release guides.

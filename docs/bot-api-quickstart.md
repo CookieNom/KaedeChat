@@ -47,10 +47,15 @@ python -m pip install -e ./sdk/python
 2. Request the scopes `applications.commands` and `interactions.respond`,
    and the Gateway intent `interactions`. This first bot only responds to
    commands, so it does not need message-content access.
-3. Create a guild-install invite template with those grants. Select E2EE
-   `disabled` for this plaintext example. Open the invite link, select your
-   test guild, and approve the installation. A remote guild uses the same flow.
-4. Create a control credential on the application page. Copy it when shown;
+3. In **Permissions & installs**, select those scopes and the `interactions`
+   intent, then **Save changes**. Under **Invite links & servers → Bot invite
+   links**, enter a slug and name, then **Create invite link**. The link copies
+   the saved grants. Encrypted participation stays off unless the application
+   has the `participant` mode, which you can only turn on from the mobile portal
+   or the API. Open the invite link, select your test guild, and approve
+   the installation. A remote guild uses the same flow.
+4. Create a control credential on the application page. The application must
+   have an invite link first, because drafts reject control tokens. Copy it when shown;
    you will enter it at a hidden prompt in the next steps.
 
 Use a normal text channel for the first test. The guild's command permissions
@@ -93,6 +98,16 @@ Enrollment sends the public key to Kaede and saves the private worker state
 locally with owner-only permissions. Keep `.kaede-worker/` out of Git and back
 it up securely. The directory must stay writable because the SDK saves event
 replay cursors there. Reuse it on restart; do not enroll a new worker each time.
+
+Each worker can hold a limited number of Gateway connections per target. If
+you don't pass `session_limit`, enrollment uses the server's default, which is
+16 on current servers. To set your own limit, pass `session_limit` to
+`WorkerState.enroll()` with a value from 1 to 16. Guild and DM Gateways at the same target share this
+budget. A worker enrolled earlier with a limit of 1 can't run both at once, so
+enroll a replacement, switch the deployment to it, and then revoke the old
+worker. The SDK follows the limit the target reports and refuses extra
+connections locally.
+
 An empty `target_domains` adds no worker-specific domain restriction; the
 application and installation policies still apply.
 
@@ -223,11 +238,15 @@ Run examples independently; some delete resources created earlier in the block.
 ## Choose access for the feature
 
 Add scopes to the application, installation approval, and worker enrollment.
-Add event intents to those grants and to `kaede.Intents`. For a worker with
-too few scopes, enroll a replacement into a new state directory with the
-required scopes/intents, switch the bot to it, and revoke the old worker.
-Updating only Python code cannot expand a grant. Channel visibility, role permissions,
-installation channel restrictions, and instance policy still apply.
+Add event intents to those grants and to `kaede.Intents`. Updating only Python
+code can't expand a grant.
+
+Neither grant can be widened in place. To expand an existing installation, a
+guild manager uninstalls the bot and approves an invite link that requests the
+new access. For a worker with too few scopes, enroll a replacement into a new
+state directory with the required scopes and intents, switch the bot to it,
+and revoke the old worker. Channel visibility, role permissions, installation
+channel restrictions, and instance policy still apply.
 
 | Feature | Additional scopes | Event intents when needed |
 | --- | --- | --- |
@@ -238,11 +257,11 @@ installation channel restrictions, and instance policy still apply.
 | Pins and message management | `messages.manage` | `guild_messages` |
 | Files | `attachments.write`, `attachments.read` | None for REST |
 | Polls | `polls.write`, `polls.read` | `guild_message_polls` |
-| Members and roles | `members.read`, `roles.read`, `roles.manage` | `guild_members` |
+| Members and roles | `members.read`, `roles.read`, `roles.manage` | `guild_members` (also required for `guild.members()` over REST) |
 | Channels and threads | `channels.read`, `channels.manage`, `messages.send` as needed | `guilds` |
 | Tasks | `tasks.read`, `tasks.write`; `tasks.manage` for board/lane management | `guild_tasks` |
 | Outbound DMs | `dm.send` plus each operation's scope | `direct_messages` |
-| Voice/video | `voice.connect`, plus `voice.listen`, `voice.speak`, `voice.stream` as used | `voice_states` for occupancy changes |
+| Voice/video | `voice.connect`, plus `voice.listen`, `voice.speak`, `voice.stream` as used; `voice.states.read` for `voice_occupancy()` | `voice_states` for occupancy changes |
 | Scheduled events | `events.read`, `events.manage` | `guild_scheduled_events` |
 | Webhooks and invites | `webhooks.read`, `webhooks.manage`, `invites.read`, `invites.manage` as used | `guild_webhooks`, `guild_invites` |
 
@@ -290,7 +309,8 @@ async def on_message(message: kaede.Message) -> None:
 
 Add these commands alongside `/ping`, then run `sync_commands.py` again.
 The first command needs only the quickstart grants. `ephemeral=True` keeps
-its response private to the invoking user. Defer before doing slow work;
+its response private to the invoking user. Respond or defer within 3 seconds, and
+defer before doing slow work;
 response visibility is fixed when you acknowledge the interaction.
 
 ```python
@@ -398,8 +418,8 @@ The app home still handles application identity and DM capability setup.
 Each target issues its own token; never copy a token from one instance to
 another. A remote installation is still subject to that guild's channel and
 role permissions. Preserve `id@domain` references even when numeric IDs match.
-Tracker replication between human home servers is not currently supported;
-SDK tracker operations contact the owning guild directly.
+Human home servers read trackers through a replica cache, but SDK tracker
+operations contact the owning guild directly.
 
 ## Invites, webhooks, and scheduled events
 
@@ -610,6 +630,10 @@ print(user.handle)   # regular username@instance formatting
 print(user.mention)  # <@987654321@chat.example>
 ```
 
+`fetch_user()` needs `members.read`. The user must also share a guild with the
+bot where its installation grants `members.read`; otherwise the lookup returns
+`USER_NOT_FOUND`.
+
 Always keep the full composite reference. Two instances may issue the same numeric snowflake.
 
 ## Reconnects and message ownership
@@ -617,7 +641,7 @@ Always keep the full composite reference. Two instances may issue the same numer
 The SDK handles short-lived tokens, request signing, `Retry-After`, heartbeats,
 and reconnect backoff. It saves a topic cursor after all event handlers finish.
 A crash can replay unfinished work, so use stable nonces or stored event IDs
-for durable actions. Old cursors can produce `GAP`; the backlog is bounded.
+for durable actions. Old cursors can produce `GATEWAY_GAP`; the backlog is bounded.
 
 Interaction and webhook message objects retain the credentials and route used
 to create them. Their `edit()` and `delete()` methods use that binding. Private
@@ -670,8 +694,8 @@ release_role = await guild.create_role("release-manager", permissions=0)
 member = next(m for m in members if m.user.handle == "alice@chat.example")
 await member.add_role(release_role.ref)
 
-# Requires emojis.manage, attachments.write, and the live MANAGE_EMOJIS
-# permission (which covers guild emoji and stickers).
+# Requires emojis.manage or expressions.manage, attachments.write, and the live
+# CREATE_GUILD_EXPRESSIONS permission.
 from pathlib import Path
 
 sticker_bytes = Path("release-party.png").read_bytes()
@@ -926,11 +950,11 @@ bot: your worker must process verified room state and MLS membership changes.
 See the [device protocol](bots-and-automations.md#participant-device-lifecycle).
 
 ```python
-credential = kaede.bot_mls_credential(
+# Creates the MLS identity and binds the bot credential to its public key.
+provider = kaede.NativeOpenMLSProvider.generate_bot(
     bot.worker_state.application_ref,
     bot.worker_state.worker_id,
 )
-provider = kaede.NativeOpenMLSProvider.generate(credential)
 
 # Registers this worker's device when needed and keeps 20–50 packages ready.
 device = await bot.replenish_e2ee_key_packages(provider)
@@ -942,6 +966,12 @@ status = await bot.e2ee_participation(
     dm_capability_id=dm.dm_capability_id,
 )
 ```
+
+Use `generate_bot()` rather than `generate()` for a bot device. The bot
+credential and `kbe_` device ID are derived from the identity key, which
+doesn't exist until the provider creates it. The registration helpers register
+the credential that `bot_mls_credential()` derives from that key, so the
+provider's own MLS credential has to match it.
 
 For explicit control, use `create_e2ee_device_challenge()`,
 `complete_e2ee_device_registration()` (or the combined

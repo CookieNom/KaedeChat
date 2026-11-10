@@ -203,6 +203,11 @@ const ERROR_MESSAGES: Record<string, string> = {
   KAED_GROUP_DM_INVITEE_HOME_UNREACHABLE:
     "That friend's home server could not confirm the invitation. Try again shortly.",
   KAED_GROUP_DM_INVITE_NOT_FRIEND: 'Only existing friends can be added to a group conversation.',
+  TERMS_AGREEMENT_REQUIRED:
+    'Agree to the Terms of Service and Privacy Policy to create an account.',
+  E2EE_INSTANCE_UNAVAILABLE:
+    'A member’s server could not be reached to verify encryption support. Try again later.',
+  E2EE_INSTANCE_UNSUPPORTED: 'A member’s server does not support encrypted channels yet.',
   DM_PRIVACY_REJECTED: 'This user’s privacy settings do not allow this direct message.',
   CANNOT_FRIEND_SELF: "You can't send a friend request to yourself.",
   CANNOT_BLOCK_SELF: "You can't block yourself.",

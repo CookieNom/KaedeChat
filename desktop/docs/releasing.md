@@ -4,9 +4,23 @@ Client releases use `vMAJOR.MINOR.PATCH` or the older
 `desktop-vMAJOR.MINOR.PATCH` tag format. Pushing either tag starts the only
 release workflow. It selects changed clients and builds x86-64 Windows and Linux
 clients, ARM64 and Intel macOS clients, Android APK/AAB, and enabled iOS IPA
-releases as needed. Selected artifacts and their SHA-256
-checksums are published to one GitHub Release. A branch push, pull request, or
-manual workflow dispatch cannot publish a release.
+releases as needed. The selected clients' files go to one GitHub Release:
+
+| Client | Release files |
+| --- | --- |
+| Linux | AppImage, `.deb`, and RPM |
+| Windows | NSIS setup executable |
+| macOS, per architecture | DMG, a ZIP of the `.app`, and the `.app.tar.gz` updater archive |
+| Android | APK and Play AAB |
+| iOS | IPA |
+| Updater metadata | `latest.json` and desktop `.sig` files |
+
+Each client package has a SHA-256 `.sha256` file beside it. Linux and macOS
+updater signatures also have checksums; `latest.json` and the Windows `.sig`
+do not. The publish job downloads only `kaede-chat-*` artifacts. The native
+WebRTC build inputs, `webrtc-android.tar` and `webrtc-ios.tar`, remain CI
+artifacts and are not uploaded to the GitHub Release. A branch push, pull
+request, or manual workflow dispatch cannot publish a release.
 
 Preflight compares committed files against each client's highest-version prior
 published release on the current Git history that contains its required assets.
@@ -26,8 +40,9 @@ preflight rather than silently skipping builds.
 | Release workflow or `.github/scripts/` | Desktop and mobile |
 | Markdown/docs, retired Slint code, backend, or deployment files alone | No client release |
 
-Directory matching is conservative: shared lockfile or release-tooling changes
-rebuild all consumers. CI still runs for every tag. If no client is selected
+Directory matching is conservative: shared lockfile, `desktop-release.yml`, and
+`.github/scripts/` changes rebuild all consumers. Other CI files and the WebRTC
+patch don't select a client. CI still runs for every tag. If no client is selected
 (after the iOS enable flag), no GitHub Release or store upload is created.
 Unchanged apps keep their existing downloads under their previous release tags.
 Mobile-only releases carry forward the previous desktop `latest.json` unchanged,
@@ -123,8 +138,8 @@ On macOS, use `base64 < file | tr -d '\n'`. After the code and
 release notes are ready, create and push the signed release tag:
 
 ```sh
-git tag -s v0.1.43 -m "Kaede Chat 0.1.43"
-git push origin v0.1.43
+git tag -s v0.1.107 -m "Kaede Chat 0.1.107"
+git push origin v0.1.107
 ```
 
 ### Version inventory
@@ -142,7 +157,7 @@ Protocol, database schema, and encryption format versions are compatibility
 identifiers and must only change when those formats change.
 
 For a local build with release metadata, run
-`python3 .github/scripts/check-release-inputs.py --stamp --tag v0.1.43`.
+`python3 .github/scripts/check-release-inputs.py --stamp --tag v0.1.107`.
 This edits the local metadata files; CI performs the same operation in its
 temporary checkout. This automation sets versions from tags; it does not
 choose major/minor/patch increments or create tags.

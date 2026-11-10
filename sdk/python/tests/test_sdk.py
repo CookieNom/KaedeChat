@@ -1680,6 +1680,7 @@ async def test_control_clients_bind_directly_to_the_authoritative_origin(
     assert all(options["follow_redirects"] is False for options in client_options)
     assert all(options["trust_env"] is False for options in client_options)
     assert [method for method, _, _ in requests] == ["POST", "PUT", "PUT"]
+    assert "session_limit" not in requests[0][2]["json"]
     assert requests[-1][1].endswith("/guilds/7@guild.example/commands")
     guild_command = requests[-1][2]["json"]["commands"][0]
     assert guild_command["contexts"] == ["guild"]
@@ -4436,3 +4437,45 @@ async def test_tracker_attachment_upload_commit_and_private_read(monkeypatch) ->
             channel, EntityRef(901, "other.example"), target="https://guild.example"
         )
     bot.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gateway_uses_shared_server_reported_session_budget() -> None:
+    bot = client()
+    target = "https://chat.example"
+    bot._gateway_session_limits[target] = 2
+    async with bot._gateway_session(target):
+        async with bot._gateway_session(target):
+            with pytest.raises(ApiError, match="session limit"):
+                async with bot._gateway_session(target):
+                    pytest.fail("must not open an excess connection")
+        async with bot._gateway_session(target):
+            assert bot._gateway_session_counts[target] == 2
+    assert bot._gateway_session_counts[target] == 0
+
+
+@pytest.mark.asyncio
+async def test_token_learns_target_session_limit() -> None:
+    import httpx
+
+    bot = client()
+    target = "https://chat.example"
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "access_token": "test-token",
+                    "expires_in": 3600,
+                    "session_limit": 4,
+                },
+            )
+        ),
+        base_url=target,
+    )
+    bot._targets[target] = http
+    try:
+        assert await bot._token(target) == "test-token"
+        assert bot._gateway_session_limits[target] == 4
+    finally:
+        await http.aclose()

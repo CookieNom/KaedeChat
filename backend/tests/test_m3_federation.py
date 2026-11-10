@@ -886,7 +886,13 @@ def test_developer_projection_survives_the_ordinary_delivery_cutoff() -> None:
 @pytest.mark.parametrize(
     "event_type", ["media.delete", DEVELOPER_TEAM_SNAPSHOT_EVENT, "e2ee.device-list.changed"]
 )
-def test_rejected_media_delete_remains_retryable_after_upgrade_window(event_type: str) -> None:
+@pytest.mark.parametrize(
+    "code",
+    ["KAED_FED_EVENT_REJECTED", "KAED_FED_INVALID_EVENT", "KAED_FED_EVENT_INVALID"],
+)
+def test_rejected_media_delete_remains_retryable_after_upgrade_window(
+    event_type: str, code: str
+) -> None:
     now = datetime.now(UTC)
     event = FederationEvent(
         event_id="kcfe_delete",
@@ -907,13 +913,13 @@ def test_rejected_media_delete_remains_retryable_after_upgrade_window(event_type
     assert retry_rejected_durable_event(
         event,
         row,
-        "KAED_FED_EVENT_REJECTED",
+        code,
         now,
     )
     assert row.status == "circuit"
     assert row.attempts == 4
     assert row.next_retry_at == now + timedelta(hours=1)
-    assert row.last_error == "KAED_FED_EVENT_REJECTED"
+    assert row.last_error == code
 
 
 @pytest.mark.parametrize("event_type", [DEVELOPER_TEAM_SNAPSHOT_EVENT, "e2ee.device-list.changed"])

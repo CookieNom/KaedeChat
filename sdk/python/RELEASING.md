@@ -11,16 +11,22 @@ here; this license file does not change other repository components.
 Use uv 0.11.8, matching CI. From the repository root:
 
 ```sh
+uv lock --project sdk/python --check --python 3.11
 uv version --project sdk/python --bump patch
 uv sync --project sdk/python --locked --python 3.11
 uv build --project sdk/python --no-sources
 uv run --project sdk/python --no-sync twine check --strict sdk/python/dist/*
 for artifact in sdk/python/dist/*.whl sdk/python/dist/*.tar.gz; do
-  uv pip install --python sdk/python/.venv/bin/python --reinstall "$artifact"
-  uv run --project sdk/python --no-sync python -I -c 'import kaede_bot'
+  uv pip install --python sdk/python/.venv/bin/python --no-deps --reinstall "$artifact"
+  uv run --project sdk/python --no-sync python -I -c 'import kaede_bot; from importlib.resources import files; assert files("kaede_bot").joinpath("py.typed").is_file()'
   uv run --project sdk/python --no-sync pytest -q sdk/python/tests
 done
 ```
+
+The first command checks the committed lockfile before the version bump, as CI
+does. `--no-deps` keeps the locked development environment in place while each
+archive is installed, and the import check also confirms the `py.typed` marker
+shipped.
 
 Start with an empty `sdk/python/dist` directory so old versions cannot be
 uploaded accidentally. Inspect both archives; they should contain the SDK,

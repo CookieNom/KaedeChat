@@ -3607,7 +3607,8 @@
       const snapshot = ++snapshotGeneration;
       const buffered: Dispatch[] = [];
       dispatchBuffer = buffered;
-      guild = null;
+      // Keep the guild navigation mounted while another channel in it loads.
+      if (!guild || !matchesEntityRef(targetGuild, guild, localDomain)) guild = null;
       loadedRouteChannel = null;
       selfModeration = null;
       selfModerationWarning = '';

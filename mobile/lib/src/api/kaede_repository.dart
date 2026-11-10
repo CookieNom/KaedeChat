@@ -432,6 +432,7 @@ final class KaedeRepository {
   }
 
   Future<Map<String, Object?>> register({
+    required bool acceptedTerms,
     required Domain instance,
     required String username,
     required String password,
@@ -451,6 +452,7 @@ final class KaedeRepository {
       }
       return api
           .sendJson('POST', '/api/v1/auth/register', data: <String, Object?>{
+        'accepted_terms': acceptedTerms,
         'username': username,
         'password': prepared.authenticationSecret,
         'password_kdf': context.toJson(),

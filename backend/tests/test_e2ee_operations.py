@@ -941,3 +941,22 @@ async def test_remote_dm_consent_is_forwarded_to_the_conversation_authority(monk
     assert proxy.await_args.args[2:4] == ("remote.example", "/_kaede/v1/e2ee/rooms/consent")
     assert proxy.await_args.kwargs["actor"] is actor
     assert proxy.await_args.kwargs["body"] == {"action": "agree", "request_id": "r" * 43}
+
+
+@pytest.mark.parametrize("capabilities", [[], ["e2ee-mls/1"]])
+async def test_activation_checks_each_remote_instance(monkeypatch, capabilities) -> None:
+    peer = AsyncMock(return_value=SimpleNamespace(capabilities=capabilities))
+    monkeypatch.setattr(e2ee_api, "ensure_peer", peer)
+    participants = [
+        SimpleNamespace(origin_domain=domain)
+        for domain in ["home.example", "remote.example", "remote.example"]
+    ]
+    session = AsyncMock()
+    settings = SimpleNamespace(domain="home.example")
+    if capabilities:
+        await e2ee_api.require_room_instance_capabilities(session, settings, participants)
+    else:
+        with pytest.raises(HTTPException) as caught:
+            await e2ee_api.require_room_instance_capabilities(session, settings, participants)
+        assert caught.value.detail["code"] == "E2EE_INSTANCE_UNSUPPORTED"
+    peer.assert_awaited_once_with(session, settings, "remote.example")

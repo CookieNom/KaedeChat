@@ -150,15 +150,12 @@ FEDERATION_CAPABILITIES = (
     "e2ee-mls/1",
     "e2ee-media/1",
     "bot-direct-auth/1",
-    "group-dm/1",
     "guild-audit-log/1",
     "guild-soundboard/1",
     "guild-history-sync/1",
     "guild-history-sync/2",
     "member-self-moderation/1",
-    "report-forwarding/1",
     "message-search/1",
-    "presence/1",
     "profile-by-ref/1",
     "request-nonce/1",
 )
@@ -973,6 +970,7 @@ def guild_media_delete_request_ref(
         or not isinstance(actor, dict)
         or set(actor) != {"id", "domain"}
         or not isinstance(actor.get("id"), str)
+        or len(actor["id"]) > 19
         or not actor["id"].isascii()
         or not actor["id"].isdecimal()
         or (len(actor["id"]) > 1 and actor["id"].startswith("0"))
@@ -998,6 +996,7 @@ def guild_media_delete_request_ref(
         domain = raw.get("origin_domain")
         if (
             not isinstance(raw_id, str)
+            or len(raw_id) > 19
             or not raw_id.isascii()
             or not raw_id.isdecimal()
             or (len(raw_id) > 1 and raw_id.startswith("0"))
@@ -1021,6 +1020,7 @@ def guild_media_delete_request_ref(
         or attachment_ref is None
         or attachment_ref[1] == origin
         or not isinstance(raw_generation, str)
+        or len(raw_generation) > 19
         or not raw_generation.isascii()
         or not raw_generation.isdecimal()
         or (len(raw_generation) > 1 and raw_generation.startswith("0"))

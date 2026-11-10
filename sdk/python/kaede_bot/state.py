@@ -227,8 +227,13 @@ class WorkerState:
         scopes: list[str],
         intents: list[str],
         target_domains: list[str] | None = None,
+        session_limit: int | None = None,
     ) -> WorkerState:
         """One-time enrollment. Only the public key is sent to Kaede."""
+        if session_limit is not None and (
+            type(session_limit) is not int or not 1 <= session_limit <= 16
+        ):
+            raise ValueError("session_limit must be between 1 and 16")
         ref = EntityRef.parse(application_ref)
         origin = canonical_application_home(application_home, ref)
         key = Ed25519PrivateKey.generate()
@@ -253,7 +258,11 @@ class WorkerState:
                     "scopes": scopes,
                     "intents": intents,
                     "target_domains": target_domains or [],
-                    "session_limit": 1,
+                    **(
+                        {"session_limit": session_limit}
+                        if session_limit is not None
+                        else {}
+                    ),
                 },
             )
             response.raise_for_status()

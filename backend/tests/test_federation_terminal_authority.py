@@ -11,6 +11,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 from sqlalchemy.exc import DBAPIError
+from starlette.requests import Request
 
 from app.api import federation as federation_api
 from app.bots.runtime_control import (
@@ -32,7 +33,7 @@ from app.db.models import (
 )
 from app.federation import terminal_rooms
 from app.federation.schemas import EventEnvelope
-from app.federation.security import FederationPrincipal
+from app.federation.security import FederationPrincipal, _deletion_control_inbox_request
 
 LOCAL_DOMAIN = "local.localhost"
 AUTHORITY_DOMAIN = "authority.localhost"
@@ -142,6 +143,49 @@ def group_terminal(*, terminal: bool) -> EventEnvelope:
         content=content,
         context={},
     )
+
+
+@pytest.mark.parametrize(
+    ("events", "allowed"),
+    [
+        ([guild_media_request().model_dump(mode="json")], True),
+        (
+            [
+                guild_media_request().model_dump(mode="json"),
+                guild_terminal(terminal=True).model_dump(mode="json"),
+                group_terminal(terminal=True).model_dump(mode="json"),
+                {"type": "media.delete"},
+            ],
+            True,
+        ),
+        ([{"type": "guild.media.delete.request"}], False),
+        ([guild_media_request().model_dump(mode="json"), {"type": "dm.message.create"}], False),
+        ([], False),
+    ],
+)
+def test_suspended_http_inbox_allows_only_removal_controls(
+    events: list[dict[str, object]], allowed: bool
+) -> None:
+    request = Request({"type": "http", "path": "/_kaede/v1/inbox", "headers": []})
+    request.state.federation_json = {"events": events}
+
+    assert _deletion_control_inbox_request(request) is allowed
+
+
+@pytest.mark.parametrize("field", ["actor", "guild", "message", "attachment", "generation"])
+def test_suspended_http_inbox_rejects_oversized_deletion_identifiers(field: str) -> None:
+    event = guild_media_request().model_dump(mode="json")
+    oversized = "9" * 5_000
+    if field == "actor":
+        event["actor"]["id"] = oversized
+    elif field == "generation":
+        event["content"]["_deletion_generation"] = oversized
+    else:
+        event["content"][field]["id"] = oversized
+    request = Request({"type": "http", "path": "/_kaede/v1/inbox", "headers": []})
+    request.state.federation_json = {"events": [event]}
+
+    assert not _deletion_control_inbox_request(request)
 
 
 class Savepoint:
@@ -265,6 +309,29 @@ async def process(event: EventEnvelope, session: ProcessSession) -> object:
         FederationPrincipal(origin=AUTHORITY_DOMAIN, key_id="ed25519:test"),
         event,
         cast(Any, object()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_media_deletion_uses_canonical_event_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_process_dependencies(monkeypatch)
+    event = envelope(
+        "kcfe_invaliddeletion001",
+        "media.delete",
+        actor_id=99,
+        actor_domain=AUTHORITY_DOMAIN,
+        content={"attachment_id": "41", "origin_domain": AUTHORITY_DOMAIN, "generation": "0"},
+        context={},
+    )
+    session = ProcessSession(event, [], {})
+
+    result = await process(event, session)
+
+    assert (cast(Any, result).status, cast(Any, result).code) == (
+        "rejected",
+        "KAED_FED_INVALID_EVENT",
     )
 
 

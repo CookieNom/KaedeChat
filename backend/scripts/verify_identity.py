@@ -65,6 +65,7 @@ async def verify() -> None:
             register = await client.post(
                 "/api/v1/auth/register",
                 json={
+                    "accepted_terms": True,
                     "username": "maple",
                     "email": "maple@example.com",
                     "password": password_secret,

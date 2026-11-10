@@ -18,6 +18,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use kaede_e2ee::{MlsClient, PendingCommit, ProcessedMessage};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -117,6 +118,34 @@ fn allocate(client: MlsClient) -> Result<u64, String> {
 
 #[allow(clippy::too_many_lines)] // One bounded dispatcher keeps the C ABI narrow and auditable.
 fn invoke(method: &str, handle: u64, value: &Value) -> Result<Value, String> {
+    if method == "generate_bot" {
+        let application = value["application_ref"]
+            .as_str()
+            .filter(|v| !v.is_empty() && v.len() <= 512)
+            .ok_or("invalid application reference")?;
+        let worker = value["worker_id"]
+            .as_str()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .ok_or("invalid worker ID")?;
+        let client = MlsClient::generate_with_credential(|key| {
+            let mut digest = Sha256::new();
+            digest
+                .update(format!("kaede-bot-e2ee-device-v1\0{application}\0{worker}\0").as_bytes());
+            digest.update(key);
+            json!({
+                "account": format!("bot:{application}:worker:{worker}"),
+                "application_ref": application,
+                "credential_type": "kaede-bot-device-v2",
+                "device_id": format!("kbe_{}", encode(&digest.finalize())),
+                "worker_id": worker.to_string(),
+            })
+            .to_string()
+            .into_bytes()
+        })
+        .map_err(|error| error.to_string())?;
+        return allocate(client).map(|created| json!({"handle": created.to_string()}));
+    }
     if method == "generate" {
         let credential = decode(value, "credential", 16_384)?;
         let client = MlsClient::generate(&credential).map_err(|error| error.to_string())?;
@@ -367,6 +396,39 @@ pub unsafe extern "C" fn kaede_e2ee_buffer_free(buffer: KaedeE2eeBuffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_generation_binds_key_package_to_its_public_identity() -> Result<(), String> {
+        let generated = invoke(
+            "generate_bot",
+            0,
+            &json!({"application_ref": "20@apps.example", "worker_id": "40"}),
+        )?;
+        let handle = generated["handle"]
+            .as_str()
+            .ok_or("native handle is not a string")?
+            .parse::<u64>()
+            .map_err(|error| error.to_string())?;
+        let identity = invoke("public_identity_key", handle, &json!({}))?;
+        let key = decode(&identity, "bytes", 32)?;
+        let package = invoke("generate_key_package", handle, &json!({}))?;
+        let inspected = invoke(
+            "inspect_key_package",
+            handle,
+            &json!({"key_package": package["bytes"]}),
+        )?;
+        assert_eq!(decode(&inspected, "signature_key", 32)?, key);
+        let mut digest = Sha256::new();
+        digest.update(b"kaede-bot-e2ee-device-v1\x0020@apps.example\x0040\x00");
+        digest.update(&key);
+        let expected = json!({"account": "bot:20@apps.example:worker:40", "application_ref": "20@apps.example", "credential_type": "kaede-bot-device-v2", "device_id": format!("kbe_{}", encode(&digest.finalize())), "worker_id": "40"});
+        assert_eq!(
+            decode(&inspected, "credential", 16_384)?,
+            expected.to_string().as_bytes()
+        );
+        kaede_e2ee_close(handle);
+        Ok(())
+    }
 
     #[test]
     fn private_dispatcher_reports_advanced_native_epoch_as_decimal() -> Result<(), String> {

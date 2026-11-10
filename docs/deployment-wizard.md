@@ -8,11 +8,12 @@ Run the Bash setup wizard from the repository root:
 make setup
 ```
 
-The script generates repository-local configuration and can optionally install
-or remove Kaede's per-user systemd update timer. It does not start containers,
+The script generates repository-local configuration and installs Kaede's
+per-user systemd update timer. It does not start containers,
 install packages or proxy files, request certificates, change the firewall, or
-reload nginx/Caddy. The user timer is the only host service it touches, and
-only after you explicitly opt into automatic updates.
+reload nginx/Caddy. The user timer is the only host service it touches. It
+runs notification-only checks by default and installs updates only if you opt
+in. `deploy/install-auto-update.sh stop` removes it.
 
 ## Choices
 
@@ -22,7 +23,9 @@ only after you explicitly opt into automatic updates.
 | Kubernetes | Readable kubeconfig, production context, dedicated namespace, storage class/capacity, and local image imports or a registry |
 | Storage | Bundled Garage, or credentials and three private buckets at an S3-compatible provider |
 | Email | SMTP or Mailtrap credentials, or no-email registration |
+| Federation | Open federation, or an allowlist of trusted instances with an administrator API token |
 | Optional features | LiveKit voice/video, private message search, GIF search, Turnstile, mobile push, and monitoring |
+| Image matching | Optional Microsoft PhotoDNA subscription key for checking unencrypted images |
 | Updates | Optional source-update schedule and executable backup hook |
 | Capacity | Worker counts, upload limits, host ports, and optional federation/cache quotas |
 
@@ -64,7 +67,9 @@ and validate answers without writing anything.
 Run `make tools` before setup if kubectl is missing. K3s must already be
 installed and Ready; setup verifies access but does not install the cluster.
 The environment's operator GID is used only for optional PhotoDNA file access.
-Application Secrets are split by role instead of mounting the whole `.env`.
+Application Secrets are split by role instead of mounting the whole `.env`. The
+short-lived preflight and storage-init Jobs are the exception and receive the
+complete file.
 
 The script uses OpenSSL's CSPRNG for independent application, gateway, proxy,
 database, Dragonfly, Garage, LiveKit, Grafana, and admin secrets. Reruns
@@ -75,8 +80,12 @@ refuses to change an established instance domain.
 Reruns also preserve your quota tuning when either keep option is selected. The
 only automatic quota migrations recognize exact defaults emitted by older setup
 versions: retained-history messages move from 250,000 to 2,000,000 and the
-remote-media cache from 20 GiB to 100 GiB. Any other value you set is left
+remote-media cache from 20 GiB to 100 GiB. Any other quota value you set is left
 unchanged.
+
+Settings that setup doesn't ask about, such as `KAEDE_LANDING_PAGE` and the
+`KAEDE_LEGAL_*` fields, are copied into the new `.env` unchanged. Credentials
+and endpoints for a feature you turn off during a rerun are dropped.
 
 Writes are staged, sensitive files are private, output symlinks and hard links
 are rejected, and `flock` prevents concurrent runs when available. Changed
@@ -119,20 +128,24 @@ and the standalone deployment validator checks it before startup. The public
 Android/iOS Firebase application files remain build-time inputs and are ignored
 by Git. See [mobile push delivery](mobile-push.md).
 
-Automatic updates are disabled by default. When you enable them, setup installs
-a `kaede-auto-update.timer` in your user's systemd configuration. Its first run
-reconciles and records the current commit. The updater never accepts a dirty
+Automatic updates are disabled by default. Setup still installs
+`kaede-auto-update.timer` in your user's systemd configuration, where it only
+checks for updates and notifies instance owners. When you enable automatic
+updates, its first run reconciles and records the current commit. The updater never accepts a dirty
 tracked checkout, detached head, force-pushed history, downgrade, or
 non-fast-forward merge. It builds/imports images, runs preflight and the backup
-hook, and rolls compatible application changes with readiness checks. Migrations
-or infrastructure changes require `make deploy MAINTENANCE=1` after a backup.
+hook, and rolls compatible application changes with readiness checks. Unrecognized
+migrations or infrastructure changes require `make deploy MAINTENANCE=1` after a
+backup.
 The timer needs Docker and kubeconfig access, plus the root-owned local import
 helper and narrowly scoped sudoers rule when local imports are selected. See
 [local imports](operator.md#local-production-image-imports).
 
 ## After setup
 
-Review the generated files, then validate without starting the application:
+Review the generated files, then run these checks. `make env-check` validates
+`.env`; `make kubernetes-check` tests this checkout's deployment code and doesn't
+read `.env` or your cluster:
 
 ```sh
 make env-check

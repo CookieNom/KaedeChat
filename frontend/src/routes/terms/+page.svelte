@@ -41,6 +41,7 @@
         <li>{$t('ui_break_the_law_or_ask_someone_else_to_break_th_197a0fe1')}</li>
         <li>{$t('ui_harass_threaten_or_abuse_other_members_see_ou_b778ae14')}</li>
         <li>{$t('ui_upload_or_share_malware_phishing_or_other_har_83fb116b')}</li>
+        <li>{$t('ui_share_child_sexual_abuse_material_or_any_cont_17fa8070')}</li>
         <li>{$t('ui_share_someone_else_s_private_information_with_bfb936b2')}</li>
         <li>{$t('ui_send_unsolicited_bulk_messages_or_spam_010459bb')}</li>
         <li>{$t('ui_interfere_with_the_instance_including_attempt_7b311c7c')}</li>
@@ -66,7 +67,7 @@
 
     <section>
       <h2>{$t('ui_6_moderation_640c3da6')}</h2>
-      <p>{$t('ui_moderators_may_delete_content_remove_members__e186f148')}</p>
+      <p>{$t('ui_moderators_may_delete_content_remove_members__a0c552f7')}</p>
     </section>
 
     <section>
@@ -77,9 +78,9 @@
     <section>
       <h2>{$t('ui_8_termination_68c2c79d')}</h2>
       <p>
-        {$t('ui_to_ask_us_to_disable_your_account_or_discuss__832a4f1e')}
+        {$t('ui_you_can_delete_your_account_at_any_time_in_se_71197d24')}
         <a href={`mailto:${operatorLegalConfig.contactEmail}`}>{operatorLegalConfig.contactEmail}</a
-        >{$t('ui_a_request_does_not_remove_copies_already_deli_fe16096b')}
+        >{$t('ui_deleting_or_disabling_your_account_does_not_r_3cc2d500')}
       </p>
     </section>
 

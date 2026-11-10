@@ -20,11 +20,10 @@ selected encoder priority. Native desktop capture preserves aspect ratio and
 uses even output dimensions required by I420 encoders.
 
 Outgoing microphone audio offers 24, 48, 96, and 128 kbps Opus ceilings. The
-browser's 128 kbps Studio option requests stereo and disables discontinuous
-transmission. Flutter's current LiveKit API does not expose its stereo switch,
-so mobile keeps the native microphone channel layout while disabling DTX for
-Studio on its next publication negotiation; its sender bitrate changes in place
-without disturbing camera or screen tracks. Native desktop keeps its mono
+browser's 128 kbps Studio option requests stereo. Flutter's current LiveKit API
+does not expose its stereo switch, so mobile keeps the native microphone channel
+layout; its sender bitrate changes in place without disturbing camera or screen
+tracks. Silence suppression (Opus DTX) is a separate setting, on by default. Native desktop keeps its mono
 processed voice graph. RED remains enabled where the SDK supports it. Changing
 audio quality during a call does not reacquire microphone permission.
 
@@ -96,6 +95,10 @@ system UI; the user can start a new share to obtain a fresh token.
 
 ### iOS and iPadOS
 
+The app and its extensions are built for iPhone only
+(`TARGETED_DEVICE_FAMILY = 1`). There's no separate iPad build, so this section
+describes the iPhone app.
+
 Full-device sharing uses a ReplayKit Broadcast Upload extension, not in-app
 ReplayKit capture. Runner and `BroadcastExtension` share the
 `group.chat.kaede.mobile` app group. The extension sends bounded-backpressure
@@ -153,9 +156,10 @@ a call must not leave a stale video window.
 
 ## Voice and call routing
 
-Guild voice runs on the guild's home instance. Human two-person DM calls use
-the caller's instance as call authority; bot calls use their DM capability's
-conversation authority. A remote client obtains a grant through the relevant
+Guild voice runs on the guild's home instance. Human DM calls use the
+conversation's authority: the lower participant domain for two people, or the
+creator's home for a group. Bot calls use their DM capability's conversation
+authority. A remote client obtains a grant through the relevant
 API and connects to the returned LiveKit server. Existing media can continue
 through a federation outage, but new joins require the authority. There is no
 automatic SFU failover to another instance.
@@ -183,13 +187,12 @@ Encrypted media requires the room's current MLS state; see [E2EE](e2ee.md).
 
 ## Codec defaults
 
-Plaintext camera and screen sharing prefer AV1 when supported, with H.264 as
-the compatibility choice and VP8 where H.264 is unavailable. Desktop can
-publish a backup codec on demand; web and Flutter follow their SDK fallback
-behavior. CPU load and thermal throttling do not trigger an application-level
-codec switch.
+Camera and screen sharing publish VP8 by default, or H.264 when only H.264 has
+hardware acceleration. If a viewer can use AV1 and the sender proves a hardware
+AV1 encoder at the current settings, Kaede adds a separate single-layer AV1 track
+alongside the compatible one. Sustained CPU or upload pressure retires that track.
+SDK backup codecs are off on every client.
 
-Encrypted calls prefer AV1 with encrypted VP8 backup, or VP8 alone when the
-sender lacks AV1. All clients must run the coordinated update containing Kaede's
+Encrypted and plaintext calls follow the same policy. All clients must run the coordinated update containing Kaede's
 AV1 cryptor; codec support alone does not establish compatibility. The
 [AV1 notes](av1-e2ee/README.md) describe native builds and rollout validation.

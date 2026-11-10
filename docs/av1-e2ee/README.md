@@ -1,7 +1,8 @@
 # Encrypted AV1 validation
 
-Encrypted camera and screen sharing now prefer AV1 when the sender supports it,
-with an encrypted VP8 backup. This rollout requires coordinated updates of all
+Encrypted and plaintext calls follow the same codec policy: a compatible VP8 or
+H.264 track, plus a separate single-layer AV1 track when the sender proves a
+hardware encoder and a viewer can use it. Encrypted AV1 requires coordinated updates of all
 desktop, browser and mobile installations. Current Rust dependency
 pins are in [desktop/Cargo.toml](../../desktop/Cargo.toml); the browser patch is
 [the LiveKit patch](../../frontend/patches/livekit-client@2.20.1.patch), and the
@@ -34,7 +35,7 @@ pnpm install --frozen-lockfile
 pnpm test:livekit-crypto
 ```
 
-For real RTP interoperability, start LiveKit 1.13.6 in dev mode on loopback
+For real RTP interoperability, start LiveKit 1.13.3 in dev mode on loopback
 port 17880, using its devkey/secret credentials, and build the Rust fork tests:
 
 ```sh
@@ -81,8 +82,8 @@ extract its tar file into `mobile/native/webrtc`. Rebuild after changing the sou
 pins or native patch. The generated build manifest records both pins and patch hash.
 
 Flutter queries sender codec capabilities for encrypted calls as well as plaintext
-calls. Encrypted publishing selects AV1 with VP8 backup, or VP8 alone if AV1 is
-unavailable. Encryption remains enabled in either case. The vendored SDK installs
+calls. Publishing uses the same baseline track and adaptive AV1 variant in both
+cases, and encryption remains enabled either way. The vendored SDK installs
 video encryptors before negotiation, attaches AV1 receiver decryptors, and covers
 backup senders in key rotation and unpublish cleanup.
 

@@ -108,7 +108,11 @@ from app.federation.events import (
     discard_superseded_latest_state_event,
     queue_event,
 )
-from app.federation.network import FederationNetworkError, decode_federation_response_json
+from app.federation.network import (
+    FederationNetworkError,
+    decode_federation_response_json,
+    ensure_peer,
+)
 from app.federation.replication import profile_from_user
 from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
 
@@ -2687,6 +2691,24 @@ def _stored_response(value: object, label: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+async def require_room_instance_capabilities(
+    session: AsyncSession,
+    settings: Settings,
+    participants: list[User],
+) -> None:
+    for domain in sorted({user.origin_domain for user in participants} - {settings.domain}):
+        try:
+            peer = await ensure_peer(session, settings, domain)
+        except FederationNetworkError as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "E2EE_INSTANCE_UNAVAILABLE", "domain": domain}
+            ) from exc
+        if "e2ee-mls/1" not in (peer.capabilities or []):
+            raise HTTPException(
+                status_code=409, detail={"code": "E2EE_INSTANCE_UNSUPPORTED", "domain": domain}
+            )
+
+
 async def _propose_room_operation(
     kind: str,
     access: ChannelAccess,
@@ -2808,6 +2830,8 @@ async def _propose_room_operation(
             else None
         )
         participants = await room_participants(session, redis, access)
+        if kind == "activate":
+            await require_room_instance_capabilities(session, settings, participants)
         operation = E2EERoomOperation(
             id=payload.operation_id,
             authority_domain=settings.domain,
@@ -3104,6 +3128,11 @@ async def _commit_room_operation(
             raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_CONFLICT"})
         return _stored_response(operation.committed_response, "committed")
     if kind == "activate":
+        await require_room_instance_capabilities(
+            session,
+            settings,
+            await room_participants(session, redis, access),
+        )
         try:
             consent_request_id = await require_dm_encryption_consent(session, redis, access)
             if consent_request_id != operation.consent_request_id:

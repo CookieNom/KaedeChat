@@ -682,6 +682,93 @@ async def test_remote_member_add_carries_a_qualified_selected_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["add", "update", "remove"])
+@pytest.mark.parametrize(
+    ("actor_role", "owner_count", "error_code"),
+    [
+        ("administrator", 2, "TEAM_OWNER_REQUIRED"),
+        ("owner", 1, "TEAM_LAST_OWNER"),
+        ("owner", 2, None),
+    ],
+)
+async def test_only_an_owner_can_demote_or_remove_an_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    actor_role: str,
+    owner_count: int,
+    error_code: str | None,
+) -> None:
+    current_team = team()
+    acting_member = projected_member(local=False)
+    acting_member.role = actor_role
+    target_user = actor(local=False)
+    target_user.id = 40 if owner_count == 1 else 50
+    target_ref = EntityRef(f"{target_user.id}@users.example")
+    target_member = projected_member(local=False)
+    target_member.user_id = target_user.id
+    target_member.role = "owner"
+    session = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=lambda model, *_args, **_kwargs: (
+                target_user if model is User else target_member
+            )
+        ),
+        scalar=AsyncMock(return_value=owner_count),
+        delete=AsyncMock(),
+    )
+    commit = AsyncMock()
+    monkeypatch.setattr(
+        applications, "proxy_remote_developer_management", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        applications, "managed_team", AsyncMock(return_value=(current_team, acting_member))
+    )
+    monkeypatch.setattr(applications, "commit_developer_team_mutation", commit)
+    common = {
+        "team_ref": EntityRef("20@apps.example"),
+        "auth": developer_management_federation._auth(actor(local=False)),
+        "session": session,
+        "settings": SimpleNamespace(domain="apps.example"),
+    }
+    if operation == "add":
+        mutation = applications.add_developer_team_member(
+            payload=applications.DeveloperTeamMemberPut(user_ref=target_ref, role="developer"),
+            **common,
+        )
+    elif operation == "update":
+        mutation = applications.patch_developer_team_member(
+            user_ref=target_ref,
+            payload=applications.DeveloperTeamMemberPatch(role="developer"),
+            **common,
+        )
+    else:
+        mutation = applications.remove_developer_team_member(user_ref=target_ref, **common)
+
+    if error_code is not None:
+        with pytest.raises(HTTPException) as caught:
+            await mutation
+        assert caught.value.status_code == (403 if error_code == "TEAM_OWNER_REQUIRED" else 409)
+        assert caught.value.detail["code"] == error_code
+        assert target_member.role == "owner"
+        commit.assert_not_awaited()
+        session.delete.assert_not_awaited()
+    else:
+        await mutation
+        commit.assert_awaited_once()
+        if operation == "remove":
+            session.delete.assert_awaited_once_with(target_member)
+        else:
+            assert target_member.role == "developer"
+
+    session.get.assert_any_await(
+        DeveloperTeamMember,
+        (current_team.id, current_team.origin_domain, target_user.id, target_user.origin_domain),
+        with_for_update=True,
+        populate_existing=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_remote_team_application_create_proxies_before_local_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

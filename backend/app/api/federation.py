@@ -3794,7 +3794,7 @@ async def process_event(
             return InboxResult(
                 event_id=envelope.event_id,
                 status="rejected",
-                code="KAED_FED_EVENT_INVALID",
+                code="KAED_FED_INVALID_EVENT",
             )
         if await session.get(MediaTombstoneSource, request_attachment_ref) is not None:
             await session.rollback()
@@ -3837,7 +3837,7 @@ async def process_event(
             return InboxResult(
                 event_id=envelope.event_id,
                 status="rejected",
-                code="KAED_FED_EVENT_INVALID",
+                code="KAED_FED_INVALID_EVENT",
             )
         media_attachment_ref = (attachment_number, attachment_origin)
         # Serialize generation comparison before quota admission and before the
@@ -3941,7 +3941,7 @@ async def process_event(
             return InboxResult(
                 event_id=envelope.event_id,
                 status="rejected",
-                code="KAED_FED_EVENT_INVALID",
+                code="KAED_FED_INVALID_EVENT",
             )
         # Close the room's bound + routed media set before quota admission.
         # Terminal apply can safely reuse all three transaction locks below.

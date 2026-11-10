@@ -20,6 +20,9 @@
     email_verification_required: boolean;
   }
 
+  let acceptedTerms = $state(false);
+  // Fail closed until the server says whether it publishes policies.
+  let legalAgreementRequired = $state(true);
   let username = $state('');
   let email = $state('');
   let password = $state('');
@@ -40,6 +43,8 @@
   let selectedInstance = $state('');
 
   function applyConfiguration(configuration: Awaited<ReturnType<typeof loadAuthConfiguration>>) {
+    acceptedTerms = false;
+    legalAgreementRequired = configuration.legal_agreement_required !== false;
     emailRequired = configuration.email_required;
     turnstileEnabled = configuration.turnstile.enabled;
     turnstileSiteKey = configuration.turnstile.site_key;
@@ -81,7 +86,7 @@
   });
 
   async function submit() {
-    if (busy || emailRequired === null) return;
+    if (busy || emailRequired === null || (legalAgreementRequired && !acceptedTerms)) return;
     if (password !== confirmPassword) {
       error = $t('ui_passwords_do_not_match_6c6e178a');
       return;
@@ -94,6 +99,7 @@
         method: 'POST',
         body: JSON.stringify({
           username,
+          accepted_terms: legalAgreementRequired && acceptedTerms,
           ...(emailRequired ? { email } : {}),
           password: prepared.authenticationSecret,
           password_kdf: prepared.context,
@@ -241,6 +247,25 @@
         /></label
       >
     </div>
+    {#if legalAgreementRequired}
+      <label class="legal-agreement">
+        <input type="checkbox" bind:checked={acceptedTerms} required disabled={busy} />
+        <span
+          >{$t('ui_i_agree_to_this_server_s_549dcd13')}
+          <a
+            href={nativeDesktop ? `${selectedInstance}/terms` : resolve('terms')}
+            target="_blank"
+            rel="noopener noreferrer">{$t('ui_terms_of_service_4afa55bf')}</a
+          >
+          {$t('ui_and_acknowledge_its_019d8797')}
+          <a
+            href={nativeDesktop ? `${selectedInstance}/privacy` : resolve('privacy')}
+            target="_blank"
+            rel="noopener noreferrer">{$t('ui_privacy_policy_506ff394')}</a
+          >.</span
+        >
+      </label>
+    {/if}
     {#if turnstileEnabled && turnstileSiteKey}
       <TurnstileWidget
         bind:this={turnstileWidget}
@@ -250,7 +275,12 @@
       />
     {/if}
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-    <button class="primary-button" disabled={busy || (turnstileEnabled && !turnstileToken)}
+    <button
+      class="primary-button"
+      disabled={busy ||
+        (legalAgreementRequired && !acceptedTerms) ||
+        emailRequired === null ||
+        (turnstileEnabled && !turnstileToken)}
       >{busy ? $t('ui_creating_c79ed949') : $t('ui_create_account_798ca2ce')}</button
     >
   </form>
@@ -259,3 +289,19 @@
     <a href={resolve('login')}>{$t('ui_sign_in_bfd402b2')}</a>
   </p>
 {/if}
+
+<style>
+  .legal-agreement {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-block: 1rem;
+    line-height: 1.5;
+  }
+  .legal-agreement input {
+    width: 1.25rem;
+    height: 1.25rem;
+    flex-shrink: 0;
+    margin-top: 0.15rem;
+  }
+</style>

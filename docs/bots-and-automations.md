@@ -160,7 +160,7 @@ query strings, redirects, logs, or WebSocket URLs.
 
 A guild installation begins from a Kaede client or a portable bot invite. The
 person approving it must currently have `MANAGE_GUILD` on the authoritative
-guild.
+guild and already hold every permission the bot requests.
 
 1. The target resolves and verifies the application home's signed manifest.
 2. It applies the target operator's instance blocks and the developer's exact
@@ -240,7 +240,7 @@ permanent global rail destination. Its product pages show the verified applicati
 description, category and tags, the mixed media carousel, policy/support and
 named external links, localized descriptions, up to five popular global slash
 commands, up to three reviewed similar apps, and the active guild/user consent
-choices, plus **Copy Link**. Installation still goes through the normal portable
+choices, plus **Copy link**. Installation still goes through the normal portable
 invite and authoritative consent flow; a directory listing is never itself an
 installation grant.
 
@@ -273,10 +273,10 @@ strict lookup for **Add App** and never expose human friendship actions.
 The application home publishes install templates at stable HTTPS URLs:
 
 ```text
-https://apps.example/applications/123/install/moderation
+https://apps.example/applications/123@apps.example/install/moderation
 ```
 
-The last path component is a signed template ID. A template defines requested
+The last path component is the template slug. A template defines requested
 scopes, intents, permissions, supported contexts, and default E2EE mode. You can
 publish separate `commands-only`, `moderation`, and `workflow` links without
 placing mutable permission bitfields in the URL. Concrete channel/category
@@ -291,21 +291,21 @@ non-authoritative UI hints.
 
 ### Guild selection across federation
 
-Opening an invite shows the application's icon, name, `APP` badge, immutable
-origin, publisher, verification state, description, and a plain-language access
-summary. The user can add it to the current guild or choose another guild they
-manage, including guilds on federated instances.
+Opening an invite shows the application's name, bot handle, home instance,
+description, and requested access. For applications that support guild installs,
+the chooser lists guilds where the user has Manage Guild or Administrator
+permission, including federated guilds. It initially selects the first available
+guild; the user can choose another before authorizing.
 
 For a remote guild, the user's home sends a signed, actor-bound install intent
 to the guild home. The guild home rechecks the user, membership, `MANAGE_GUILD`,
-template revision, and its local policies. It returns a short-lived consent
-challenge bound to the user, guild, application, grants, and expiry. The user
-confirms that exact challenge through their existing home instance. A second
-account on the guild home is not required.
+the active application and template, and its local policies before installing.
+It uses the template's current grants; the consent page does not submit a
+reviewed template revision. A second account on the guild home is not required.
 
-If the authority is offline, lacks the capability, or rejects the application,
-the client shows the specific reason and allows a later retry. The UI reports
-success only after the authoritative transaction commits.
+If installation fails, the page shows an error and allows another attempt.
+Some authority failures have a specific reason; others use a general failure
+message. The UI reports success only after the authoritative transaction commits.
 
 ### Native invite embeds
 
@@ -313,31 +313,35 @@ Plaintext bot invite links may render as Kaede-native embeds:
 
 ```text
 +----------------------------------------------------------+
-| APP AUTHORIZATION |
-| [icon] Poll Garden                       Verified |
-| 123@apps.example |
-|  |
-| Polls, reminders, and scheduled announcements. |
-| Requests: Commands, Send messages, Attach files |
-| [Details] [Add to guild] |
+| [icon]  APP AUTHORIZATION                                |
+|         Poll Garden                                      |
+|         apps.example                                     |
+|                                                          |
+| Polls, reminders, and scheduled announcements.           |
+| 3 API scopes    disabled E2EE                            |
+| [Review and add]                                         |
 +----------------------------------------------------------+
 ```
 
-Clients build this card from the verified manifest and template projection, not
-from developer HTML. Text and images are bounded and sanitized. Counts, reviews,
-and verification claims appear only when the displaying instance can verify
-them. The add button always opens guild selection or the full consent screen;
-it never installs immediately.
+Clients build this card from the resolved invite, not from developer HTML. It
+shows the bot's avatar, the application name and home domain, the template or
+application description, the number of requested API scopes, and the
+template's E2EE mode. There are no counts, reviews, or verification badges.
+**Review and add** opens the full consent page with guild selection; it never
+installs immediately.
 
 In an E2EE conversation, the server cannot inspect messages for invite links.
 The client displays a normal link and resolves a native preview only after an
 explicit action or a user-enabled preview policy. Resolution reveals the
 application ID to the relevant instance but never shares room content or keys.
 
-Deleting a template disables new installs without changing existing grants.
-Expanding a template also never expands an existing installation. Invite
-resolution is cached within bounded limits. It is rate-limited by user, source,
-application, origin, and target.
+Templates can't be edited, deleted, or disabled yet. To change what an invite
+requests, create a template with a new slug and share that link. A new template
+never expands an existing installation.
+
+Invite resolution isn't cached. The instance resolving the link allows each
+client address 30 lookups a minute. For a remote application, its home also
+limits each requesting instance to 300 manifest fetches a minute.
 
 ## Federation policy
 
@@ -350,10 +354,12 @@ Application target policy supports:
 - `blocklist`
 - `local_only`
 
-An instance operator can disable remote applications, require review, or allow
-and block exact origins and applications. The operator can also suspend an
-application, publisher, key, or origin. A guild can be stricter than its
-instance, and a worker can refuse targets that the developer does not trust.
+The developer adds `allow` or `deny` rules for exact instance domains. A `deny`
+rule applies under every policy, while `allow` rules matter only for
+`allowlist`. The application home is always allowed and can't have a rule of
+its own. Workers can further restrict their target domains. On the operator
+side, the application home's administrators can suspend a local application,
+and any operator can block a whole instance.
 
 An application-home suspension advances the application's own runtime
 generation. It may suspend non-revoked, authority-owned guild installations and
@@ -368,15 +374,19 @@ suspension. Reactivation therefore requires a fresh DM capability and any
 required participant consent, admission, and rekey; it never resurrects a
 private-conversation or media bearer. Only the application home can change the
 application authority state, and only the user home can change a user-install
-authority revision. A target operator may still deny the app locally.
+authority revision. A target operator can still block the application's home
+instance.
 
-Rules match only exact canonical HTTPS issuers or exact composite
-application IDs. Wildcard and suffix rules are not supported. An explicit
-denial or existing instance block always wins.
+Developer rules have no wildcard or suffix matching. Instance blocks match one
+domain, plus its subdomains only when the operator selects that option. A
+`deny` rule or an instance block always wins over an `allow`.
 
-Policy changes show affected installations before confirmation and suspend them
-immediately by default. Denials return a stable reason code and record the policy
-layer and matching rule.
+A policy or rule change takes effect without a confirmation step. The
+application home publishes a new runtime snapshot. Each target the change
+excludes then suspends the application's guild installations there, revokes its
+live tokens, and restores them if a later change allows that target again. An
+excluded instance can't fetch the manifest, so invites to it resolve as
+`BOT_INVITE_NOT_FOUND`.
 
 ## Authorization controls
 
@@ -452,14 +462,17 @@ scheduled-event, AutoMod, and poll families. Direct-message, reaction, typing,
 and poll families are also represented. Kaede adds `interactions` and
 `guild_tasks`, and keeps the previously published `voice_states`,
 `message_reactions`, and `guild_typing` aliases valid. `guild_members`,
-`guild_presences`, and `message_content` remain privileged.
+`guild_presences`, and `message_content` match Discord's privileged intents.
+Kaede has no separate review for them; the installation approval grants them
+like any other intent. Content and member data still need `messages.content`
+and `members.read`.
 
 A command-only guild bot normally needs only `applications.commands`,
 `interactions.respond`, and the `interactions` intent. A user install is always
 commands-only and cannot request the broader guild/runtime scopes in the list
 above. Being able to invoke a command or respond to its interaction does not
 imply access to channel content or history. A guild role cannot bypass
-privileged-intent review, an installation ceiling, operator policy, or E2EE
+an installation ceiling, operator policy, or E2EE
 consent.
 
 Guild bots do not gain ambient access to members' direct messages. A bot can
@@ -533,8 +546,8 @@ DM bootstrap.
 ## REST API
 
 Bot endpoints use `/api/v1` and reuse the existing resource schemas and business
-logic. Only handlers written to accept an `ActorPrincipal` admit a bot
-principal.
+logic. Only routes under `/api/v1/bots` and others that explicitly accept
+`BotPrincipal` admit a bot.
 
 ### Developer management
 
@@ -542,12 +555,16 @@ These routes use an authenticated human or team member session:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET/POST` | `/api/v1/developer-teams` | List or create developer teams |
+| `GET/POST` | `/api/v1/developer-teams/{team}/members` | List or add team members |
+| `PATCH/DELETE` | `/api/v1/developer-teams/{team}/members/{user}` | Change a member's role or remove them |
 | `POST` | `/api/v1/applications` | Create an application and bot user |
 | `GET` | `/api/v1/applications` | List owned or team-managed applications |
 | `GET/PATCH` | `/api/v1/applications/{app}` | Read or update application configuration |
 | `GET` | `/api/v1/applications/{app}/directory-preview` | Read the team-only product preview and readiness checklist |
-| `GET/POST` | `/api/v1/applications/{app}/credentials` | Create a named control credential |
+| `GET/POST` | `/api/v1/applications/{app}/credentials` | List or create named control credentials |
 | `DELETE` | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential |
+| `GET/POST` | `/api/v1/applications/{app}/workers` | List workers or enroll a worker public key |
 | `GET` | `/api/v1/applications/{app}/instance-rules` | List exact-domain target rules |
 | `PUT/DELETE` | `/api/v1/applications/{app}/instance-rules/{domain}` | Set or remove an exact-domain rule |
 | `GET/POST` | `/api/v1/applications/{app}/install-templates` | List or create invite templates |
@@ -577,7 +594,10 @@ label, safe prefix/suffix, timestamps, expiry, last use, and revocation state.
 | `GET` | `/api/v1/bot-invites/{app}/{template}` | Resolve the signed invite card |
 | `POST` | `/api/v1/guilds/{guild}/integrations/bots` | Confirm and commit an install |
 | `GET` | `/api/v1/guilds/{guild}/integrations/bots` | List installations |
-| `DELETE` | `/api/v1/guilds/{guild}/integrations/bots/{installation}` | Revoke immediately |
+| `PATCH` | `/api/v1/guilds/{guild}/integrations/bots/{app}` | Update channel restrictions |
+| `DELETE` | `/api/v1/guilds/{guild}/integrations/bots/{app}` | Revoke immediately |
+| `GET/POST` | `/api/v1/users/@me/application-installations` | List or create the caller's user installations |
+| `PATCH/DELETE` | `/api/v1/users/@me/application-installations/{installation}` | Narrow or revoke one user installation |
 
 Installation responses contain no worker or bot secret.
 
@@ -586,10 +606,21 @@ Installation responses contain no worker or bot secret.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/v1/bot-control/applications/{app}/workers` | Register a delegated worker public key |
-| `PUT` | `/api/v1/bot-control/applications/{app}/commands` | Publish commands from deployment tooling |
+| `PUT` | `/api/v1/bot-control/applications/{app}/commands` | Publish global commands from deployment tooling |
+| `PUT` | `/api/v1/bot-control/applications/{app}/guilds/{guild}/commands` | Publish one guild's commands from deployment tooling |
 | `DELETE` | `/api/v1/applications/{app}/workers/{worker}` | Revoke a worker and its sessions |
+| `POST` | `/api/v1/bot-workers/targets` | List the target instances that currently have installations |
+| `POST` | `/api/v1/bot-workers/home-token` | Issue a DPoP-bound token at the application home |
 | `POST` | `/api/v1/bots/token` | Issue a DPoP-bound target token |
-| `GET` | `/api/v1/bots/@me` | Read worker, installation, and target ceilings |
+| `GET` | `/api/v1/bots/@me` | Read the bot user, worker ID, and token scopes and intents at the application home |
+
+Both `/bot-workers` routes take the same signed worker assertion as
+`/bots/token` and work only at the application home. Target discovery returns
+domains, not installation lists, filtered by the target policy and the worker's
+own domain restrictions. The SDK polls it again after the interval the response
+sets, currently 30 seconds. The home token covers app-owned resources that
+don't need an installation: `/bots/@me`, application assets and emoji, DM
+capability setup, and E2EE device management.
 
 ### Resource operations
 
@@ -763,9 +794,10 @@ message access. Kaede supports:
 - Polls in channel or private interaction responses, with human voting, voter
   pagination, application finalization, and real-time updates.
 
-Commands are application-global and become available after authoritative
-registration. Each atomic command replacement increments the signed application
-command generation.
+Commands are global by default. You can also publish a separate command set
+for one guild where the application is installed. Either set becomes available
+after authoritative registration, and each atomic replacement increments the
+signed application command generation.
 
 Example command definition:
 
@@ -804,11 +836,17 @@ counts, nesting, and total bytes are bounded and validated by the authority.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET/PUT` | `/api/v1/applications/{app}/commands` | Read or atomically replace global commands |
+| `GET/PUT` | `/api/v1/applications/{app}/guilds/{guild}/commands` | Read or atomically replace one guild's commands |
+| `GET` | `/api/v1/applications/{app}/guilds/{guild}/commands/permissions` | List a guild's command permission overrides |
+| `GET/PUT` | `/api/v1/applications/{app}/guilds/{guild}/commands/{command}/permissions` | Read or replace one command's overrides in a guild |
 | `POST` | `/api/v1/bots/interactions/{interaction}/callback` | Send the one initial callback |
 | `GET/PATCH/DELETE` | `/api/v1/bots/interactions/{interaction}/responses/@original` | Read or mutate the original response |
 | `POST` | `/api/v1/bots/interactions/{interaction}/followups` | Create a follow-up |
 | `GET/PATCH/DELETE` | `/api/v1/bots/interactions/{interaction}/followups/{response_id}` | Read or mutate one follow-up by durable ID |
 | `POST` | `/api/v1/bots/interactions/{interaction}/responses/{@original\|response_id}/polls/expire` | End the exact public or private interaction poll |
+
+The command permission routes use a signed-in guild manager's session, not a
+bot token.
 
 ### Delivery
 
@@ -848,8 +886,9 @@ can still parse the `"und"` string. `guild_locale` describes the guild, remains
 independent of this preference, and is not the user's language. Changing the
 setting cannot recall language already delivered in earlier interactions.
 
-An interaction remains valid for fifteen minutes. A bot may respond
-immediately, or acknowledge it within the initial-response window and then
+An interaction token remains valid for fifteen minutes. A bot must respond or
+acknowledge within 3 seconds, or the interaction fails with
+`INTERACTION_ACK_TIMEOUT`. After acknowledging, it can
 materialize or edit the deferred original response. Callback types and response
 state transitions are validated server-side, and component callbacks are bound
 to the authoring application and current view version. E2EE responses must
@@ -902,7 +941,7 @@ target. Event frames carry a type, topic, topic sequence, and filtered payload.
 Direct-message and call events name their exact capability lineage and are
 delivered from conversation authority C, not relayed through application home
 A or installation authority B. The server retains a bounded topic backlog. A
-cursor older than that backlog receives an explicit `GAP` event instead of
+cursor older than that backlog receives an explicit `GATEWAY_GAP` event instead of
 missing data.
 
 There is no session-ID or opcode-6 Resume flow. After any disconnect, the SDK
@@ -913,11 +952,24 @@ finish, so a crash replays unfinished work. Routine DM lease renewal retains
 the capability's cursor namespace; a real authorization revision is isolated
 under a new grant-revision namespace.
 
-The authority uses close code `4009` when live authorization changes and `4408`
-for a missed heartbeat window. On `4009`, the SDK reconciles affected opaque DM
-leases at A before retrying; a terminal lease failure removes that capability.
-Each failure also dispatches `GATEWAY_ERROR` with the target and next backoff,
-without stopping healthy targets.
+The authority closes the connection with one of these codes:
+
+| Code | Reason |
+| --- | --- |
+| `4000` | The voice authority for a voice command is unavailable |
+| `4008` | Gateway command or presence update rate limit exceeded |
+| `4009` | Live authorization changed; reconnect with a fresh token |
+| `4400` | Invalid frame, cursor set, or command payload, or an unsupported opcode |
+| `4401` | Identify was missing or authentication failed |
+| `4403` | Invalid intents or E2EE device ID, or a member request without the required intent |
+| `4408` | Missed heartbeat window |
+| `4429` | The worker's Gateway session limit is reached |
+
+The SDK reconnects after every close. On `4009` it first drops cached tokens
+for that connection and reconciles affected opaque DM leases at A; a terminal
+lease failure removes that capability. Each failure also dispatches
+`GATEWAY_ERROR` with the target and next backoff, without stopping healthy
+targets.
 
 Intent selection controls delivery. Scopes and the current installation or DM
 capability control fields and actions. Message content and attachments are
@@ -930,9 +982,16 @@ carry the canonical guild context from the authorized topic, so a
 multi-instance worker doesn't have to infer the authority from a user or
 channel reference.
 
-Sessions have hard limits. Gateway session counts are atomically limited per
-worker, token expiry is checked while the connection is open, and frames are
-capped at 1 MiB. Heartbeats keep the session lease alive.
+Sessions have hard limits. Token expiry is checked while the connection is
+open, frames are capped at 1 MiB, and heartbeats keep the session lease alive.
+
+Each worker has a Gateway session limit from 1 to 16, set at enrollment.
+Enrollment defaults to 16. Each target counts the worker's open connections
+atomically, so its guild Gateway and every DM capability Gateway at that target
+share one budget. An excess connection closes with `4429`. The `/bots/token`
+response reports the limit as `session_limit`, and the Python SDK refuses extra
+connections locally with `BOT_GATEWAY_SESSION_LIMIT`. If a target omits the
+field, the SDK assumes a limit of 1.
 
 Workers may send Discord's documented app commands through each authority
 connection: opcode 3 updates the bot's status and bounded activity set, opcode
@@ -1096,7 +1155,7 @@ new key underneath an old token or reuses an old media-session ID.
 
 ## Storage model
 
-The two bot migrations add durable PostgreSQL records for:
+The bot migrations add durable PostgreSQL records for:
 
 - developer teams and members
 - applications and bot identities
@@ -1130,18 +1189,20 @@ The SDK handles target token exchange, request signing, and Gateway recovery.
 
 ## User-facing behavior
 
-User settings links to the responsive Developer Portal. Every active local user
-may create applications. The portal manages personal or shared teams, the
+User settings links to the responsive Developer Portal. Every active local human
+user may create applications. The portal manages personal or shared teams, the
 application profile and defaults, commands, and hash-only control credentials.
 It also manages worker public keys, install templates, exact instance policy
 rules, and current installations. Secrets are shown once.
 
-Portable invite links open a native consent card. The guild chooser lists only
-guilds where the user can manage the guild, including federated replicas. The
-card shows requested API scopes, Gateway intents, permission bits, E2EE
-behavior, application origin, support and privacy links, and the third-party
-retention warning. Guild settings has a separate Integrations page for
-installed bots and immediate revocation.
+Portable invite links open a Kaede authorization page. For guild installs, it
+shows requested API scopes, expandable Gateway intents and named server
+permissions, E2EE behavior, and the guild chooser described above. Applications
+that support account installs also let users choose where to use their commands
+and authorize them without adding a guild member. The page shows the application
+home, support and privacy links when supplied, and a warning that revocation
+cannot erase information already delivered to the bot operator. Guild settings
+has a separate Integrations page for installed bots and immediate revocation.
 
 Bot users have an authoritative `account_type=bot` discriminator and
 application reference. Member lists and bot-authored messages render an

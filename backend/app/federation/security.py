@@ -142,6 +142,7 @@ def _deletion_control_inbox_request(request: Request) -> bool:
         isinstance(item, dict)
         and (
             item.get("type") == "media.delete"
+            or guild_media_delete_request_ref(cast(dict[str, Any], item)) is not None
             or terminal_room_event_ref(cast(dict[str, Any], item)) is not None
         )
         for item in raw_events

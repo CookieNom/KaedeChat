@@ -12,9 +12,11 @@ app `6808771548`, and these identifiers:
 
 In Apple Developer, create one **Apple Distribution** certificate. Then create
 an **App Store Connect** provisioning profile for each of the three App IDs
-above and download all three `.mobileprovision` files. The main app profile
-must include Push Notifications and the app group; both extension profiles
-must include the same app group.
+above and download all three `.mobileprovision` files. Manual signing expects the
+exact profile names `Kaede Chat App Store`, `Kaede Broadcast Extension App Store`,
+and `Kaede Notification Service App Store`. The main app profile must include Push
+Notifications, the app group, Associated Domains, and Data Protection; both
+extension profiles must include the same app group.
 
 Export the distribution certificate and its private key together as a
 password-protected `.p12` file. Keep the `.p12`, password, profiles, and keys
@@ -68,6 +70,12 @@ In App Store Connect, create an API key allowed to upload builds. Add:
 Then add the Actions variable `IOS_TESTFLIGHT_UPLOAD_ENABLED=true`. This is a
 different key from the APNs key and should not be reused for push delivery.
 
+Only the upload step is optional. The macOS desktop build uses these same three
+secrets for notarization, and it fails without them whenever a release builds
+desktop. That holds even if iOS and TestFlight are both off. The iOS signing
+secrets from step 2 aren't used by the desktop build; macOS has its own
+Developer ID secrets, listed in [client releases](../desktop/docs/releasing.md).
+
 The TestFlight job waits up to 30 minutes for Apple to process the IPA, then
 applies the encryption answers **standard third-party encryption**, **no
 proprietary encryption**, and **not distributed in France** through the App Store
@@ -98,7 +106,7 @@ Install a TestFlight build, enable notifications, and verify:
 1. A direct message received while Kaede is terminated shows sender/message
    details and opens the correct conversation.
 2. Mentions, guild-message preferences, DND, deleted/read messages, and preview
-   privacy match Android.
+   privacy match Android, apart from iOS's generic alert for a suppressed wake.
 3. A call received while Kaede is terminated opens CallKit immediately.
 4. Answer joins the correct call with working two-way audio; decline and remote
    hang-up dismiss CallKit.

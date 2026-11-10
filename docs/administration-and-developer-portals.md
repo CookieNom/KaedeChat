@@ -22,7 +22,7 @@ Enter the **project** API key and secret, an automatic `wss://` endpoint, and th
 regional endpoints your project allows. The administration API encrypts credentials
 using the instance secret key; the saved secret is never returned. Keep the instance
 secret key with your database backups. Use **Save RTC settings**, test Automatic,
-test without hints, and test each enabled region before selecting Cinnamon as the
+**Test without latency hints**, and test each enabled region before selecting Cinnamon as the
 provider. Tests create and remove only uniquely named `kaede-rtc-test-…` rooms;
 a cleanup failure reports the exact room to remove.
 
@@ -58,13 +58,14 @@ make exec SERVICE=api COMMAND='kaede admin-grant alice --role owner'
 ```
 
 Use the same `make exec SERVICE=api COMMAND='...'` wrapper for `kaede admin-grant bob --role trust_safety`
-or `kaede admin-revoke bob --role trust_safety`. Both files are needed for a
-wizard-generated production deployment.
+or `kaede admin-revoke bob --role trust_safety`. The command reads the deployment's
+`.env`.
 
 Accepted roles are `owner`, `administrator`, `trust_safety`, `bot_reviewer`,
 `operations`, and `auditor`. The command accepts a local `username` or
-`username@this-instance`. Remote and bot accounts are rejected. Grant and revoke
-operations are idempotent and use a database advisory lock.
+`username@this-instance`. Remote and bot accounts are rejected. Granting a role
+the user already holds succeeds without change. Revoking a role they don't hold
+returns an error.
 
 Owner grants and removals remain CLI-only. An owner can delegate or revoke every
 non-owner role from the Administration page. Production instances should keep
@@ -79,11 +80,14 @@ expired or revoked grants, remote users, and bot users are rejected.
 | Role | Access |
 | --- | --- |
 | Owner | Every administration capability; CLI controlled |
-| Administrator | Operators, users, instances, bots, reports, and audit |
-| Trust & Safety | Reports, local-user state, and instance policy |
+| Administrator | Voice and video, users, instances, bots, reports, and audit; can view operators but not change them |
+| Trust & Safety | Reports, child safety, local-user state, and instance policy |
 | Bot reviewer | Bot applications and the audit log |
 | Operations | Instance policy and the audit log |
 | Auditor | Read-only reports and audit log |
+
+Every role can also read the overview, users, applications, instances, and
+operators.
 
 `GET /api/v1/administration/@me` returns the caller's roles and effective
 capabilities. The panel hides mutation controls the caller cannot use, but the
@@ -155,7 +159,7 @@ reconciliation path, so queues and replicas observe the new rule consistently.
 **Operators** lists active grants. Owners can add or revoke non-owner roles.
 Owner rows are visible but remain CLI managed.
 
-**Audit** lists recent instance actions with actor, action, target, safe
+**Audit log** lists recent instance actions with actor, action, target, safe
 metadata, and timestamp. Sensitive secrets and message bodies are not written
 to audit metadata.
 
@@ -164,15 +168,17 @@ to audit metadata.
 Users can report an accessible plaintext message from its context menu and view
 the status of their own reports at `/reports`. Categories are fixed in code:
 
+- child sexual abuse material (CSAM)
 - spam
 - harassment
 - hate
-- threats
 - sexual content
-- child safety
+- violence
+- self-harm
 - impersonation
 - privacy
-- malware or phishing
+- malware
+- illegal content
 - other
 
 When a report is submitted, the server rechecks the reporter's channel access.
@@ -187,6 +193,12 @@ stores the disclosed text, a fingerprint of the original ciphertext, and
 `server_verified=false`; moderators see that the evidence is reporter-supplied.
 Room keys, other messages, and surrounding history are never included
 automatically.
+
+A report about a message in a channel hosted on another instance is forwarded
+to that instance, and the local copy is marked `awaiting_remote`. If the remote instance
+is unavailable or rejects it, the report isn't saved and the reporter sees an
+error. CSAM reports are never forwarded. They always stay with the reporter's
+home instance for child-safety review.
 
 The Trust & Safety queue is instance-level; guild moderators do not receive it.
 Authorized staff can triage, review, request more information, record action or
@@ -216,8 +228,8 @@ of their originating instance.
 Submit the report through CyberTipline manually, then record the completed
 submission's receipt/reference, actual submission time, selected evidence and
 optional notes. This action records completion; it does not transmit anything
-to NCMEC. The retention deadline is at least one calendar year from completion
-and can be extended with a reason. Placing or releasing a hold also requires a
+to NCMEC. The retention deadline is at least one calendar year from the
+recorded submission time and can be extended with a reason. Placing or releasing a hold also requires a
 reason and is audited.
 
 Closing a case does not delete its evidence. Deletion becomes available only
@@ -240,12 +252,26 @@ The daily retention task also disposes of closed cases once these conditions hol
 | `PATCH` | `/api/v1/administration/users/{user}` | Disable or enable an account |
 | `GET` | `/api/v1/administration/applications` | List bot applications |
 | `PATCH` | `/api/v1/administration/applications/{app}` | Activate or suspend an app |
-| `GET/PATCH` | `/api/v1/administration/reports[/{report}]` | Review and update reports |
+| `PATCH` | `/api/v1/administration/applications/{app}/directory` | Approve, remove, or place an App Directory listing |
+| `GET` | `/api/v1/administration/reports` | List reports |
+| `PATCH` | `/api/v1/administration/reports/{report}` | Update a report's status and resolution |
+| `POST` | `/api/v1/administration/reports/{report}/actions` | Record an enforcement action |
+| `GET` | `/api/v1/administration/reports/{report}/attachment/{variant}` | Download preserved attachment evidence |
+| `GET` | `/api/v1/administration/reports/{report}/export` | Export a report case |
+| `POST` | `/api/v1/administration/reports/{report}/external-submissions` | Record an external report submission |
+| `GET` | `/api/v1/administration/child-safety[/{case}]` | List or read child-safety cases |
+| `POST` | `/api/v1/administration/child-safety/{case}/...` | Review, record submissions, set retention, place or release holds, and close |
+| `GET` | `/api/v1/administration/child-safety/{case}/evidence/{evidence}` | Download one preserved evidence item |
+| `DELETE` | `/api/v1/administration/child-safety/{case}/evidence` | Dispose of a case's preserved evidence |
+| `GET/PUT` | `/api/v1/administration/rtc` | Read or save voice and video settings |
+| `GET` | `/api/v1/administration/rtc/probes` | Read the latency probe endpoints |
+| `POST` | `/api/v1/administration/rtc/test` | Test an RTC configuration |
 | `GET` | `/api/v1/administration/instances/statistics` | Local footprint and delivery statistics for remote peers |
 | `GET/PUT` | `/api/v1/administration/instances/blocks` | List or create instance rules |
 | `DELETE` | `/api/v1/administration/instances/blocks/{domain}` | Remove an instance rule |
 | `GET` | `/api/v1/administration/audit` | Read recent audit events |
-| `POST` | `/api/v1/reports` | Submit a plaintext report |
+| `POST` | `/api/v1/reports` | Submit a report |
+| `POST/PUT` | `/api/v1/reports/{report}/attachment-evidence` | Reserve or commit reporter-supplied attachment evidence |
 | `GET` | `/api/v1/reports/@me` | Read the reporter-safe case view |
 
 ## Developer Portal
@@ -262,15 +288,18 @@ Developer-team roles are separate from instance-administrator roles:
 | Role | Developer access |
 | --- | --- |
 | Owner | Full team and application control |
-| Administrator | Application configuration and member management |
-| Developer | Workers and command definitions |
-| Security | Credentials, workers, and federation rules |
-| Analyst | Read-only application and installation data |
-| Support | Read-only support and installation data |
+| Administrator | Everything an owner can do except granting the owner role, changing an owner's role, or removing an owner |
+| Developer | Create applications, publish commands, create invite links, enroll workers, and manage assets and emoji |
+| Security | Control credentials, worker enrollment and revocation, and instance rules |
+| Analyst | Read-only access to applications, commands, workers, invite links, installations, and rules |
+| Support | Same read-only access as Analyst |
 
-The last owner cannot be demoted or removed. Personal teams remain single-user;
-shared teams accept federated human members and can own at most 75 active
-applications, matching Discord's developer-team capacity.
+Only owners, administrators, and Security members can see control
+credentials. Changing application settings, including scopes, intents, and
+target policy, needs an owner or administrator. The last owner cannot be
+demoted or removed. Personal teams remain single-user;
+shared teams accept federated human members. Each team, including Personal, can
+own at most 75 non-deleted applications, matching Discord's developer-team capacity.
 
 ### Applications
 
@@ -283,13 +312,19 @@ snowflakes are never decoded into usernames.
 An application page manages:
 
 - display name, description, support and privacy URLs
-- requested REST scopes, Gateway intents, permissions, and E2EE modes
+- requested REST scopes, Gateway intents, and permissions
 - scoped control credentials
 - Ed25519 worker keys and exact target-domain delegation
 - global slash and context command definitions
 - guild invite templates
 - exact-instance allow and deny rules
 - active and suspended installations
+
+The web page shows whether encrypted participation is enabled but can't change
+it. Turn on the `participant` E2EE mode from the mobile Developer Portal's
+**Encrypted interaction modes** setting or with `PATCH
+/api/v1/applications/{app}`. Guild-specific command sets aren't edited in
+either portal; publish them through the API or `Client.sync_commands(guild=...)`.
 
 Control credentials are shown once and stored as hashes. They carry only
 `workers.manage` and `commands.manage`. They cannot authenticate a user session,
@@ -342,12 +377,13 @@ User-only listings use the same consent template as guild listings, but must
 also publish an active global user-install command before the listing can claim
 user-install support. The product page also derives up to five popular global
 slash commands from authority-local use and up to three reviewed similar apps
-from category and tag overlap, and exposes **Copy Link** for its portable
+from category and tag overlap, and exposes **Copy link** for its portable
 product URL. Changing public identity, discovery metadata, install support, or
 ordered media removes the previous approval until an instance reviewer
 approves the new revision.
 
-Team members can open **Discovery Status** and **Preview App Directory** before
+Team members can open **Directory listing** to see **Discovery status** and
+**Product page preview** before
 public approval or checklist completion. The private draft preview keeps the
 same bounded identity, media, link, locale, command, and similar-app contracts,
 but permits `verified: false` and nullable incomplete product fields; it never
@@ -417,8 +453,8 @@ bounds, option counts, nesting depth, and total command-set bytes are validated.
 
 Installed slash commands appear in the channel composer. Invocations are
 permission checked by the authoritative guild home and delivered over the bot's
-direct Gateway. A bot can respond immediately or defer within the 15-minute
-interaction lifetime.
+direct Gateway. A bot must respond or defer within 3 seconds; the interaction token
+then stays valid for 15 minutes.
 
 In plaintext channels, content and history require their own scope and the
 `message_content` intent. In an E2EE channel, server-side content and history
@@ -443,8 +479,9 @@ a recipient and may retain anything the bot decrypts.
 | `DELETE` | `/api/v1/applications/{app}/credentials/{credential}` | Revoke a credential |
 | `GET/POST` | `/api/v1/applications/{app}/workers` | List or enroll workers |
 | `DELETE` | `/api/v1/applications/{app}/workers/{worker}` | Revoke a worker |
-| `GET/PUT` | `/api/v1/applications/{app}/commands` | Read or replace commands |
-| `GET/POST` | `/api/v1/applications/{app}/install-templates` | Manage invite links |
+| `GET/PUT` | `/api/v1/applications/{app}/commands` | Read or replace global commands |
+| `GET/PUT` | `/api/v1/applications/{app}/guilds/{guild}/commands` | Read or replace one guild's commands |
+| `GET/POST` | `/api/v1/applications/{app}/install-templates` | List or create invite links |
 | `GET` | `/api/v1/applications/{app}/installations` | List installations |
 | `GET` | `/api/v1/applications/{app}/instance-rules` | List exact-domain policy rules |
 | `PUT/DELETE` | `/api/v1/applications/{app}/instance-rules/{domain}` | Set or remove an exact-domain rule |
@@ -458,7 +495,8 @@ a recipient and may retain anything the bot decrypts.
 | `GET` | `/api/v1/application-directory/bot-profiles/{bot}` | Resolve a bot profile's authority-owned Add App action |
 | `GET` | `/api/v1/application-directory/{app}` | Read a reviewed application product page |
 | `POST` | `/api/v1/bot-control/applications/{app}/workers` | Enroll using a control token |
-| `PUT` | `/api/v1/bot-control/applications/{app}/commands` | Sync commands using a control token |
+| `PUT` | `/api/v1/bot-control/applications/{app}/commands` | Sync global commands using a control token |
+| `PUT` | `/api/v1/bot-control/applications/{app}/guilds/{guild}/commands` | Sync one guild's commands using a control token |
 
 See [Bot API quickstart](bot-api-quickstart.md) for the Python SDK and
 [Bot and automation API](bots-and-automations.md) for runtime routes, Gateway

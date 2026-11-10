@@ -739,8 +739,7 @@
           public_key: publicKey,
           scopes: currentApplication.default_scopes,
           intents: currentApplication.default_intents,
-          target_domains: targetDomains,
-          session_limit: 1
+          target_domains: targetDomains
         })
       });
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;

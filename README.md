@@ -273,11 +273,14 @@ configuration. For the single-server installation above, use these answers:
 | Image repository prefix | Keep `kaede.local`; no registry is contacted |
 | Storage class / capacity | `local-path` / `20Gi` per volume |
 | Image-pull Secret | Leave blank |
+| Federation admission mode | `open` |
+| Automatic updates | No for the initial installation (setup still installs a notification-only timer) |
 | Host nginx configuration | Yes |
 | Certificate and private-key paths | The two paths from step 5 |
 | Internal edge / diagnostic ports | Keep `18081` / `18082` if available |
 | Storage provider | `Bundled Garage`, or your prepared S3 provider |
-| Automatic updates | No for the initial installation |
+| Microsoft PhotoDNA matching | No, unless you hold a license |
+| Write this configuration? | Yes (this prompt defaults to No) |
 
 Choose voice/video if you opened its ports in step 1. If setup selects different
 ports because some are occupied, update your firewall/NAT rules to match the
@@ -302,8 +305,11 @@ make env-check
 make kubernetes-check
 ```
 
-Both must pass before deployment. The generated
-`deploy/generated/README.txt` records the ports and services you selected.
+`make env-check` validates your `.env`. `make kubernetes-check` tests this
+checkout's deployment code; it doesn't read your `.env` or contact your cluster.
+Both must pass before deployment, and `make deploy` then verifies the cluster
+and runs preflight. The generated `deploy/generated/README.txt` records your
+main selections and next steps.
 
 ### 7. Start Kaede and connect nginx
 
@@ -419,8 +425,9 @@ WebSockets receive a bounded grace period and then reconnect/resume; sockets
 cannot transfer between processes. Failed compatible application rollouts
 restore the previous application specifications.
 
-Schema or infrastructure changes stop unattended deployment before active
-workloads change. After a verified backup, deploy those explicitly:
+Recognized additive migrations roll out online. Other schema changes and
+infrastructure changes stop unattended deployment before active workloads
+change. After a verified backup, deploy those explicitly:
 
 ```sh
 make deploy MAINTENANCE=1

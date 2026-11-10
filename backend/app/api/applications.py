@@ -386,7 +386,7 @@ class WorkerCreate(UnambiguousInputModel):
     scopes: list[str] = Field(default_factory=list, max_length=64)
     intents: list[str] = Field(default_factory=list, max_length=32)
     target_domains: list[str] = Field(default_factory=list, max_length=100)
-    session_limit: int = Field(default=1, ge=1, le=16)
+    session_limit: int = Field(default=16, ge=1, le=16)
 
     @field_validator("scopes")
     @classmethod
@@ -1326,7 +1326,10 @@ async def add_developer_team_member(
     if payload.role == "owner" and actor.role != "owner":
         raise HTTPException(status_code=403, detail={"code": "TEAM_OWNER_REQUIRED"})
     member = await session.get(
-        DeveloperTeamMember, (team.id, team.origin_domain, user.id, user.origin_domain)
+        DeveloperTeamMember,
+        (team.id, team.origin_domain, user.id, user.origin_domain),
+        with_for_update=True,
+        populate_existing=True,
     )
     if member is None:
         member = DeveloperTeamMember(
@@ -1340,6 +1343,8 @@ async def add_developer_team_member(
         session.add(member)
     else:
         if member.role == "owner" and payload.role != "owner":
+            if actor.role != "owner":
+                raise HTTPException(status_code=403, detail={"code": "TEAM_OWNER_REQUIRED"})
             await _preserve_team_owner(session, member)
         member.role = payload.role
     await commit_developer_team_mutation(session, settings, team)
@@ -1395,11 +1400,14 @@ async def patch_developer_team_member(
         DeveloperTeamMember,
         (team.id, team.origin_domain, user_id, user_domain),
         with_for_update=True,
+        populate_existing=True,
     )
     user = await session.get(User, (user_id, user_domain))
     if member is None or user is None:
         raise HTTPException(status_code=404, detail={"code": "TEAM_MEMBER_NOT_FOUND"})
     if member.role == "owner" and payload.role != "owner":
+        if actor.role != "owner":
+            raise HTTPException(status_code=403, detail={"code": "TEAM_OWNER_REQUIRED"})
         await _preserve_team_owner(session, member)
     member.role = payload.role
     await commit_developer_team_mutation(session, settings, team)
@@ -1436,6 +1444,7 @@ async def remove_developer_team_member(
         DeveloperTeamMember,
         (team.id, team.origin_domain, user_id, user_domain),
         with_for_update=True,
+        populate_existing=True,
     )
     if member is None:
         return Response(status_code=204)
@@ -3013,6 +3022,7 @@ async def create_bot_token(
         "token_type": "Bot",
         "expires_in": max(1, int((token.expires_at - datetime.now(UTC)).total_seconds())),
         "dpop_thumbprint": thumbprint,
+        "session_limit": worker.session_limit,
         "bot_user_ref": f"{bot_user.id}@{bot_user.origin_domain}",
         **runtime_revision,
     }

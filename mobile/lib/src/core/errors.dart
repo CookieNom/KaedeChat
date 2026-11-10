@@ -227,6 +227,12 @@ final class KaedeException implements Exception {
           'Enter a username on your home server, or a full address such as cookie@kaede.chat.',
       'RELATIONSHIP_BLOCKED':
           'That action is unavailable because one of you blocked the other.',
+      'TERMS_AGREEMENT_REQUIRED':
+          'Agree to the Terms of Service and Privacy Policy to create an account.',
+      'E2EE_INSTANCE_UNAVAILABLE':
+          'A member’s server could not be reached to verify encryption support. Try again later.',
+      'E2EE_INSTANCE_UNSUPPORTED':
+          'A member’s server does not support encrypted channels yet.',
       'DM_PRIVACY_REJECTED':
           'That user’s privacy settings do not allow this direct message.',
       'CANNOT_DM_SELF': 'You cannot open a direct message with yourself.',

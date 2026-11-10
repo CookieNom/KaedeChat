@@ -34,20 +34,22 @@ headers (`libxcb1-dev`), udev, D-Bus, OpenSSL, and Clang 21 or newer for
 libwebrtc's bundled libc++. On Debian/Ubuntu, run `sudo sh desktop/install-clang.sh`
 from the repository root, then build with `CC=clang-21 CXX=clang++-21`.
 The tooling image and Linux CI jobs configure this automatically.
-Global push to talk can be unavailable on Wayland compositors that
-don't grant a global-shortcut portal. Voice activity remains available in that
-case, and the UI reports the limitation.
+Global shortcuts use the X11 backend on Linux, so Wayland sessions may not receive
+push to talk. Voice activity remains available in that case, and the UI reports
+the limitation.
 
-Windows, macOS, and Linux builds poll the latest GitHub Release for a signed
-Tauri update. Checking is automatic; installation and restart always require a
+Windows, macOS, and Linux AppImage builds poll the latest GitHub Release for a
+signed Tauri update. Checking is automatic; installation and restart always require a
 user action. The updater signature is independent of Windows Authenticode and
 Apple code signing, and all applicable signatures are required in production.
-On Linux, in-app installation only works for the AppImage build. Debian-package
-installs point the user back to their package manager instead of trying to
-overwrite a system-owned executable.
+On Linux, in-app checks and installation only work for the AppImage build. Debian
+and RPM installs don't check for updates and won't overwrite a system-owned
+executable. No apt or dnf repository is published, so download new packages from
+GitHub Releases.
 
-All platforms require an operating-system microphone permission the first time
-the user explicitly joins or tests voice. This is an OS privacy prompt, not a
+macOS and Windows may gate the microphone through operating-system privacy
+settings the first time the user explicitly joins or tests voice; Linux depends on
+the desktop session. This is an OS privacy prompt, not a
 browser device chooser. Devices can disappear or change IDs. When that happens,
 Kaede rescans and falls back to the system default with a visible status
 instead of opening an unrelated device.

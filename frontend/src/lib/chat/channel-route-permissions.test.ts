@@ -201,7 +201,7 @@ afterEach(async () => {
 });
 
 describe('live channel route permissions', () => {
-  it('keeps guild members visible when switching channels without resubscribing', async () => {
+  it('keeps guild navigation and members mounted while the next channel loads', async () => {
     guild.channels!.push({ ...guild.channels![0], id: '3', name: 'other' });
     const originalApi = network.api.getMockImplementation()!;
     network.api.mockImplementation(async (path: string, ...args: unknown[]) => {
@@ -232,12 +232,35 @@ describe('live channel route permissions', () => {
     await tick();
     expect(document.querySelector('.member-roster')?.textContent).toContain('Actor');
 
+    const navigation = document.querySelector('#guild-channel-navigation')!;
+    const channelLink = navigation.querySelector('a[aria-current="page"]')!;
+    let finishLoading!: (value: Guild) => void;
+    const pendingGuild = new Promise<Guild>((resolve) => (finishLoading = resolve));
+    network.api.mockImplementation(async (path: string, ...args: unknown[]) => {
+      if (path === root) return pendingGuild;
+      if (path === '/channels/3%40chat.example') return structuredClone(guild.channels![1]);
+      if (path === '/channels/3%40chat.example/messages') return [];
+      return originalApi(path, ...args);
+    });
+
     network.setParams({ guildId: '1@chat.example', channelId: '3@chat.example' });
     await vi.waitFor(() => expect(network.api).toHaveBeenCalledWith('/channels/3%40chat.example'));
     await tick();
+    expect(navigation.textContent).toContain('Private Guild');
+    expect(channelLink.isConnected).toBe(true);
+    expect(document.body.textContent).not.toContain('Private channel history');
+    expect(document.querySelector('textarea')?.disabled).toBe(true);
     expect(document.querySelector('.member-roster')?.textContent).toContain('Actor');
     expect(chatEntities.members.values).toHaveLength(1);
     expect(authenticatedGateway.client.subscribeMembers).toHaveBeenCalledTimes(1);
+    finishLoading(structuredClone(guild));
+    await vi.waitFor(() => expect(document.querySelector('textarea')?.disabled).toBe(false));
+    expect(channelLink.isConnected).toBe(true);
+
+    network.setParams({ guildId: '9@chat.example', channelId: '4@chat.example' });
+    await tick();
+    expect(channelLink.isConnected).toBe(false);
+    expect(navigation.textContent).not.toContain('Private Guild');
   });
 
   it('preserves the draft without reloading when the same account profile refreshes', async () => {

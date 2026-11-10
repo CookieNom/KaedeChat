@@ -122,13 +122,14 @@ as decimal strings in response JSON.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/channels/{channel}/tracker` | Fetch the complete ordered board |
-| `PATCH` | `/api/v1/channels/{channel}/tracker` | Change `key_prefix` |
+| `PATCH` | `/api/v1/channels/{channel}/tracker` | Change `key_prefix` or `custom_fields` |
 | `POST` | `/api/v1/channels/{channel}/tracker/lanes` | Create a lane |
 | `PATCH` / `DELETE` | `/api/v1/channels/{channel}/tracker/lanes/{lane}` | Edit or remove a lane |
 | `POST` | `/api/v1/channels/{channel}/tracker/lanes/{lane}/move` | Move a lane to `position` |
 | `POST` | `/api/v1/channels/{channel}/tracker/tasks` | Create a task |
 | `PATCH` / `DELETE` | `/api/v1/channels/{channel}/tracker/tasks/{task}` | Edit or remove a task |
 | `POST` | `/api/v1/channels/{channel}/tracker/tasks/{task}/move` | Move a task to `lane_id` and `position` |
+| `POST` | `/api/v1/channels/{channel}/tracker/attachments/{action}` | Upload, commit, or read task field media (`ticket`, `commit`, `read`) |
 
 Board, lane, and task mutations that target an existing resource require its
 current `version` in `If-Match`. Missing preconditions return `428`; stale
@@ -193,10 +194,11 @@ schemas, version checks, guild membership rules, and field validation as human
 clients. Configuring fields requires `tasks.manage` and `tasks.read`; task
 writes require `tasks.write`, in addition to the corresponding role permissions.
 
-Task media uses
-`POST /api/v1/bots/channels/{channel_ref}/tracker/attachments/{action}`:
+Bots reach task media through the mirrored
+`POST /api/v1/bots/channels/{channel_ref}/tracker/attachments/{action}` route.
+Human clients use the same actions without scopes:
 
-| Action | Payload | Required scopes | Result |
+| Action | Payload | Required bot scopes | Result |
 | --- | --- | --- | --- |
 | `ticket` | `filename`, `content_type`, `size` | `tasks.write`, `attachments.write` | Existing upload-ticket shape; PUT file bytes to `upload_url` |
 | `commit` | Qualified `attachment_id` | `tasks.write`, `attachments.write` | Pending attachment scan status, or `{id, name, type}` ready for a task field |

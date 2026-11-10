@@ -20,7 +20,9 @@ vault.
 
 The server still learns routing metadata: room and sender references,
 participating users and homes, timestamps, ciphertext sizes, delivery and
-download activity, and voice track kinds. E2EE also can't prevent a recipient,
+download activity, and voice track kinds. It also sees mention recipients, reply
+references, sticker and custom-emoji references, reactions and who reacted, and
+poll answer IDs, counts, and voters. E2EE also can't prevent a recipient,
 a compromised endpoint, or malicious browser code delivered by an instance from
 recording plaintext.
 
@@ -156,7 +158,9 @@ must explicitly agree after reviewing the warning card; Disagree leaves the
 conversation unencrypted. Requests expire after 24 hours. The authority stores
 consent, binds it to the participants and activation operation, and checks it
 again before activation, including for federated DMs. Group DMs and guild
-channels keep their existing activation permissions.
+channels keep their existing activation permissions. Every participant’s
+instance must advertise `e2ee-mls/1`; activation fails if an instance lacks
+support or its support cannot be verified.
 
 Once a generation becomes active, it can't return to plaintext. A user who
 wants an unencrypted conversation creates a new room. Every participating home
@@ -167,13 +171,21 @@ Messages record the immutable policy generation and epoch under which the body
 was admitted, which preserves honest pre-activation history. The database
 itself rejects encrypted bodies in plaintext rooms, plaintext bodies in
 encrypted rooms, and stale generation/epoch writes. Deletes remain possible for
-older history. Application checks cover attachments and return stable client
+older history, except that messages under child-safety review or removed by it
+can't be edited or deleted, and channels holding them can't be deleted. Application checks cover attachments and return stable client
 errors.
 
 Membership changes are MLS control operations. Removing a member or rotating an
 account identity pauses new application messages in `rekeying` until an
 authority-ordered commit excludes it. A new member receives future history by
-default. Plaintext system notices are never inserted into an encrypted room.
+default. Plaintext system notices are never inserted into an encrypted room, with
+one exception: if staff confirm a child-safety case, the authority replaces that
+message with a plaintext removal notice, and updated clients purge their decrypted
+copies. A malicious authority could misuse this signal to hide content from
+clients, but it gains no plaintext from it.
+
+An encrypted room supports at most 500 members and 48 enrolled devices. Larger
+rooms can't activate or complete a rekey.
 
 Threads are independent MLS rooms; a forum parent stores policy only and never
 shares a content key with its posts. Thread titles, tags, archive/lock state,
@@ -297,8 +309,12 @@ copied and plaintext fallback is forbidden.
 ## Reports and voluntary disclosure
 
 Reporting never uploads a room key. If a reporter chooses to share an encrypted
-message, the client sends only the selected decrypted text and minimal message
-context, after explicit confirmation. The server stores:
+message, the client sends the selected decrypted text after explicit confirmation.
+The reporter can also include up to 20 adjacent messages they confirm, and a
+decrypted copy of a selected attachment with its filename. These go to the
+moderation authority for the room, which may be another instance. A
+child-safety (`csam`) report is the exception: it stays with the reporter's
+home instance and is never forwarded. The server stores:
 
 - the reporter-supplied plaintext;
 - a SHA-256 fingerprint of the exact stored ciphertext envelope; and
@@ -306,7 +322,14 @@ context, after explicit confirmation. The server stores:
 
 Moderators must treat the evidence as user-supplied; non-repudiation must not
 be claimed. Reporting other encrypted messages requires a separate explicit
-selection, and surrounding history is never included.
+selection, and surrounding history is included only if the reporter opts in.
+
+A disclosed attachment is uploaded as plaintext, so it goes through the malware
+check, and PhotoDNA too when it's enabled. It's stored as reporter-supplied
+evidence. For a child-safety report, the authority also seals
+the message snapshot and any held attachment bytes, ciphertext included, in an
+encrypted case. Those records stay until staff close the case and retention ends,
+which is at least one year after a confirmed case's external submission.
 
 ## Files and previews
 
@@ -318,14 +341,16 @@ Encrypted files use a versioned, chunked AEAD format. The true filename, MIME
 type, dimensions, duration, plaintext hashes, and preview relationships live in
 the encrypted manifest. Server-visible metadata is limited to opaque blob IDs,
 ciphertext sizes and digest, protocol version, and availability state. Sender
-devices don't upload plaintext thumbnails or posters. Current clients show an
-explicit download action; any future preview implementation must encrypt
+devices don't upload plaintext thumbnails or posters. Files generally show an
+explicit download action. Voice messages play in the client, and ephemeral media
+is decrypted locally for display. Any future preview implementation must encrypt
 preview bytes separately and describe their relationship only inside the
 manifest.
 
 Servers authorize, quota, store, federate, cache, and delete ciphertext. They
 don't MIME-sniff, decode, derive previews, or claim to malware-scan it. Clients
-say "Encrypted — not scanned by Kaede" and warn before opening risky files.
+do not currently label encrypted files as unscanned or warn before
+opening risky files. Only open attachments from sources you trust.
 Automatic server link previews are disabled for decrypted message text; a
 future manual preview action must disclose that it reveals the URL to the
 instance.
@@ -334,7 +359,7 @@ instance.
 
 LiveKit media E2EE follows the same channel-scoped E2EE policy as messages and
 files; it isn't a separate per-call choice or a downgrade path. Encrypted text,
-announcement, and DM channels protect their new messages, their files, and any
+thread, and DM channels protect their new messages, their files, and any
 supported call associated with the channel. Encrypted voice channels protect
 microphone, camera, screen video, and screen audio at the endpoints. Media E2EE
 doesn't hide signaling, participants, timing, track types, or traffic metadata.
@@ -422,7 +447,7 @@ exporter rotation and removal, and stale media-grant rejection in web and
 mobile clients. They don't emulate a real LiveKit SFU or inspect the frame
 counters maintained inside LiveKit's web worker and native SDKs.
 
-Before media E2EE is released, the remaining external gate must run web,
+Before relying on media E2EE in a release, the remaining external gate must run web,
 desktop, Android, and iOS participants against a real SFU while exercising
 microphone, camera, screen video, and screen audio under loss, duplication,
 reordering, reconnect, and epoch rotation. It must confirm that stale or

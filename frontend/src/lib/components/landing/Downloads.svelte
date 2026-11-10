@@ -141,7 +141,9 @@
       <div class="download-options">
         <div>
           {@render download('rpm', 'Download .rpm', true)}
-          <p class="download-note">RHEL 10 / AlmaLinux 10 / Rocky Linux 10 · EPEL required</p>
+          <p class="download-note">
+            RHEL 10 / AlmaLinux 10 / Rocky Linux 10 · EPEL and CRB required
+          </p>
         </div>
         <div>
           {@render download('appimage', 'AppImage', true)}
@@ -186,7 +188,7 @@
       <article>
         <span class="download-icon">{@render deviceIcon(true)}</span>
         <h3>Android</h3>
-        <p>Take your conversations with you. Get Kaede on Google Play for automatic app updates.</p>
+        <p>Take your conversations with you. See Kaede on Google Play for Android availability.</p>
         <a
           class="primary-button"
           href="https://play.google.com/store/apps/details?id=chat.kaede.mobile"
@@ -210,8 +212,8 @@
         <span class="download-icon">{@render deviceIcon(true)}</span>
         <h3>iOS</h3>
         <p>
-          Use Kaede on your iPhone or iPad in the browser. Add it to your Home Screen for easy
-          access.
+          Use Kaede on your iPhone or iPad in the browser. You can add a shortcut to your Home
+          Screen from Safari’s Share menu. It opens the website and doesn’t work offline.
         </p>
         <a class="primary-button" href={resolve('login')}
           >Open Kaede on iOS <Icon name="chevron-right" size={18} /></a
@@ -219,8 +221,9 @@
         <details>
           <summary>Looking for the iOS app file?</summary>
           <p>
-            The IPA is for manual installation with compatible Apple signing and distribution tools.
-            It cannot be installed by simply opening it on your iPhone.
+            This IPA is signed for App Store Connect, so it won’t install on a device as published.
+            Using it requires re-signing with your own Apple developer certificate and profiles, and
+            push, calls, and app links may not work after that.
           </p>
           {@render download('ios', 'Download iOS IPA', true)}
         </details>
@@ -344,7 +347,13 @@
     font-size: clamp(2rem, 3.2vw, 2.7rem);
   }
   .download-mobile article {
+    display: grid;
+    grid-row: span 5;
+    grid-template-rows: subgrid;
     padding-right: 1.5rem;
+  }
+  .download-mobile article > a {
+    justify-self: start;
   }
   .download-mobile article:nth-child(even) {
     padding-left: 1.5rem;
@@ -408,6 +417,10 @@
     }
     .download-options {
       grid-template-columns: 1fr;
+    }
+    .download-mobile article {
+      display: block;
+      grid-row: auto;
     }
     .download-mobile {
       margin-top: 2.5rem;

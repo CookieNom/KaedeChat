@@ -133,7 +133,7 @@ Updates are source builds, not release pulls.
 
 [Tiltfile](../Tiltfile) drives a k3d cluster created by
 [deploy/kubernetes/dev.py](../deploy/kubernetes/dev.py). The cluster is K3s
-v1.36.4 in Docker, with flannel, Traefik and ServiceLB disabled, and custom
+v1.36.4 in Docker, with Traefik and ServiceLB disabled, and custom
 pod and service CIDRs ([dev.py:141-219](../deploy/kubernetes/dev.py#L141-L219)).
 Tilt calls `dev.py build-image`, imports the image into the k3d node, and live
 syncs `backend/app`, `backend/scripts`, `frontend/src`, and `frontend/static`.

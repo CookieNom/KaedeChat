@@ -3524,6 +3524,7 @@ dependencies = [
  "base64 0.22.1",
  "kaede-e2ee",
  "serde_json",
+ "sha2 0.10.9",
  "zeroize",
 ]
 

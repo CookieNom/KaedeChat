@@ -24,8 +24,8 @@ make desktop-check desktop-test
 cargo +1.97.1 run --locked --manifest-path desktop/Cargo.toml -p kaede-tauri
 ```
 
-For live frontend development, run `make desktop-dev`. Compile a release
-binary with `make desktop-build`. Installers come from the desktop release
+For live frontend development, run `make desktop-dev`. `make desktop-build` runs a
+full `tauri build`, producing bundles and updater artifacts as well as the binary. Installers come from the desktop release
 workflow and must pass the signing/notarization approval described in
 [releasing](docs/releasing.md) before publication.
 
@@ -72,9 +72,10 @@ unreadable themes use the default appearance until the file is available again.
 
 ## Security boundary
 
-The application loads only the bundled frontend. The Svelte code invokes a
+The application loads only the bundled frontend, and links to other sites open
+in your default browser. The Svelte code invokes a
 narrow command allowlist and cannot use a shell or unrestricted filesystem API.
 Access and refresh tokens remain in Rust and the operating system credential
 vault. Presigned object uploads are performed without Kaede bearer credentials.
-Turnstile uses an isolated helper window restricted to Cloudflare's challenge
-origin. See [architecture](docs/architecture.md) for the complete boundary.
+Turnstile uses an isolated helper window restricted to the home instance's
+challenge page and Cloudflare's challenge host. See [architecture](docs/architecture.md) for the complete boundary.

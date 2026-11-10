@@ -3713,6 +3713,32 @@ fn show_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<
         })
 }
 
+fn allowed_navigation(url: &url::Url, app_origin: &url::Url) -> bool {
+    url.scheme() == app_origin.scheme()
+        && url.host_str() == app_origin.host_str()
+        && url.port_or_known_default() == app_origin.port_or_known_default()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn open_external_navigation(url: &url::Url) {
+    if !matches!(url.scheme(), "http" | "https") {
+        return;
+    }
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        #[cfg(target_os = "windows")]
+        let mut command = std::process::Command::new("explorer.exe");
+        #[cfg(target_os = "macos")]
+        let mut command = std::process::Command::new("open");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let mut command = std::process::Command::new("xdg-open");
+        if let Err(error) = command.arg(url).status() {
+            tracing::warn!(%error, "could not open external link");
+        }
+    });
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     tracing_subscriber::fmt()
@@ -3863,6 +3889,19 @@ fn main() {
                     tracing::warn!(?error, "desktop session could not be restored at startup");
                 }
             });
+            let app_origin = if cfg!(dev) {
+                app.config().build.dev_url.clone()
+            } else {
+                None
+            };
+            let app_origin = match app_origin {
+                Some(origin) => origin,
+                None => url::Url::parse(if cfg!(target_os = "windows") {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                })?,
+            };
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title(format!("Kaede Chat · {}", env!("CARGO_PKG_VERSION")))
@@ -3871,9 +3910,16 @@ fn main() {
                     .resizable(true)
                     .visible(!launched_at_sign_in)
                     .center()
-                    .on_navigation(|url| {
-                        cfg!(dev)
-                            || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+                    .on_new_window(|url, _features| {
+                        open_external_navigation(&url);
+                        tauri::webview::NewWindowResponse::Deny
+                    })
+                    .on_navigation(move |url| {
+                        if allowed_navigation(url, &app_origin) {
+                            return true;
+                        }
+                        open_external_navigation(url);
+                        false
                     })
                     .build()?;
             if let Some(notice) = startup_notice.as_deref()
@@ -4938,5 +4984,28 @@ mod tests {
         assert_eq!(error.detail, serde_json::Value::Null);
         assert_eq!(error.code, "PREFERENCES_INVALID");
         assert_eq!(error.status, 0);
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::allowed_navigation;
+    #[test]
+    fn navigation_stays_on_the_bundled_origin() -> Result<(), url::ParseError> {
+        let origin = url::Url::parse("tauri://localhost")?;
+        assert!(allowed_navigation(
+            &url::Url::parse("tauri://localhost/login")?,
+            &origin
+        ));
+        for target in [
+            "https://example.org",
+            "http://localhost",
+            "tauri://localhost.evil",
+            "tauri://localhost:42",
+            "javascript:alert(1)",
+        ] {
+            assert!(!allowed_navigation(&url::Url::parse(target)?, &origin));
+        }
+        Ok(())
     }
 }

@@ -19,6 +19,7 @@ PASSWORD_KDF = {
 
 def test_username_normalization_and_email_preservation() -> None:
     payload = RegisterRequest(
+        accepted_terms=True,
         username="Maple.Leaf",
         email="USER@example.com",
         password=DERIVED_PASSWORD,
@@ -30,6 +31,7 @@ def test_username_normalization_and_email_preservation() -> None:
 
 def test_registration_schema_allows_omitting_email() -> None:
     payload = RegisterRequest(
+        accepted_terms=True,
         username="maple",
         password=DERIVED_PASSWORD,
         password_kdf=PASSWORD_KDF,
@@ -41,6 +43,7 @@ def test_registration_schema_allows_omitting_email() -> None:
 def test_registration_rejects_invalid_usernames(username: str) -> None:
     with pytest.raises(ValidationError):
         RegisterRequest(
+            accepted_terms=True,
             username=username,
             email="user@example.com",
             password=DERIVED_PASSWORD,
@@ -140,3 +143,15 @@ def test_settings_accept_system_language_without_accepting_invalid_tags() -> Non
     for invalid in ("systems", "en_US", "<script>", ""):
         with pytest.raises(ValidationError):
             SettingsPatch(locale=invalid)
+
+
+@pytest.mark.parametrize("agreement", [None, 1, "true"])
+def test_registration_rejects_ambiguous_terms_agreement(agreement) -> None:
+    payload = {
+        "username": "maple",
+        "password": DERIVED_PASSWORD,
+        "password_kdf": PASSWORD_KDF,
+        "accepted_terms": agreement,
+    }
+    with pytest.raises(ValidationError):
+        RegisterRequest.model_validate(payload)

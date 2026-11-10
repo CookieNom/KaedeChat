@@ -58,7 +58,7 @@
     },
     {
       title: $t('ui_you_have_practical_controls_824a3405'),
-      body: 'You can update your profile and preferences, delete supported messages and media, manage notifications, and export an encrypted recovery bundle.'
+      body: 'You can update your profile and preferences, delete supported messages and media or your whole account, manage notifications, and export an encrypted recovery backup.'
     }
   ]);
 </script>

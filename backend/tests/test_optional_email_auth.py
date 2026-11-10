@@ -5,6 +5,7 @@ from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.api import auth as auth_api
@@ -26,7 +27,9 @@ PASSWORD_KDF = {
 
 
 def settings(
-    *, email_backend: Literal["smtp", "mailtrap_api", "console", "disabled"] = "disabled"
+    *,
+    email_backend: Literal["smtp", "mailtrap_api", "console", "disabled"] = "disabled",
+    legal_contact_email: str | None = None,
 ) -> Settings:
     return Settings(
         domain="chat.example.com",
@@ -36,6 +39,7 @@ def settings(
         database_url="postgresql+asyncpg://kaede:secret@postgres/kaede",
         dragonfly_url="redis://dragonfly:6379/0",
         email_backend=email_backend,
+        legal_contact_email=legal_contact_email,
     )
 
 
@@ -44,6 +48,37 @@ async def test_auth_configuration_reports_disabled_email_capabilities() -> None:
     config = await auth_api.auth_configuration(settings())
     assert config["email_required"] is False
     assert config["password_recovery_enabled"] is False
+    assert config["legal_agreement_required"] is False
+
+
+@pytest.mark.asyncio
+async def test_published_policies_require_terms_agreement() -> None:
+    config = settings(legal_contact_email="legal@chat.example.com")
+    assert (await auth_api.auth_configuration(config))["legal_agreement_required"] is True
+    redis = MagicMock()
+    redis.set = AsyncMock(return_value=True)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/register",
+            "headers": [],
+            "client": ("192.0.2.1", 1234),
+        }
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await auth_api.register(
+            request,
+            RegisterRequest(username="maple", password=DERIVED_PASSWORD, password_kdf=PASSWORD_KDF),
+            MagicMock(),
+            MagicMock(),
+            config,
+            redis,
+        )
+
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "TERMS_AGREEMENT_REQUIRED"
 
 
 def test_email_less_user_does_not_require_verification() -> None:
@@ -89,6 +124,7 @@ async def test_disabled_email_registration_creates_no_delivery_intent(
     result = await auth_api.register(
         request,
         RegisterRequest(
+            accepted_terms=True,
             username="maple",
             password=DERIVED_PASSWORD,
             password_kdf=PASSWORD_KDF,

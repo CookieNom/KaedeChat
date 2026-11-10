@@ -160,7 +160,7 @@ extension DeveloperPortalRepository on KaedeRepository {
     required List<String> scopes,
     required List<String> intents,
     required List<String> targetDomains,
-    int sessionLimit = 1,
+    int? sessionLimit,
   }) async {
     await api.sendJson(
       'POST',
@@ -171,7 +171,7 @@ extension DeveloperPortalRepository on KaedeRepository {
         'scopes': scopes,
         'intents': intents,
         'target_domains': targetDomains,
-        'session_limit': sessionLimit,
+        if (sessionLimit != null) 'session_limit': sessionLimit,
       },
     );
   }

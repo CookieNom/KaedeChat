@@ -56,6 +56,7 @@ def register(
             "X-Kaede-Proxy-Secret": proxy_secret.get_secret_value(),
         },
         json={
+            "accepted_terms": True,
             "username": username,
             "email": f"{username}@example.com",
             "password": authentication_secret(PASSWORD, settings.domain, AUTH_SALT),

@@ -59,8 +59,8 @@ flutter build appbundle --release
 
 The application ID and iOS bundle ID are both `chat.kaede.mobile`.
 
-Tag-triggered GitHub Releases build a signed APK and Play AAB together with the
-desktop clients. Configure the four Android signing secrets and the official
+Tag-triggered GitHub Releases build a signed APK and Play AAB when Android or
+shared mobile files changed. Configure the four Android signing secrets and the official
 Firebase client-configuration secret listed in
 [`desktop/docs/releasing.md`](../desktop/docs/releasing.md) before pushing a
 release tag. The workflow fails instead of publishing an unsigned
@@ -157,7 +157,7 @@ orientations. Native media and background behavior need hardware tests.
 
 Mobile uses sheets and OS controls in place of desktop hover menus, tray,
 autostart, and updater settings. Developer Portal and Instance Administration
-have native screens; owner grants remain CLI-only. Interface text is currently
-English, while locale settings affect dates and localized command labels.
+have native screens; owner grants remain CLI-only. Interface text is available in
+English and Japanese. Locale settings also affect dates and localized command labels.
 Record actual device results with each release; automated tests alone do not
 establish that background calls, capture, or push work on hardware.

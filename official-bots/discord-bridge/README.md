@@ -47,8 +47,8 @@ your settings. Keep this terminal open and stay in this folder for the next step
 3. On the same page, enable **Message Content Intent** and save. This lets the
    bot read the text it needs to copy.
 4. Use the application's server installation link with the `bot` scope to add
-   it to your Discord server. Grant **View Channel** and **Send Messages** in
-   the channel you will bridge. You do not need Administrator permission or
+   it to your Discord server. Grant **View Channel**, **Send Messages**, and **Embed Links**
+   in the channel you will bridge. You do not need Administrator permission or
    slash commands. This version pairs ordinary text channels.
 
 The bot may appear offline until step 6. That is expected.

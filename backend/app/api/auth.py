@@ -301,7 +301,14 @@ async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict
         "gif_picker_enabled": settings.klipy_enabled,
         "message_search_enabled": settings.search_enabled,
         "e2ee_activation_enabled": settings.e2ee_activation_enabled,
+        "legal_agreement_required": legal_agreement_required(settings),
     }
+
+
+def legal_agreement_required(settings: Settings) -> bool:
+    # Deployment validation accepts the legal contact only with the complete
+    # operator policy configuration, so it marks published terms and privacy.
+    return settings.legal_contact_email is not None
 
 
 @router.post("/key-derivation")
@@ -449,6 +456,12 @@ async def register(
     # before spending Argon2 work or enqueueing mail.
     if not await redis.set(f"auth:register:{client_ip(request, settings)}", "1", ex=5, nx=True):
         raise auth_error("RATE_LIMITED", "Try again shortly", 429)
+    if legal_agreement_required(settings) and not payload.accepted_terms:
+        raise auth_error(
+            "TERMS_AGREEMENT_REQUIRED",
+            "Agree to the Terms of Service and Privacy Policy to create an account",
+            422,
+        )
     email_enabled = email_delivery_enabled(settings)
     if email_enabled and payload.email is None:
         raise auth_error("EMAIL_REQUIRED", "Email is required on this instance", 422)

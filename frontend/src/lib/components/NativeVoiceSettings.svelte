@@ -343,7 +343,7 @@
               disabled={saving}
               onsave={() => void save()}
             />
-            <small>{$t('ui_global_shortcuts_may_be_unavailable_under_way_546d7a8a')}</small>
+            <small>{$t('ui_global_shortcuts_use_x11_so_push_to_talk_may__da251afa')}</small>
           </div>
           <div class="form-field">
             <ShortcutRecorder

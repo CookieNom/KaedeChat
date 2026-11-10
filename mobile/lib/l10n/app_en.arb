@@ -9135,5 +9135,25 @@
   "profile_friends_days": "{days, plural, =0 {Friends for less than a day} one {Friends for {days} day} other {Friends for {days} days}}",
   "@profile_friends_days": {"placeholders": {"days": {"type": "num"}}},
   "profile_load_failed": "Could not refresh this profile. Close it and try again.",
-  "message_retrying": "Will retry automatically."
+  "message_retrying": "Will retry automatically.",
+  "ui_terms_of_service_4afa55bf": "Terms of Service",
+  "@ui_terms_of_service_4afa55bf": {
+    "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+  },
+  "ui_privacy_policy_506ff394": "Privacy Policy",
+  "@ui_privacy_policy_506ff394": {
+    "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+  },
+  "ui_i_agree_to_this_server_s_terms_of_service_and_0b72cb35": "I agree to this server’s Terms of Service and acknowledge its Privacy Policy.",
+  "@ui_i_agree_to_this_server_s_terms_of_service_and_0b72cb35": {
+    "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+  },
+  "ui_could_not_open_this_server_s_policy_1ed3947d": "Could not open this server’s policy.",
+  "@ui_could_not_open_this_server_s_policy_1ed3947d": {
+    "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+  },
+  "ui_agree_to_the_terms_of_service_and_privacy_pol_b2e2a2e4": "Agree to the Terms of Service and Privacy Policy to create an account.",
+  "@ui_agree_to_the_terms_of_service_and_privacy_pol_b2e2a2e4": {
+    "description": "Interface text in lib/src/features/auth/auth_screen.dart"
+  }
 }

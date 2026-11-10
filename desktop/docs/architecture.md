@@ -3,7 +3,8 @@
 ## Application boundary
 
 Tauri packages `frontend/build`. The main window never navigates to an
-instance or another remote site. The existing Svelte routes remain
+instance or another remote site: navigation must stay on the bundled app
+origin, and other `http`/`https` links open in the system browser. The existing Svelte routes remain
 authoritative for chat, DMs, and friends; guild management, permissions, and
 moderation; and media, calls, settings, and federation-aware UI. Platform
 calls go through the small adapter in `frontend/src/lib/platform/native.ts`,
@@ -56,9 +57,11 @@ friendly-name fallback.
 
 ## Trust controls
 
-The main CSP denies frames, objects, arbitrary scripts, and remote connections.
-All network access goes through Rust commands. Tauri capabilities expose only
-core window operations and the explicit command handler. Turnstile starts a
+The main CSP denies objects, arbitrary scripts, and remote `connect-src`, and allows
+frames only from YouTube's privacy domain and Spotify. Images and media may load
+over HTTPS; API traffic goes through Rust commands. Tauri capabilities grant the
+`core:default` set, window-title changes, and notifications, plus the explicit
+command handler. Turnstile starts a
 separate short-lived helper process/window with an unpredictable request ID and
 strict origin validation. Logs and UI errors must not contain tokens, presigned
 URLs, password material, or raw media buffers.

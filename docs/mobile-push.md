@@ -55,8 +55,9 @@ also expire if both final revocations are lost.
 After committing an eligible message projection, the recipient home writes a
 content-free wake to a durable outbox. The wake contains random request,
 delivery, route, event, and subscription values plus an expiry and HMAC. It has
-no user, sender, guild, channel, message, attachment, or notification-kind
-field.
+no user, sender, guild, channel, message, or attachment field. A `priority` value
+marks calls as `urgent`, so the relay can tell a call wake from other activity.
+On iOS, FCM and APNs can too; Android's FCM wake looks the same either way.
 
 The home signs the HTTP request with its normal Kaede federation key. The relay
 binds the subscription to that signing origin, writes the wake to its durable
@@ -88,17 +89,18 @@ private generic fallback which the Notification Service Extension replaces
 with these details. VoIP wakes are accepted only for urgent call deliveries
 and are reported to CallKit immediately.
 
-An already-used, expired, suppressed, malformed, or unauthenticated wake is
-silent. A generic local fallback appears only for an authentic wake whose home
-temporarily cannot be reached.
+On Android, an already-used, expired, suppressed, malformed, or unauthenticated
+wake is silent, and a generic local fallback appears only for an authentic wake
+whose home temporarily cannot be reached. On iOS the APNs alert has already been
+issued, so in all of these cases the extension shows its generic text instead.
 
 ## Privacy
 
 | Party | Information available |
 | --- | --- |
 | Recipient home | Account, preferences, eligible event, device binding, relay choice |
-| Relay | Verified home origin, opaque subscription/route, provider token, platform, timing, network metadata, provider result |
-| FCM/APNs | App identity, provider token/device, timing/network/delivery metadata, opaque wake fields |
+| Relay | Verified home origin, opaque subscription/route, provider token, platform, timing, network metadata, provider result. It also sees whether a wake is a call (`urgent`) or other activity (`normal`), and iOS calls use the VoIP route when one is registered. |
+| FCM/APNs | App identity, provider token/device, timing/network/delivery metadata, opaque wake fields. On iOS, a call arrives as a VoIP push or an "Incoming call" alert, and other activity as a "New activity" alert. Android wakes look the same for both. |
 | Remote sender or guild | No device, provider, or relay information |
 | Device | Details fetched from its authenticated home; E2EE plaintext only after local decryption |
 
@@ -180,14 +182,18 @@ No chat data migration or federation outage is required.
 ## Failure and abuse handling
 
 - Relay failure never rolls back a message or federation transaction.
-- A `410` disables the stale device binding; users can re-enable it in
-  settings.
+- A `410` on the ordinary route disables the stale device binding; users can
+  re-enable it in settings.
+- A `410` on the iOS VoIP route clears only that route. The device stays
+  enabled, and later calls arrive as ordinary urgent alerts until the app
+  registers a new VoIP route.
 - A `429` includes `Retry-After`; the home keeps the same idempotency key.
 - Registration and wakes are limited by source, authenticated home, strict
   payload size, and relay capacity.
-- Suspended federation origins cannot register or deliver wakes. Relay policy
-  may independently quarantine an abusive home.
-- Calls require a separate urgent lane before call push is enabled.
+- Suspended federation origins cannot register or deliver wakes. Operators can
+  suspend an abusive home through federation policy.
+- Calls use `urgent` priority and, on iOS, a separate VoIP route. They share the
+  same queues.
 - Metrics use aggregate/status labels rather than unbounded home domains.
 
 Monitor home outbox age, relay queue age, provider status, invalid-token rates,
@@ -209,8 +215,8 @@ metadata boundary, and provides a per-account background-delivery control.
 Disabling it unregisters the home binding. The app remains fully usable and
 receives gateway alerts while open.
 
-The diagnostic view should show distribution channel, package/bundle ID, home,
-push transport, relay/provider host, and connection state. It must never show a
+After a setup failure, settings can copy diagnostics with the platform, transport,
+failed step, and error code. They must never show a
 provider token, subscription, grant, HMAC, or management secret.
 
 ## Collecting mobile debug logs

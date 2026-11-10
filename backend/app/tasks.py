@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import httpx
+import structlog
 from redis.asyncio import Redis
 from sqlalchemy import and_, case, delete, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -214,6 +215,7 @@ from app.voice.rooms import parse_room_name
 from app.voice.stage_lifecycle import advance_stage_instance_lifecycle
 
 configure_logging(os.environ.get("KAEDE_LOG_LEVEL", "INFO"))
+log = structlog.get_logger()
 broker_url = os.environ.get("KAEDE_DRAGONFLY_URL")
 if not broker_url:
     raise RuntimeError("KAEDE_DRAGONFLY_URL is required for Taskiq")
@@ -1934,6 +1936,12 @@ async def federation_history_sync(guild_id: int, guild_domain: str, user_id: int
                     tombstone_delivery_wakes=history_tombstone_wakes,
                 )
             except Exception as caught:
+                log.exception(
+                    "guild_history_sync_failed",
+                    guild_id=guild_id,
+                    guild_domain=guild_domain,
+                    user_id=user_id,
+                )
                 for destination in sorted(history_tombstone_wakes):
                     await enqueue_best_effort(federation_deliver, destination)
                 exc = user_facing_history_error(caught)

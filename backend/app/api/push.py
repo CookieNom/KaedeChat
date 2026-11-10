@@ -27,6 +27,7 @@ from app.api.dependencies import (
 from app.auth.security import encrypt_secret
 from app.chat.payloads import public_user_display_name
 from app.chat.permissions import get_permissions
+from app.chat.privacy import blocked_between
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
 from app.core.task_wake import enqueue_best_effort
@@ -879,7 +880,7 @@ async def redeem_push_notification(
             return await _suppress_push(redis, body.event_token, encoded)
 
     author = await session.get(User, (message.author_id, message.author_domain))
-    if author is None:
+    if author is None or await blocked_between(session, auth.user, author):
         return await _suppress_push(redis, body.event_token, encoded)
     has_attachment = bool(
         await session.scalar(

@@ -11,7 +11,7 @@ import secrets
 import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
@@ -1702,6 +1702,8 @@ class Client:
         self._stopping = False
         self._sockets: set[Any] = set()
         self._gateway_sockets: dict[str, Any] = {}
+        self._gateway_session_limits: dict[str, int] = {}
+        self._gateway_session_counts: dict[str, int] = defaultdict(int)
         self._cursor_lock = asyncio.Lock()
         self._gateway_tasks: dict[str, asyncio.Task[None]] = {}
         self._dm_gateway_tasks: dict[_DMCapabilityKey, asyncio.Task[None]] = {}
@@ -3186,6 +3188,13 @@ class Client:
                 "BOT_TOKEN_RESPONSE_INVALID",
                 "Target returned an invalid bot token",
             ) from exc
+        session_limit = data.get("session_limit", 1)
+        if type(session_limit) is not int or not 1 <= session_limit <= 16:
+            raise ApiError(
+                502, "BOT_TOKEN_RESPONSE_INVALID", "Invalid gateway session limit"
+            )
+        if not application_home:
+            self._gateway_session_limits[origin] = session_limit
         actor_metadata_fields = {
             "bot_user_ref",
             "worker_generation",
@@ -14675,6 +14684,22 @@ class Client:
             f"{target}#dm-capability:{dm_capability.grant_id}:{dm_capability.revision}"
         )
 
+    @asynccontextmanager
+    async def _gateway_session(self, target: str) -> AsyncIterator[None]:
+        if self._gateway_session_counts[target] >= self._gateway_session_limits.get(
+            target, 1
+        ):
+            raise ApiError(
+                429,
+                "BOT_GATEWAY_SESSION_LIMIT",
+                "This worker has reached its gateway session limit",
+            )
+        self._gateway_session_counts[target] += 1
+        try:
+            yield
+        finally:
+            self._gateway_session_counts[target] -= 1
+
     async def _gateway_once(
         self,
         target: str,
@@ -14705,7 +14730,10 @@ class Client:
         cursor_key = self._gateway_cursor_key(target, dm_capability)
         parsed = urlsplit(target)
         uri = f"wss://{parsed.netloc}/api/v1/bots/gateway"
-        async with connect(uri, max_size=1_048_576, open_timeout=15) as socket:
+        async with (
+            self._gateway_session(target),
+            connect(uri, max_size=1_048_576, open_timeout=15) as socket,
+        ):
             self._sockets.add(socket)
             if dm_capability is None:
                 self._gateway_sockets[target] = socket

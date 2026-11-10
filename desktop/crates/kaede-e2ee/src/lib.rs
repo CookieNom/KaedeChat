@@ -137,6 +137,23 @@ impl MlsClient {
         Ok(Self { provider, identity })
     }
 
+    /// Generate an identity whose credential depends on its public signing key.
+    ///
+    /// # Errors
+    /// Returns an error when key generation or credential validation fails.
+    pub fn generate_with_credential(
+        credential: impl FnOnce(&[u8]) -> Vec<u8>,
+    ) -> Result<Self, MlsError> {
+        let mut client = Self::generate(b"pending")?;
+        let value = credential(client.identity.public_identity_key());
+        if value.is_empty() || value.len() > 16_384 {
+            return Err(MlsError::Identity("credential length is invalid".into()));
+        }
+        client.identity.credential.credential = BasicCredential::new(value.clone()).into();
+        client.identity.credential_identity = value;
+        Ok(client)
+    }
+
     /// Restore client state after the host has authenticated and decrypted it.
     ///
     /// Callers must treat both the input and the value returned by

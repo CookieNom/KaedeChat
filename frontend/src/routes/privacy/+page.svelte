@@ -34,7 +34,7 @@
       <ul>
         <li>
           <strong>{$t('ui_account_details_36f70a76')}</strong>
-          {$t('ui_your_username_or_handle_your_email_address_if_feddbfed')}
+          {$t('ui_your_username_or_handle_your_email_address_if_bae43ef4')}
         </li>
         <li>
           <strong>{$t('ui_content_you_share_759ea677')}</strong>
@@ -44,6 +44,10 @@
           <strong>{$t('ui_service_and_operational_data_4216e4e4')}</strong>
           {$t('ui_guild_and_conversation_membership_contacts_pe_7874f0c0')}
         </li>
+        <li>
+          <strong>{$t('ui_support_requests_27146d5e')}</strong>
+          {$t('ui_if_you_use_the_support_form_we_receive_the_em_6cba3148')}
+        </li>
       </ul>
     </section>
 
@@ -52,6 +56,7 @@
       <ul>
         <li>{$t('ui_to_provide_the_chat_service_and_keep_it_worki_8f8054ab')}</li>
         <li>{$t('ui_to_secure_the_instance_and_investigate_abuse__def65a9e')}</li>
+        <li>{$t('ui_to_detect_malware_and_known_child_sexual_abus_673d772f')}</li>
         <li>
           {$t('ui_to_enforce_the_a3de79a8')}
           <a href={resolve('terms')}>{$t('ui_terms_of_service_529f0e5f')}</a>
@@ -62,28 +67,39 @@
     </section>
 
     <section>
-      <h2>{$t('ui_5_federation_and_other_instances_f426d353')}</h2>
+      <h2>{$t('ui_5_federation_bots_and_integrations_4c4cd404')}</h2>
       <p>{$t('ui_kaede_federates_when_you_interact_with_member_3a5fe556')}</p>
+      <p>{$t('ui_bots_apps_and_bridges_that_you_or_a_community_2ad63282')}</p>
     </section>
 
     <section>
-      <h2>{$t('ui_6_service_providers_and_external_requests_7a19e267')}</h2>
+      <h2>{$t('ui_6_safety_checks_reports_and_end_to_end_encryp_cade2c83')}</h2>
+      <p>{$t('ui_files_uploaded_outside_end_to_end_encrypted_r_078146b4')}</p>
+      <p>{$t('ui_in_an_end_to_end_encrypted_room_your_device_e_d093d607')}</p>
+      <p>{$t('ui_anyone_who_can_see_a_message_can_report_it_re_46b3d8ed')}</p>
+      <p>{$t('ui_reports_usually_go_to_the_staff_of_the_instan_dbbba7fa')}</p>
+      <p>{$t('ui_if_staff_confirm_child_sexual_abuse_material__7db27d27')}</p>
+      <p>{$t('ui_for_each_case_we_keep_an_encrypted_record_of__f1e9680a')}</p>
+    </section>
+
+    <section>
+      <h2>{$t('ui_7_service_providers_and_external_requests_ca9f51e9')}</h2>
       <p>{$t('ui_the_instance_may_use_separate_providers_for_h_86d840d6')}</p>
     </section>
 
     <section>
-      <h2>{$t('ui_7_retention_3b934ff9')}</h2>
-      <p>{$t('ui_account_records_and_content_normally_remain_u_a6bafc67')}</p>
+      <h2>{$t('ui_8_retention_ad366add')}</h2>
+      <p>{$t('ui_account_records_and_content_normally_remain_u_956f90f7')}</p>
     </section>
 
     <section>
-      <h2>{$t('ui_8_your_choices_bcbc4137')}</h2>
+      <h2>{$t('ui_9_your_choices_e658c970')}</h2>
       <ul>
         <li>{$t('ui_you_may_update_supported_profile_and_account__08169800')}</li>
-        <li>{$t('ui_you_may_delete_supported_messages_and_account_d97556a9')}</li>
+        <li>{$t('ui_in_settings_you_can_delete_all_your_content_o_dc761658')}</li>
         <li>{$t('ui_you_may_export_a_protected_recovery_bundle_fo_56584c58')}</li>
         <li>
-          {$t('ui_to_make_a_privacy_request_or_ask_us_to_disabl_dce3ab47')}
+          {$t('ui_for_other_privacy_requests_or_to_ask_us_to_di_9aa3d673')}
           <a href={`mailto:${operatorLegalConfig.contactEmail}`}
             >{operatorLegalConfig.contactEmail}</a
           >.
@@ -93,17 +109,17 @@
     </section>
 
     <section>
-      <h2>{$t('ui_9_security_f5481c62')}</h2>
+      <h2>{$t('ui_10_security_67a39824')}</h2>
       <p>{$t('ui_kaede_supports_encrypted_network_connections__057a2d87')}</p>
     </section>
 
     <section>
-      <h2>{$t('ui_10_browser_storage_and_external_content_58af706a')}</h2>
-      <p>{$t('ui_the_web_app_uses_http_only_authentication_coo_fb093339')}</p>
+      <h2>{$t('ui_11_device_storage_and_external_content_af604b6b')}</h2>
+      <p>{$t('ui_the_web_app_uses_http_only_authentication_coo_dc754f17')}</p>
     </section>
 
     <section>
-      <h2>{$t('ui_11_children_ab1f169a')}</h2>
+      <h2>{$t('ui_12_children_144dca55')}</h2>
       <p>
         {$t('ui_the_instance_is_not_directed_at_children_unde_2f062f32', {
           value0: String(operatorLegalConfig.minimumAge)
@@ -112,12 +128,12 @@
     </section>
 
     <section>
-      <h2>{$t('ui_12_changes_to_this_policy_9cabc45e')}</h2>
+      <h2>{$t('ui_13_changes_to_this_policy_19939ee3')}</h2>
       <p>{$t('ui_we_may_update_this_policy_as_the_service_or_i_96756c85')}</p>
     </section>
 
     <section>
-      <h2>{$t('ui_13_contact_6307b59e')}</h2>
+      <h2>{$t('ui_14_contact_d0a4f857')}</h2>
       <p>
         {$t('ui_for_privacy_questions_requests_or_to_exercise_bbcedb05')}
         <a href={`mailto:${operatorLegalConfig.contactEmail}`}>{operatorLegalConfig.contactEmail}</a

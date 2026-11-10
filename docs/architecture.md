@@ -49,16 +49,17 @@ configuration for the host-level nginx service.
 The internal edge routes REST, media authorization, federation, and well-known
 requests to the API, and `/gateway` to gateway replicas. Everything else goes
 to an atomically switched static-SPA release. `/livekit` returns 404 unless the
-operator sets `KAEDE_VOICE_ENABLED=true`. The `voice` profile also refuses to
-start unless that switch is true; once it is, the edge proxies the route
-through the Docker host gateway to the host-networked SFU. The immediately
+operator sets `KAEDE_VOICE_ENABLED=true`. Once it is, the edge proxies the route
+to the host-networked LiveKit service. The immediately
 previous SPA release is retained so already-loaded pages can still fetch their
 hashed chunks during a rollout. Garage objects are reachable only through
-presigned requests on `media.<domain>`; external S3 mode redirects to signed
-URLs at the configured HTTPS provider origin. Edge and data bridges are
-internal. PostgreSQL and password-protected Dragonfly stay on the data bridge,
-and only services that need outbound federation or update traffic join the
-egress bridge.
+presigned requests on `media.<domain>`. Before a read reaches Garage, the edge
+asks the API to recheck that object against current safety state, and it
+returns 404 for any `evidence/` path. Read responses are marked
+`private, no-store`. External S3 mode redirects to signed URLs at the
+configured HTTPS provider origin, so those reads don't pass through the edge
+check. Kubernetes NetworkPolicy keeps PostgreSQL and password-protected
+Dragonfly private and limits outbound traffic to the services that need it.
 
 The static frontend carries a SvelteKit-generated hash CSP for its
 build-specific inline bootstrap. The edge keeps header-only protections such as
@@ -109,8 +110,12 @@ Background work runs on Taskiq workers over Redis Streams. They handle email
 delivery, federation draining, and media scanning/derivation, plus the periodic
 cleanup jobs: account and federation retention, unverified-account cleanup,
 partition creation, message cursor and mention projections, upload-orphan
-cleanup, remote-cache eviction, media retention, deletion purge, and cache
-warmup. A leader-elected API coordinator runs the fast loops: voice permission
+cleanup, remote-cache eviction, media retention, and deletion purge. Three
+safety jobs run alongside them. Every minute, one copies buffered child-safety
+evidence into storage and another retries removal for confirmed cases. A daily
+job disposes of evidence once a closed case is past retention and has no
+active hold. Cache warmup isn't scheduled; gateway processes run it at startup
+and again whenever the cache stops being ready. A leader-elected API coordinator runs the fast loops: voice permission
 enforcement every five seconds, federation heartbeats every 30 seconds, and
 LiveKit reconciliation every 60 seconds. Scheduled Taskiq jobs remain separate
 from workers.
@@ -175,10 +180,11 @@ Originals stay unavailable until clean; infected and deleted objects are
 removed and their accounting released.
 
 Local message reads authorize against current channel access before issuing a
-short-cache private redirect. Immutable profile/guild/emoji assets are
-addressed by clean content hash. Remote reads reconstruct one fixed federation
-path through the DNS-pinning client, authorize the requesting peer at the
-origin, and re-scan at the consuming instance before a bounded local S3 cache
+`private, no-store` redirect to a 60-second signed link. Immutable
+profile/guild/emoji assets are addressed by clean content hash. Their
+redirects may be cached publicly for 60 seconds and point to a five-minute
+signed link. Remote reads reconstruct one fixed federation path through the
+DNS-pinning client, authorize the requesting peer at the origin, and re-scan at the consuming instance before a bounded local S3 cache
 insert. LRU/TTL jobs and origin-authenticated `media.delete` tombstones bound
 and invalidate that cache.
 
@@ -221,10 +227,10 @@ two independently owned rows; no remote instance can retain local friendship
 privileges after local removal or blocking.
 
 Task tracker boards, lanes, tasks, and creation nonces are normalized local
-guild-authority data. They cascade with their type-17 channel and are not
-accepted by a replica; remote mutations fail closed until a tracker
-snapshot/event capability is added to Kaede Fed. The local API and storage
-contract is documented in [Task tracker channels](task-tracker.md).
+guild-authority data. They cascade with their type-17 channel. Replicas serve a
+bounded cache hydrated from signed snapshots, and human writes route to the guild
+home. The API and storage contract is documented in
+[Task tracker channels](task-tracker.md).
 
 Messages use monthly range partitions keyed by the timestamp-bearing snowflake.
 History reads include a lower ID floor so PostgreSQL can prune partitions even
@@ -235,11 +241,11 @@ only server mute/deafen flags persist.
 
 PostgreSQL remains authoritative for messages and permissions. A durable SQL
 desired-state queue projects only eligible plaintext messages into a private
-Meilisearch index on the same deployment network. Message, attachment, pin, and
-channel-encryption changes enqueue replacement or deletion work. Search treats
-the engine as an untrusted, rebuildable candidate generator: every hit is
-loaded from SQL, and its current channel access is checked again before it
-reaches a client. Search outages never block message delivery. A replaced index
+Meilisearch index on the same deployment network. Message, attachment,
+reaction, pin, and channel-encryption changes enqueue replacement or deletion
+work. Search treats the engine as an untrusted, rebuildable candidate
+generator: every hit is loaded from SQL, and its current channel access is
+checked again before it reaches a client. Search outages never block message delivery. A replaced index
 can be repopulated online with `make search-rebuild`.
 
 Federated search never joins Meilisearch clusters or shares a master key. A
@@ -271,11 +277,11 @@ replication path accept a bounded, versioned `e2ee` envelope instead of
 plaintext. Plaintext and encrypted bodies are mutually exclusive, and deleted
 messages discard either representation. Version 2 is the Kaede MLS 1.0
 application envelope; version 1 remains legacy opaque transport and is never
-presented as MLS encryption. Instances advertise storage and relay support as
-`e2ee-transport/1`, while device and encrypted-media capabilities are negotiated
-separately.
+presented as MLS encryption. Instances advertise the MLS and encrypted-media
+extensions as `e2ee-mls/1` and `e2ee-media/1`.
 
-Each device has a proof-of-possession identity and one-use MLS KeyPackages. MLS
+Each account has one active proof-of-possession encryption identity and one-use
+MLS KeyPackages. MLS
 authenticated data canonically binds: the composite channel reference and
 group, the policy generation and epoch, the sender device, the operation and
 edit target, and the encrypted attachment manifest digest. The MLS credential
@@ -295,11 +301,13 @@ moderation, and plaintext mention extraction, unless clients provide a
 separately designed privacy-preserving projection. None of those server
 features is a prerequisite for accepting an opaque envelope, so the present
 architecture does not force future encrypted rooms to reveal content.
-Notification text, mention recipients, link metadata, thumbnails, filenames,
+Notification text, link metadata, thumbnails, filenames,
 and attachment dimensions are projections too. Encrypted-room clients omit or
 encrypt them unless the user chooses to disclose selected content. Servers
 still learn routing metadata: the participating instances, composite room and
-sender references, timestamps, ciphertext sizes, and delivery activity. Padding
+sender references, timestamps, ciphertext sizes, and delivery activity. They also
+see mention recipients, reply references, sticker and custom-emoji references,
+reactions and who reacted, and poll answer IDs, counts, and voters. Padding
 and traffic analysis resistance are outside the current transport capability.
 
 ## Security invariants
@@ -317,7 +325,8 @@ and traffic analysis resistance are outside the current transport capability.
 - Key rotation retains old verification keys, and event envelopes are
   independently signed, so stored events remain auditable.
 - Originals are private, uploads are exact-length scoped, and neither local nor
-  remote bytes are served before local magic validation and malware scanning.
+  remote plaintext bytes are served before local magic validation and malware
+  scanning. E2EE ciphertext is served unscanned.
 
 ## Version 1 scope
 
@@ -328,7 +337,8 @@ operational controls.
 Public, private, and announcement threads and forum posts share the channel
 and message APIs. Compressed gateway encoding is not currently implemented. MLS 1.0
 messaging, encrypted attachments, recovery, and LiveKit frame encryption ship
-behind the operator activation gate documented in `docs/e2ee.md`.
+enabled by default. Operators can block new activations with
+`KAEDE_E2EE_ACTIVATION_ENABLED=false`, as `docs/e2ee.md` describes.
 The mobile clients use the same home-instance API and gateway boundary as the
 web and desktop clients; they never call peer federation endpoints directly.
 
@@ -344,7 +354,8 @@ with one admitted operation per API process.
 Browser sessions use HttpOnly `kc_access` and `kc_refresh` cookies. Cookie-based
 writes require `X-Kaede-Client: web`. Native clients receive body tokens and
 send `Authorization: Bearer`; an explicit bearer takes precedence over cookies.
-Refresh tokens rotate, and reuse revokes that session's access tokens. MFA uses
+Refresh tokens rotate. Reusing a superseded token after a short grace window (60
+seconds by default) revokes that session's access tokens. MFA uses
 TOTP and single-use recovery codes. MFA changes require reauthentication and
 revoke other sessions. Email messages use an encrypted transactional outbox;
 the console email backend is development-only.
@@ -422,12 +433,16 @@ but cannot replace the clean object. Staging cleanup waits more than 16 minutes
 past PUT expiry; third-party upload clients must cap request duration at
 15 minutes too.
 
-Optional PhotoDNA checks plaintext images before promotion. A match produces a
-metadata-only report and quarantines the upload. Decoder or local policy
-rejections remove that upload without permanently blocking its digest;
-cross-upload digest revocation is reserved for affirmative malware or PhotoDNA
-matches. E2EE attachments contain only ciphertext and bypass content scanning;
-clients must make that tradeoff clear before encryption is activated.
+Optional PhotoDNA checks plaintext images before promotion. On a match, delivery
+is blocked, the exact scanned bytes are encrypted and verified under `evidence/`
+in the attachments bucket, and staff review the case to confirm removal or dismiss
+the finding. If storage is unavailable, the encrypted bytes wait in PostgreSQL
+until the per-minute evidence job copies them out. Dismissal releases held
+content through normal processing; tombstones and digest revocation start only
+on confirmation. A confirmed removal that can't finish is retried every minute.
+Decoder or local policy rejections remove that upload without permanently
+blocking its digest. E2EE attachments contain only ciphertext and bypass content
+scanning; clients must make that tradeoff clear before encryption is activated.
 
 Media reads recheck channel access. Remote fetches use signed fixed federation
 paths, validate and scan bytes locally, and obey cache and concurrency limits.
