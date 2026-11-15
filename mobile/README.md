@@ -33,7 +33,7 @@ flutter test
 Before `flutter run` or `flutter build`, install this revision's patched WebRTC
 artifacts in `native/webrtc`. Download the native artifact from CI, or build it
 with `python3 tool/build_webrtc.py android --work-dir /tmp/kaede-webrtc-android`
-on Linux (`ios` on macOS). See [the AV1 build notes](../docs/av1-e2ee/README.md#mobile-native-builds-and-rollout)
+on Linux (`ios` on macOS). See [the native codec build notes](../docs/av1-e2ee/README.md#mobile-native-artifacts)
 for extraction instructions and prerequisites. The stock native library cannot
 process Kaede's encrypted AV1 format. CI and release builds use the same artifacts.
 

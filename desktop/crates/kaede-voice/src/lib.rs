@@ -35,7 +35,9 @@ use livekit::{
         EncryptionType,
         key_provider::{KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions},
     },
-    options::{AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoding},
+    options::{
+        AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoding, compute_video_encodings,
+    },
     prelude::{
         DataPacket, DataPacketKind, DisconnectReason, LocalAudioTrack, LocalParticipant,
         LocalTrack, LocalVideoTrack, Participant, RemoteTrack, Room, RoomEvent, RoomOptions,
@@ -49,6 +51,7 @@ use livekit::{
             CaptureError, DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
             DesktopFrame,
         },
+        rtp_parameters::RtpEncodingParameters,
         video_frame::{I420Buffer, VideoFormatType, VideoFrame, VideoRotation},
         video_source::{RtcVideoSource, VideoResolution, native::NativeVideoSource},
         video_stream::native::NativeVideoStream,
@@ -945,14 +948,24 @@ async fn run_room(
     let mut subscriptions = BTreeSet::new();
     let mut video_visible = true;
     let mut budget = VideoBudget::default();
+    let mut upload = UploadPressure::default();
+    let mut encode_headroom = EncodeHeadroom::default();
+    let send_budget = Arc::new(tokio::sync::Mutex::new(VideoSendBudget::default()));
+    let variant_backoff = Arc::new(Mutex::new(VideoBackoff::default()));
+    let mut first_seen: BTreeMap<String, Instant> = BTreeMap::new();
+    let (mut force_announce, mut last_announced, mut last_announce_at) =
+        (true, Vec::new(), None::<Instant>);
+    // Per published track: first sample time and consecutive software encodes.
+    let publisher_tracks = Arc::new(Mutex::new(BTreeMap::<String, (Instant, u8)>::new()));
     let mut video_peers: BTreeMap<String, VideoPeer> = BTreeMap::new();
     let publisher_samples = Arc::new(Mutex::new(
         BTreeMap::<String, (u32, f64, std::time::Instant)>::new(),
     ));
     let receiver_health = Arc::new(Mutex::new(BTreeMap::<String, ReceiverHealth>::new()));
-    let (performance_tx, mut performance_rx) = mpsc::channel(1);
+    let (performance_tx, mut performance_rx) = mpsc::channel::<PerformanceReport>(1);
     let mut performance_job: Option<JoinHandle<()>> = None;
-    let mut capability_tick = time::interval(Duration::from_secs(10));
+    native_video_probe::warm_hevc_decode();
+    let mut capability_tick = time::interval(video_policy::SAMPLE);
     capability_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut video_readers: BTreeMap<(String, bool), (String, JoinHandle<()>)> = BTreeMap::new();
     capture_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -988,47 +1001,113 @@ async fn run_room(
                 });
             }
             report = performance_rx.recv() => {
-                if let Some((cpu, bandwidth, observed)) = report {
-                    if camera.is_none() && screen_share.is_none() { budget = VideoBudget::default(); }
-                    if observed && budget.observe(cpu, bandwidth) {
-                        for video in [camera.as_mut(), screen_share.as_mut()].into_iter().flatten() {
-                            if video.adjustment.as_ref().is_some_and(|task| !task.is_finished()) { continue; }
-                            video.adjustment = Some(adjust_video_budget(&room, video, budget.level, cpu));
-                        }
+                if let Some(report) = report {
+                    let now = Instant::now();
+                    if camera.is_none() && screen_share.is_none() {
+                        budget = VideoBudget::default();
+                        upload = UploadPressure::default();
+                        encode_headroom = EncodeHeadroom::default();
+                    } else {
+                        encode_headroom.observe(report.encode_load, report.cpu, now);
                     }
-                    if !observed { budget.bad = 0; budget.healthy = 0; }
+                    if report.observed {
+                        // Capture threads read the level per frame: adapting never
+                        // republishes, so viewers see no interruption.
+                        budget.observe(report.cpu);
+                        upload.observe(report.bandwidth);
+                    } else {
+                        budget.bad = 0;
+                        budget.healthy = 0;
+                    }
+                    for video in [camera.as_mut(), screen_share.as_mut()].into_iter().flatten() {
+                        video.capture_level.store(u32::from(budget.level), Ordering::Release);
+                        if report.software_variants.is_empty() || video.adjustment.is_some() { continue; }
+                        let Ok(mut tracks) = video.variants.lock() else { continue };
+                        let (software, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *tracks).into_iter().partition(|track| report.software_variants.contains(&track.name()));
+                        *tracks = kept;
+                        drop(tracks);
+                        if software.is_empty() { continue; }
+                        // A "hardware" variant that encodes in software costs CPU and
+                        // brings nothing over the VP8 base: retire it and back off.
+                        if let Ok(mut backoff) = variant_backoff.lock() {
+                            for track in &software {
+                                if let Some(codec) = track.name().rsplit(':').next() { backoff.fail(&variant_key(video, codec), now); }
+                            }
+                        }
+                        let participant = room.local_participant();
+                        let variants = video.variants.clone();
+                        let send_budget = video.send_budget.clone();
+                        video.adjustment = Some(tokio::spawn(async move {
+                            for variant in software {
+                                if unpublish_budgeted_video(&participant, &variant, &send_budget).await.is_err()
+                                    && let Ok(mut tracks) = variants.lock()
+                                { tracks.push(variant); }
+                            }
+                            None
+                        }));
+                    }
                     let receiver_degraded = receiver_health.lock().is_ok_and(|states| states.values().any(|state| matches!(state.health, "decode" | "download")));
-                    video_degraded.store(budget.level > 0 || receiver_degraded, Ordering::Release);
+                    video_degraded.store(budget.level > 0 || upload.constrained || receiver_degraded, Ordering::Release);
                 }
             }
             _ = capability_tick.tick() => {
+                native_video_probe::retry_hevc_decode();
+                if let Ok(mut limits) = send_budget.try_lock() {
+                    limits.level = budget.level;
+                    limits.apply(None);
+                }
+                let now = Instant::now();
+                let participant_count = room.remote_participants().len();
+                let identities: Vec<String> = room.remote_participants().keys().map(ToString::to_string).collect();
+                first_seen.retain(|identity, _| identities.contains(identity));
+                for identity in &identities { first_seen.entry(identity.clone()).or_insert(now); }
+                // Hold premium changes during hint grace, while restoring VP8 for unknown viewers.
+                let pending = first_seen.iter().any(|(identity, seen)| !video_peers.contains_key(identity) && now.duration_since(*seen) < video_policy::HINT_GRACE);
                 for video in [camera.as_mut(), screen_share.as_mut()].into_iter().flatten() {
-                    let demand_key = format!("{}/{}", local_identity, if video.source == TrackSource::Screenshare { "screen_share" } else { "camera" });
-                    let desired = preferred_native_variant(&video_peers, room.remote_participants().len(), &demand_key, budget.level);
-                    video.variant_retry = video.variant_retry.saturating_sub(1);
-                    let h264_allowed = h264_compatible(&video_peers, room.remote_participants().len(), &demand_key);
-                    let has_h264 = video.variants.lock().is_ok_and(|tracks| tracks.iter().any(|track| track.name().ends_with(":h264")));
-                    if (desired != video.requested_variant || (has_h264 && !h264_allowed)) && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
-                        let retired = video.variants.lock().map(|mut tracks| std::mem::take(&mut *tracks)).unwrap_or_default();
-                        if !retired.is_empty() {
-                            let participant = room.local_participant();
-                            video.adjustment = Some(tokio::spawn(async move { for variant in retired { let _ = participant.unpublish_track(&variant.sid()).await; } }));
-                        }
-                        video.variant_retry = 0;
-                        video.requested_variant = desired;
-                    }
-                    let has_variant = video.variants.lock().is_ok_and(|tracks| !tracks.is_empty());
-                    if let Some(codec) = desired
-                        && (!has_variant || (codec == VideoCodec::AV1 && has_h264))
-                        && video.variant_retry == 0
-                        && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished)
+                    video.capture_level.store(u32::from(budget.level), Ordering::Release);
+                    if video.adjustment.as_ref().is_some_and(JoinHandle::is_finished)
+                        && let Some(task) = video.adjustment.take()
+                        && let Ok(Some((track, codec))) = task.await
                     {
-                        video.adjustment = Some(enable_video_variant(&room, video, codec, h264_compatible(&video_peers, room.remote_participants().len(), &demand_key)));
-                        video.variant_retry = 6;
+                        video.track = track;
+                        video.compatible_codec = codec;
                     }
-                    if video.capture_level.load(Ordering::Acquire) != u32::from(budget.level)
-                        && video.adjustment.as_ref().is_none_or(JoinHandle::is_finished) {
-                        video.adjustment = Some(adjust_video_budget(&room, video, budget.level, false));
+                    if video.adjustment.is_some() || (pending && video.compatible_codec != VideoCodec::VP9) { continue; }
+                    let demand_key = format!("{}/{}", local_identity, if video.source == TrackSource::Screenshare { "screen_share" } else { "camera" });
+                    let blocked = ["av1", "h265", "h264", "vp9"].into_iter().filter(|codec| {
+                        variant_backoff.lock().map_or(true, |backoff| backoff.blocked(&variant_key(video, codec), now))
+                    }).map(str::to_owned).collect();
+                    let context = VariantContext { level: budget.level, upload_constrained: upload.constrained, cpu_spare: encode_headroom.has_spare(now), cpu_recovered: budget.healthy >= video_policy::RECOVER_SAMPLES, blocked };
+                    let desired = preferred_native_variant(&video_peers, participant_count, &demand_key, &context);
+                    let compatible = if pending { VideoCodec::VP8 } else { preferred_native_compatible(&video_peers, participant_count, &demand_key, video.compatible_codec, &context) };
+                    // A late legacy viewer needs the compatible publication restored first.
+                    if video.compatible_codec != compatible || !room.local_participant().track_publications().contains_key(&video.track.sid()) {
+                        video.adjustment = Some(change_video_codec(&room, video, compatible, true, variant_backoff.clone()));
+                        continue;
+                    }
+                    let current = video.variants.lock().ok().and_then(|tracks| tracks.first().map(|track| track.name()));
+                    if current.as_ref().is_some_and(|name| desired.is_none_or(|codec| !name.ends_with(&format!(":{}", codec.as_str())))) {
+                        if let Some(name) = &current
+                            && let Some(codec) = name.rsplit(':').next()
+                            && pressure_retires_native_variant(&video_peers, participant_count, &demand_key, codec, &context)
+                            && let Ok(mut backoff) = variant_backoff.lock()
+                        { backoff.fail(&variant_key(video, codec), now); }
+                        let retired = video.variants.lock().map(|mut tracks| std::mem::take(&mut *tracks)).unwrap_or_default();
+                        let participant = room.local_participant();
+                        let variants = video.variants.clone();
+                        let send_budget = video.send_budget.clone();
+                        video.adjustment = Some(tokio::spawn(async move {
+                            for track in retired {
+                                if unpublish_budgeted_video(&participant, &track, &send_budget).await.is_err()
+                                    && let Ok(mut tracks) = variants.lock()
+                                { tracks.push(track); }
+                            }
+                            None
+                        }));
+                        continue;
+                    }
+                    if current.is_none() && let Some(codec) = desired {
+                        video.adjustment = Some(change_video_codec(&room, video, codec, false, variant_backoff.clone()));
                     }
                 }
                 if performance_job.as_ref().is_none_or(JoinHandle::is_finished) {
@@ -1046,12 +1125,21 @@ async fn run_room(
                     }
                     let receiver_state = receiver_health.clone();
                     let publisher_state = publisher_samples.clone();
+                    let publisher_history = publisher_tracks.clone();
                     let report_tx = performance_tx.clone();
                     performance_job = Some(tokio::spawn(async move {
                         use livekit::webrtc::stats::{RtcStats, QualityLimitationReason};
                         let (mut cpu, mut bandwidth, mut observed) = (false, false, false);
                         let (mut combined_load, mut incomplete) = (0.0, false);
+                        let mut software_variants = Vec::new();
+                        if let Ok(mut history) = publisher_history.lock() {
+                            history.retain(|sid, _| tracks.iter().any(|track| track.sid().to_string() == *sid));
+                        }
                         for track in tracks {
+                            let sid = track.sid().to_string();
+                            let variant = track.name().rsplit(':').next().is_some_and(premium_codec);
+                            let expected_layers = track.sender().map(|sender| sender.parameters().encodings.into_iter().filter(|encoding| encoding.active).map(|encoding| encoding.rid).collect::<BTreeSet<_>>());
+                            let mut measured_layers = BTreeSet::new();
                             if let Ok(Ok(stats)) = time::timeout(Duration::from_secs(2), track.get_stats()).await {
                                 for stat in stats {
                                     if let RtcStats::OutboundRtp(stat) = stat {
@@ -1063,18 +1151,30 @@ async fn run_room(
                                         if frames == 0 { continue; }
                                         observed = true;
                                         let verified_hardware = native_video_probe::hardware_encoder(stat.outbound.power_efficient_encoder, &stat.outbound.encoder_implementation);
-                                        cpu |= (track.name().ends_with(":av1") || track.name().ends_with(":h264")) && !verified_hardware;
+                                        let (published, software_samples) = publisher_history.lock().map_or((now, 0), |mut history| {
+                                            let entry = history.entry(sid.clone()).or_insert((now, 0));
+                                            entry.1 = if verified_hardware { 0 } else { entry.1.saturating_add(1) };
+                                            *entry
+                                        });
+                                        let software_limit = if track.name().ends_with(":h265") { 1 } else { video_policy::SOFTWARE_SAMPLES };
+                                        if variant && software_samples >= software_limit { software_variants.push(track.name()); }
+                                        // Ramp-up reports "bandwidth" while the estimate grows; it is not pressure.
+                                        let warmed = now.duration_since(published) >= video_policy::UPLOAD_WARMUP;
                                         let elapsed = stat.outbound.total_encode_time - previous_time;
                                         if !elapsed.is_finite() || elapsed <= 0.0 { incomplete = true; continue; }
+                                        measured_layers.insert(stat.outbound.rid.clone());
                                         // Hardware encode durations overlap across independent engines;
                                         // only software work consumes this shared CPU budget.
                                         if !verified_hardware { combined_load += elapsed / now.duration_since(previous_sample).as_secs_f64().max(0.001); }
                                         cpu |= elapsed / f64::from(frames) > 0.8 / stat.outbound.frames_per_second.max(15.0);
                                         cpu |= stat.outbound.quality_limitation_reason == QualityLimitationReason::Cpu;
-                                        bandwidth |= stat.outbound.quality_limitation_reason == QualityLimitationReason::Bandwidth;
+                                        bandwidth |= warmed && stat.outbound.quality_limitation_reason == QualityLimitationReason::Bandwidth;
                                     }
                                 }
                             }
+                            incomplete |= expected_layers.as_ref().is_none_or(|layers| {
+                                if layers.len() == 1 { measured_layers.is_empty() } else { !layers.is_subset(&measured_layers) }
+                            });
                         }
                         for (key, publication) in receivers {
                             let Some(RemoteTrack::Video(track)) = publication.track() else { continue; };
@@ -1087,11 +1187,50 @@ async fn run_room(
                                             let state = states.entry(key.clone()).or_default();
                                             let sid = publication.sid().to_string();
                                             if state.sid != sid {
-                                                *state = ReceiverHealth { sid, health: state.health, ..ReceiverHealth::default() };
+                                                *state = ReceiverHealth { sid, health: state.health, premium_backoff: std::mem::take(&mut state.premium_backoff), ..ReceiverHealth::default() };
                                             }
+                                            let codec = publication.mime_type().to_ascii_lowercase();
+                                            let codec = codec.strip_prefix("video/").unwrap_or("");
+                                            let watching_premium = premium_codec(codec);
+                                            if codec == "h265" && stat.inbound.frames_decoded > state.frames {
+                                                native_video_probe::observe_hevc_decoder(stat.inbound.power_efficient_decoder, &stat.inbound.decoder_implementation);
+                                            }
+                                            let software_hevc = codec == "h265" && stat.inbound.frames_decoded > state.frames
+                                                && !native_video_probe::hardware_hevc_decode();
+                                            if software_hevc {
+                                                state.health = "decode";
+                                                state.layer_trial_until = None;
+                                                if !state.premium_blocked(codec, Instant::now()) {
+                                                    state.fail_premium(codec, Instant::now());
+                                                }
+                                                publication.set_subscribed(false);
+                                                // Do not re-record the same final frame as a fresh failure after unsubscribe.
+                                                state.frames = stat.inbound.frames_decoded;
+                                                continue;
+                                            }
+                                            let was_bad = matches!(state.health, "decode" | "download");
                                             match state.observe(&stat) {
-                                                Some("healthy") => publication.set_video_quality(livekit::track::VideoQuality::High),
-                                                Some(_) => publication.set_video_quality(livekit::track::VideoQuality::Low),
+                                                Some("healthy") => {
+                                                    // One bad spell early in a long call must not ratchet to permanent fallback.
+                                                    if watching_premium && state.healthy >= video_policy::PREMIUM_TRUST_SAMPLES {
+                                                        state.premium_backoff.entries.remove(codec);
+                                                    }
+                                                    state.layer_trial_until = None;
+                                                    publication.set_video_quality(livekit::track::VideoQuality::High);
+                                                }
+                                                Some(_) => {
+                                                    let now = Instant::now();
+                                                    let software_hevc = codec == "h265" && !native_video_probe::hardware_hevc_decode();
+                                                    // Give spatial layers one adaptation interval before requesting a different encode.
+                                                    if watching_premium && !was_bad && publication.simulcasted() && !software_hevc {
+                                                        state.layer_trial_until = Some(now + video_policy::SAMPLE * u32::from(video_policy::MIN_CHANGE_SAMPLES));
+                                                    }
+                                                    if watching_premium && (software_hevc || state.needs_fallback(now)) && !state.premium_blocked(codec, now) {
+                                                        state.layer_trial_until = None;
+                                                        state.fail_premium(codec, now);
+                                                    }
+                                                    publication.set_video_quality(livekit::track::VideoQuality::Low);
+                                                }
                                                 None => {},
                                             }
                                         }
@@ -1106,18 +1245,31 @@ async fn run_room(
                             }
                         }
                         cpu |= combined_load > 0.8;
-                        let _ = report_tx.send((cpu, bandwidth, observed && (!incomplete || cpu || bandwidth))).await;
+                        let _ = report_tx.send(PerformanceReport {
+                            cpu,
+                            bandwidth,
+                            observed: observed && (!incomplete || cpu || bandwidth),
+                            encode_load: (observed && !incomplete).then_some(combined_load),
+                            software_variants,
+                        }).await;
                     }));
                 }
 
-                let local = room.local_participant();
+                // Hints go out when they change, on membership events, and otherwise
+                // every ANNOUNCE_EVERY instead of on every two-second sample.
                 let payload = native_video_capabilities(&receiver_health);
-                tokio::spawn(async move {
-                    let _ = local.publish_data(DataPacket {
-                        payload, topic: Some("kaede.video.v1".to_owned()), reliable: true,
-                        ..DataPacket::default()
-                    }).await;
-                });
+                if force_announce || payload != last_announced || last_announce_at.is_none_or(|at| now.duration_since(at) >= video_policy::ANNOUNCE_EVERY) {
+                    force_announce = false;
+                    last_announced.clone_from(&payload);
+                    last_announce_at = Some(now);
+                    let local = room.local_participant();
+                    tokio::spawn(async move {
+                        let _ = local.publish_data(DataPacket {
+                            payload, topic: Some("kaede.video.v1".to_owned()), reliable: true,
+                            ..DataPacket::default()
+                        }).await;
+                    });
+                }
             }
             _ = video_tick.tick() => {
                 if capture.as_ref().is_some_and(NativeCapture::has_failed) || playback.has_failed() {
@@ -1253,8 +1405,9 @@ async fn run_room(
                         }
                         let result = if enabled && camera.is_none() && camera_start.is_none() {
                             let room = &room;
+                            let send_budget = send_budget.clone();
                             camera_start = Some(Box::pin(async move {
-                                publish_camera(room, device_id.as_deref(), video_quality_mode).await
+                                publish_camera(room, device_id.as_deref(), video_quality_mode, send_budget).await
                             }));
                             continue;
                         } else if !enabled {
@@ -1287,8 +1440,9 @@ async fn run_room(
                         }
                         let result = if enabled && screen_share.is_none() && screen_start.is_none() {
                             let room = &room;
+                            let send_budget = send_budget.clone();
                             screen_start = Some(Box::pin(async move {
-                                publish_screen_share(room, source_id.as_deref(), settings).await
+                                publish_screen_share(room, source_id.as_deref(), settings, send_budget).await
                             }));
                             continue;
                         } else if !enabled {
@@ -1416,9 +1570,7 @@ async fn run_room(
                         if topic.as_deref() == Some("kaede.video.v1") {
                             if payload.len() <= 8192
                                 && let Ok(peer) = serde_json::from_slice::<VideoPeer>(&payload)
-                                && peer.v == 1 && !peer.codecs.is_empty() && peer.codecs.len() <= 3
-                                && peer.codecs.iter().all(|codec| matches!(codec.as_str(), "av1" | "vp8" | "h264"))
-                                && peer.demand.len() <= 64
+                                && peer.valid()
                             {
                                 video_peers.insert(identity, peer);
                             }
@@ -1496,10 +1648,16 @@ async fn run_room(
                             }
                         }
                     }
+                    Some(RoomEvent::ParticipantConnected(participant)) => {
+                        // A new viewer needs our hints before its publishers choose codecs.
+                        first_seen.insert(participant.identity().to_string(), Instant::now());
+                        force_announce = true;
+                    }
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
                         let identity = participant.identity().to_string();
                         playback_mixer.remove_participant(&identity);
                         video_peers.remove(&identity);
+                        first_seen.remove(&identity);
                         for screen_share in [false, true] {
                             if let Some((_, reader)) = video_readers.remove(&(identity.clone(), screen_share)) {
                                 reader.abort();
@@ -1521,6 +1679,9 @@ async fn run_room(
                     Some(RoomEvent::Reconnecting) => {
                         video_degraded.store(false, Ordering::Release);
                         video_peers.clear();
+                        // Everyone re-announces after reconnecting: grace, not VP8-only.
+                        first_seen.clear();
+                        force_announce = true;
                         if let Ok(mut states) = receiver_health.lock() { states.clear(); }
                         priority_push_to_talk_active = false;
                         playback_mixer.clear_priority_active();
@@ -1598,6 +1759,59 @@ fn send_media_error(
     });
 }
 
+/// Shared adaptation policy. Mirrors `VIDEO_POLICY` in
+/// frontend/src/lib/voice/adaptive-video.ts and `VideoPolicy` in the mobile
+/// `adaptive_video.dart`; change all three together.
+mod video_policy {
+    use std::time::Duration;
+
+    pub const SAMPLE: Duration = Duration::from_secs(2);
+    /// Consecutive bad samples before degrading (6s).
+    pub const DEGRADE_SAMPLES: u8 = 3;
+    /// Consecutive healthy samples before recovering one step (30s).
+    pub const RECOVER_SAMPLES: u8 = 15;
+    /// Samples between two adaptation steps (20s).
+    pub const MIN_CHANGE_SAMPLES: u8 = 10;
+    /// Bandwidth limitation is expected while the congestion controller ramps up.
+    pub const UPLOAD_WARMUP: Duration = Duration::from_secs(10);
+    /// A viewer without codec hints is pending this long before it counts as VP8-only.
+    pub const HINT_GRACE: Duration = Duration::from_secs(8);
+    pub const ANNOUNCE_EVERY: Duration = Duration::from_secs(4);
+    /// Retry delays after a failed codec attempt; afterwards the session stops retrying.
+    pub const BACKOFF: [Duration; 3] = [
+        Duration::from_mins(1),
+        Duration::from_mins(5),
+        Duration::from_mins(15),
+    ];
+    /// Dual-cast only when at least one in this many viewers would watch a premium codec.
+    pub const DUAL_CAST_SHARE: usize = 3;
+    /// AV1 software samples before retirement; HEVC is retired on its first sample.
+    pub const SOFTWARE_SAMPLES: u8 = 3;
+    /// Healthy premium samples (5 min) after which earlier playback failures are forgotten.
+    pub const PREMIUM_TRUST_SAMPLES: u8 = 150;
+}
+
+/// Escalating retry delays for an attempt that failed (variant encode or premium playback).
+#[derive(Default)]
+struct VideoBackoff {
+    entries: BTreeMap<String, (usize, Option<Instant>)>,
+}
+
+impl VideoBackoff {
+    fn blocked(&self, key: &str, now: Instant) -> bool {
+        self.entries
+            .get(key)
+            .is_some_and(|(_, until)| until.is_none_or(|until| until > now))
+    }
+
+    fn fail(&mut self, key: &str, now: Instant) {
+        let entry = self.entries.entry(key.to_owned()).or_insert((0, None));
+        entry.1 = video_policy::BACKOFF.get(entry.0).map(|delay| now + *delay);
+        entry.0 = entry.0.saturating_add(1);
+    }
+}
+
+/// Encode (CPU) pressure only; upload pressure is tracked by [`UploadPressure`].
 #[derive(Default)]
 struct VideoBudget {
     level: u8,
@@ -1607,20 +1821,18 @@ struct VideoBudget {
 }
 
 impl VideoBudget {
-    // Ten-second samples: thirty seconds of degradation, sixty seconds of
-    // recovery, with thirty seconds between transitions across both sources.
-    fn observe(&mut self, cpu: bool, bandwidth: bool) -> bool {
+    fn observe(&mut self, cpu: bool) -> bool {
         self.cooldown = self.cooldown.saturating_sub(1);
-        if cpu || bandwidth {
+        if cpu {
             self.bad = self.bad.saturating_add(1);
             self.healthy = 0;
         } else {
             self.healthy = self.healthy.saturating_add(1);
             self.bad = 0;
         }
-        let next = if self.bad >= 3 {
+        let next = if self.bad >= video_policy::DEGRADE_SAMPLES {
             (self.level + 1).min(3)
-        } else if self.healthy >= 6 {
+        } else if self.healthy >= video_policy::RECOVER_SAMPLES {
             self.level.saturating_sub(1)
         } else {
             self.level
@@ -1629,112 +1841,520 @@ impl VideoBudget {
             return false;
         }
         self.level = next;
-        self.cooldown = 3;
+        self.cooldown = video_policy::MIN_CHANGE_SAMPLES;
         self.bad = 0;
         self.healthy = 0;
         true
     }
 }
 
+/// Sustained bandwidth limitation sheds dual-cast; bitrate itself is left to
+/// the congestion controller instead of being capped a second time.
+#[derive(Default)]
+struct UploadPressure {
+    bad: u8,
+    healthy: u8,
+    constrained: bool,
+}
+
+impl UploadPressure {
+    fn observe(&mut self, bandwidth: bool) {
+        if bandwidth {
+            self.bad = self.bad.saturating_add(1);
+            self.healthy = 0;
+        } else {
+            self.healthy = self.healthy.saturating_add(1);
+            self.bad = 0;
+        }
+        if self.bad >= video_policy::DEGRADE_SAMPLES {
+            self.constrained = true;
+        } else if self.healthy >= video_policy::RECOVER_SAMPLES {
+            self.constrained = false;
+        }
+    }
+}
+
+// Preference order is also the tie-breaker: AV1 wins equal audiences.
+const PREMIUM_CODECS: [VideoCodec; 2] = [VideoCodec::AV1, VideoCodec::H265];
+const LEGACY_VIDEO_CODECS: [&str; 3] = ["vp8", "h264", "av1"];
+const EXTENDED_VIDEO_CODECS: [&str; 2] = ["h265", "vp9"];
+
+fn premium_codec(codec: &str) -> bool {
+    PREMIUM_CODECS.iter().any(|entry| entry.as_str() == codec)
+}
+
+struct VariantContext {
+    level: u8,
+    upload_constrained: bool,
+    cpu_spare: bool,
+    cpu_recovered: bool,
+    blocked: BTreeSet<String>,
+}
+
+/// One frame-rate and resolution step per budget level, shared by every
+/// capture path. Integer ratios: 1/1.25 (= 4/5) per level for pixels, 0.85
+/// (17/20) per level for motion frame rate, 0.65 (13/20) for detail shares.
+fn adapted_dimension(value: u32, level: u32, minimum: u32) -> u32 {
+    let level = level.min(3);
+    let scaled = u64::from(value) * 4_u64.pow(level) / 5_u64.pow(level);
+    u32::try_from(scaled)
+        .unwrap_or(value)
+        .max(minimum)
+        .min(value.max(minimum))
+}
+
+fn adapted_frame_rate(frame_rate: u32, level: u32, detail: bool) -> u32 {
+    let level = level.min(3);
+    let (numerator, floor) = if detail { (13_u64, 5) } else { (17_u64, 12) };
+    let scaled = u64::from(frame_rate) * numerator.pow(level) / 20_u64.pow(level);
+    u32::try_from(scaled)
+        .unwrap_or(frame_rate)
+        .max(floor.min(frame_rate))
+}
+
+// Publishing a replacement resets stats counters; brief gaps can reuse recent CPU proof.
+#[derive(Default)]
+struct EncodeHeadroom {
+    last_spare: Option<Instant>,
+}
+
+impl EncodeHeadroom {
+    fn observe(&mut self, load: Option<f64>, overloaded: bool, now: Instant) {
+        if overloaded {
+            self.last_spare = None;
+        } else if let Some(load) = load {
+            self.last_spare = (0.0..0.5).contains(&load).then_some(now);
+        }
+        // Unknown samples neither create proof nor extend its lifetime.
+    }
+
+    fn has_spare(&self, now: Instant) -> bool {
+        self.last_spare
+            .is_some_and(|at| now.saturating_duration_since(at) < video_policy::UPLOAD_WARMUP)
+    }
+}
+
+#[derive(Default)]
+struct PerformanceReport {
+    cpu: bool,
+    bandwidth: bool,
+    observed: bool,
+    encode_load: Option<f64>,
+    /// Variant track names whose "hardware" encoder runs in software.
+    software_variants: Vec<String>,
+}
+
+/// Text shares (<= 15 fps profiles) keep pixels until the lowest budget and
+/// surrender frames instead; motion shares and cameras trade pixels first.
+fn adapted_screen_settings(settings: ScreenShareSettings, level: u32) -> ScreenShareSettings {
+    if settings.frame_rate <= 15 {
+        let halve = u32::from(level >= 3);
+        return ScreenShareSettings {
+            width: (settings.width >> halve).max(640),
+            height: (settings.height >> halve).max(360),
+            ..settings
+        };
+    }
+    ScreenShareSettings {
+        width: adapted_dimension(settings.width, level, 640),
+        height: adapted_dimension(settings.height, level, 360),
+        ..settings
+    }
+}
+
+fn variant_key(video: &PublishedVideo, codec: &str) -> String {
+    let resolution = video.track.rtc_source().video_resolution();
+    format!(
+        "{}/{codec}/{}x{}",
+        if video.source == TrackSource::Screenshare {
+            "screen_share"
+        } else {
+            "camera"
+        },
+        resolution.width,
+        resolution.height
+    )
+}
+
 fn preferred_native_variant(
     peers: &BTreeMap<String, VideoPeer>,
     participant_count: usize,
     key: &str,
-    budget: u8,
+    context: &VariantContext,
 ) -> Option<VideoCodec> {
-    if budget == 0
-        && peers.values().any(|peer| {
-            peer.codecs.iter().any(|codec| codec == "av1")
-                && peer.demand.get(key).is_none_or(|codec| codec == "av1")
-        })
-    {
-        return Some(VideoCodec::AV1);
+    let mut selected = None;
+    let mut largest_audience = 0;
+    for codec in PREMIUM_CODECS {
+        let name = codec.as_str();
+        if context.blocked.contains(name) {
+            continue;
+        }
+        let audience = peers
+            .values()
+            .filter(|peer| {
+                peer.supports(name) && peer.demand.get(key).is_none_or(|demand| demand == name)
+            })
+            .count();
+        let others = participant_count.saturating_sub(audience);
+        let allowed = if others == 0 {
+            context.level < 3
+        } else {
+            context.level == 0
+                && !context.upload_constrained
+                && audience * video_policy::DUAL_CAST_SHARE >= participant_count
+        };
+        if allowed && audience > largest_audience {
+            selected = Some(codec);
+            largest_audience = audience;
+        }
     }
-    if h264_compatible(peers, participant_count, key) {
-        return Some(VideoCodec::H264);
-    }
-    None
+    selected
 }
 
-fn h264_compatible(
+// A codec is not a failed attempt when viewers leave or prefer another codec.
+fn pressure_retires_native_variant(
     peers: &BTreeMap<String, VideoPeer>,
     participant_count: usize,
     key: &str,
+    codec: &str,
+    context: &VariantContext,
+) -> bool {
+    if context.level == 0 && !context.upload_constrained {
+        return false;
+    }
+    let unpressured = VariantContext {
+        level: 0,
+        upload_constrained: false,
+        cpu_spare: context.cpu_spare,
+        cpu_recovered: context.cpu_recovered,
+        blocked: context.blocked.clone(),
+    };
+    preferred_native_variant(peers, participant_count, key, &unpressured)
+        .is_some_and(|preferred| preferred.as_str() == codec)
+}
+
+fn compatible_with_every_viewer(
+    peers: &BTreeMap<String, VideoPeer>,
+    participant_count: usize,
+    key: &str,
+    codec: &str,
 ) -> bool {
     participant_count > 0
         && peers.len() == participant_count
         && peers.values().all(|peer| {
-            peer.codecs.iter().any(|codec| codec == "h264")
-                && peer.demand.get(key).is_none_or(|codec| codec != "vp8")
+            peer.supports(codec)
+                && peer
+                    .demand
+                    .get(key)
+                    .is_none_or(|demand| demand == codec || premium_codec(demand))
         })
 }
 
+fn preferred_native_compatible(
+    peers: &BTreeMap<String, VideoPeer>,
+    participant_count: usize,
+    key: &str,
+    current: VideoCodec,
+    context: &VariantContext,
+) -> VideoCodec {
+    if context.level == 0
+        && context.cpu_spare
+        && (current == VideoCodec::VP9 || (context.upload_constrained && context.cpu_recovered))
+        && !context.blocked.contains("vp9")
+        && compatible_with_every_viewer(peers, participant_count, key, "vp9")
+    {
+        VideoCodec::VP9
+    } else if !context.blocked.contains("h264")
+        && compatible_with_every_viewer(peers, participant_count, key, "h264")
+    {
+        VideoCodec::H264
+    } else {
+        VideoCodec::VP8
+    }
+}
+
 fn adapted_bitrate(bitrate: u64, level: u8) -> u64 {
-    // Exact 0.65^level for the four adaptation levels; u128 avoids overflow.
-    let numerator = [8000_u128, 5200, 3380, 2197][usize::from(level.min(3))];
-    u64::try_from(u128::from(bitrate) * numerator / 8000)
+    // 0.72^level (shared policy) for the four adaptation levels; u128 avoids overflow.
+    let numerator = [10_000_u128, 7200, 5184, 3732][usize::from(level.min(3))];
+    u64::try_from(u128::from(bitrate) * numerator / 10_000)
         .unwrap_or(bitrate)
         .max(300_000)
 }
 
-fn enable_video_variant(
+#[derive(Default)]
+struct VideoSendBudget {
+    level: u8,
+    sources: BTreeMap<String, VideoSourceBudget>,
+}
+
+struct VideoSourceBudget {
+    bitrate: u64,
+    tracks: BTreeMap<String, BudgetedVideoTrack>,
+}
+
+struct BudgetedVideoTrack {
+    track: LocalVideoTrack,
+    // Preserve the ladder before caps so retirement can restore its original proportions.
+    encodings: Vec<RtpEncodingParameters>,
+}
+
+fn source_video_bitrate(profile: u64, level: u8, sources: usize, variants: usize) -> u64 {
+    adapted_bitrate(profile, level)
+        .min(profile)
+        .min(8_000_000 / u64::try_from(sources.max(1)).unwrap_or(u64::MAX))
+        / u64::try_from(variants.max(1)).unwrap_or(u64::MAX)
+}
+
+fn compatible_video_scale(width: u32, height: u32) -> f64 {
+    (f64::from(width.max(height)) / 1280.0)
+        .max(f64::from(width.min(height)) / 720.0)
+        .max(1.0)
+}
+
+fn limit_video_encodings(
+    encodings: &mut [RtpEncodingParameters],
+    original: &[RtpEncodingParameters],
+    bitrate: u64,
+    downscale: f64,
+) -> bool {
+    let total: u128 = original
+        .iter()
+        .map(|encoding| u128::from(encoding.max_bitrate.unwrap_or(bitrate).max(1)))
+        .sum();
+    let mut changed = false;
+    for encoding in encodings {
+        // WebRTC may omit RID for a single RTP stream; multiple streams must match by RID.
+        let base = if original.len() == 1 {
+            original.first()
+        } else {
+            original.iter().find(|base| base.rid == encoding.rid)
+        };
+        let Some(base) = base else { continue };
+        let weight = u128::from(base.max_bitrate.unwrap_or(bitrate).max(1));
+        let cap = u64::try_from(u128::from(bitrate) * weight / total.max(1))
+            .unwrap_or(bitrate)
+            .max(1);
+        let scale = if downscale > 1.0 {
+            Some(base.scale_resolution_down_by.unwrap_or(1.0).max(downscale))
+        } else {
+            base.scale_resolution_down_by
+        };
+        changed |= encoding.max_bitrate != Some(cap) || encoding.scale_resolution_down_by != scale;
+        encoding.max_bitrate = Some(cap);
+        encoding.scale_resolution_down_by = scale;
+    }
+    changed
+}
+
+impl VideoSendBudget {
+    fn limits(&self, source: &VideoSourceBudget, track: &BudgetedVideoTrack) -> (u64, f64) {
+        let dual = source.tracks.len() > 1;
+        let compatible = track
+            .track
+            .name()
+            .rsplit(':')
+            .next()
+            .is_none_or(|codec| !premium_codec(codec));
+        let size = track.track.rtc_source().video_resolution();
+        let scale = if dual && compatible {
+            compatible_video_scale(size.width, size.height)
+        } else {
+            1.0
+        };
+        (
+            source_video_bitrate(
+                source.bitrate,
+                self.level,
+                self.sources.len(),
+                source.tracks.len(),
+            ),
+            scale,
+        )
+    }
+
+    fn apply(&self, pending: Option<&str>) -> bool {
+        let mut applied = true;
+        for source in self.sources.values() {
+            for (id, track) in &source.tracks {
+                // Only the new reservation may lack a sender; reconnecting publications
+                // must recover their sender before another allocation can be admitted.
+                let Some(sender) = track.track.sender() else {
+                    applied &= pending == Some(id.as_str());
+                    continue;
+                };
+                let mut parameters = sender.parameters();
+                if parameters.encodings.len() != track.encodings.len()
+                    || (track.encodings.len() > 1
+                        && parameters.encodings.iter().any(|encoding| {
+                            !track.encodings.iter().any(|base| base.rid == encoding.rid)
+                        }))
+                {
+                    applied = false;
+                    continue;
+                }
+                let (bitrate, scale) = self.limits(source, track);
+                if limit_video_encodings(
+                    &mut parameters.encodings,
+                    &track.encodings,
+                    bitrate,
+                    scale,
+                ) && let Err(error) = sender.set_parameters(parameters)
+                {
+                    tracing::warn!(%error, "video sender upload limit could not be applied");
+                    applied = false;
+                }
+            }
+        }
+        applied
+    }
+
+    fn remove(&mut self, track: &LocalVideoTrack) {
+        let id = track.rtc_track().id();
+        self.sources.retain(|_, source| {
+            source.tracks.remove(&id);
+            !source.tracks.is_empty()
+        });
+        self.apply(None);
+    }
+}
+
+async fn publish_budgeted_video(
+    participant: &LocalParticipant,
+    track: &LocalVideoTrack,
+    options: TrackPublishOptions,
+    send_budget: &tokio::sync::Mutex<VideoSendBudget>,
+    source_id: &str,
+    profile_bitrate: u64,
+) -> Result<(), VoiceError> {
+    // Serialize reservations with publish/unpublish: an in-flight sender cannot retain a
+    // larger allocation while another source or codec starts using its share.
+    let mut budget = send_budget.lock().await;
+    let size = track.rtc_source().video_resolution();
+    let original = compute_video_encodings(size.width, size.height, &options);
+    let id = track.rtc_track().id();
+    let source = budget
+        .sources
+        .entry(source_id.to_owned())
+        .or_insert_with(|| VideoSourceBudget {
+            bitrate: profile_bitrate,
+            tracks: BTreeMap::new(),
+        });
+    source.tracks.insert(
+        id.clone(),
+        BudgetedVideoTrack {
+            track: track.clone(),
+            encodings: original.clone(),
+        },
+    );
+    if !budget.apply(Some(&id)) {
+        budget.remove(track);
+        return Err(VoiceError::VideoSendBudget);
+    }
+    let source = &budget.sources[source_id];
+    let (bitrate, scale) = budget.limits(source, &source.tracks[&id]);
+    let mut encodings = original.clone();
+    limit_video_encodings(&mut encodings, &original, bitrate, scale);
+    match participant
+        .publish_track_with_video_send_encodings(
+            LocalTrack::Video(track.clone()),
+            options,
+            Some(encodings),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            budget.remove(track);
+            Err(error.into())
+        }
+    }
+}
+
+async fn unpublish_budgeted_video(
+    participant: &LocalParticipant,
+    track: &LocalVideoTrack,
+    send_budget: &tokio::sync::Mutex<VideoSendBudget>,
+) -> Result<(), VoiceError> {
+    let mut budget = send_budget.lock().await;
+    participant.unpublish_track(&track.sid()).await?;
+    budget.remove(track);
+    Ok(())
+}
+
+// The worker returns a replacement compatible track only after it is published.
+// Premium tracks are kept separately, so each source has at most two publications.
+#[allow(clippy::too_many_lines)]
+fn change_video_codec(
     room: &Room,
     video: &PublishedVideo,
-    mut codec: VideoCodec,
-    allow_h264: bool,
-) -> JoinHandle<()> {
+    codec: VideoCodec,
+    compatible: bool,
+    backoff: Arc<Mutex<VideoBackoff>>,
+) -> JoinHandle<Option<(LocalVideoTrack, VideoCodec)>> {
     let participant = room.local_participant();
     let stop = video.stop.clone();
-    let source = video.track.rtc_source();
+    let original = video.track.clone();
+    let original_codec = video.compatible_codec;
+    let restore_options = participant
+        .track_publications()
+        .get(&original.sid())
+        .map(|publication| publication.publish_options());
+    let source = original.rtc_source();
     let dimensions = source.video_resolution();
     let mut encoding = video.encoding.clone();
     let level = u8::try_from(video.capture_level.load(Ordering::Acquire).min(3)).unwrap_or(3);
-    let factor = 0.65_f64.powi(i32::from(level));
     encoding.max_bitrate = adapted_bitrate(encoding.max_bitrate, level);
-    encoding.max_framerate = (encoding.max_framerate * factor.sqrt()).max(5.0);
+    encoding.max_framerate = (encoding.max_framerate * 0.85_f64.powi(i32::from(level))).max(5.0);
+    let key = variant_key(video, codec.as_str());
     let variants = video.variants.clone();
     let track_source = video.source;
+    let send_budget = video.send_budget.clone();
+    let budget_source = video.budget_source.clone();
+    let profile_bitrate = video.encoding.max_bitrate;
     let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
     tokio::spawn(async move {
-        let mut codec_name = if codec == VideoCodec::H264 {
-            "h264"
-        } else {
-            "av1"
+        let fail = || {
+            if let Ok(mut backoff) = backoff.lock() {
+                backoff.fail(&key, Instant::now());
+            }
         };
-        if !native_video_probe::hardware_codec(
-            codec_name,
-            dimensions.width,
-            dimensions.height,
-            encoding.clone(),
-            &stop,
-        )
-        .await
-        {
-            if stop.load(Ordering::Acquire)
-                || codec != VideoCodec::AV1
-                || !allow_h264
-                || !native_video_probe::hardware_codec(
-                    "h264",
+        let hardware = codec != VideoCodec::VP9 && codec != VideoCodec::VP8;
+        let modes: &[Option<&str>] = if matches!(codec, VideoCodec::AV1 | VideoCodec::VP9) {
+            &[Some("L3T3_KEY"), Some("L1T3"), Some("L1T1")]
+        } else if codec == VideoCodec::H265 {
+            &[Some("L1T3"), Some("L1T1")]
+        } else {
+            &[None]
+        };
+        let mut mode = None;
+        let mut supported = codec == VideoCodec::VP8;
+        if !supported {
+            for candidate in modes {
+                if native_video_probe::codec_supported(
+                    codec.as_str(),
                     dimensions.width,
                     dimensions.height,
                     encoding.clone(),
+                    *candidate,
+                    hardware,
                     &stop,
                 )
                 .await
-            {
-                return;
+                {
+                    mode = *candidate;
+                    supported = true;
+                    break;
+                }
+                if stop.load(Ordering::Acquire) {
+                    return None;
+                }
             }
-            codec = VideoCodec::H264;
-            codec_name = "h264";
         }
-        if variants.lock().is_ok_and(|tracks| {
-            tracks
-                .iter()
-                .any(|track| track.name().ends_with(&format!(":{codec_name}")))
-        }) {
-            return;
+        if !supported {
+            fail();
+            return None;
         }
-        // H264 is useful here only when its actual acceleration beats VP8.
+        // H.264 only replaces VP8 when it brings proven acceleration.
         if codec == VideoCodec::H264
             && native_video_probe::hardware_codec(
                 "vp8",
@@ -1745,105 +2365,100 @@ fn enable_video_variant(
             )
             .await
         {
-            return;
+            fail();
+            return None;
         }
         if stop.load(Ordering::Acquire) {
-            return;
+            return None;
         }
         let source_name = if track_source == TrackSource::Screenshare {
             "screen_share"
         } else {
             "camera"
         };
-        let name = format!("kaede.video.v1:{source_name}:{codec_name}");
+        let name = format!("kaede.video.v1:{source_name}:{}", codec.as_str());
         let track = LocalVideoTrack::create_video_track(&name, source);
         let options = TrackPublishOptions {
             source: track_source,
             video_codec: codec,
-            video_encoder: livekit::webrtc::rtp_sender::VideoEncoderBackend::Hardware,
-            simulcast: false,
-            scalability_mode: (codec == VideoCodec::AV1).then(|| "L1T1".to_owned()),
-            ..video_publish_options(encrypted, encoding)
+            video_encoder: if hardware {
+                livekit::webrtc::rtp_sender::VideoEncoderBackend::Hardware
+            } else {
+                livekit::webrtc::rtp_sender::VideoEncoderBackend::Auto
+            },
+            simulcast: compatible && codec != VideoCodec::VP9,
+            scalability_mode: mode.map(str::to_owned),
+            ..video_publish_options(encrypted, encoding.clone())
         };
-        let retired = variants
-            .lock()
-            .map(|mut tracks| std::mem::take(&mut *tracks))
-            .unwrap_or_default();
-        for retired in retired {
-            let _ = participant.unpublish_track(&retired.sid()).await;
-        }
-        if participant
-            .publish_track(LocalTrack::Video(track.clone()), options)
-            .await
-            .is_ok()
-            && let Ok(mut variants) = variants.lock()
-        {
-            variants.push(track);
-        }
-    })
-}
-
-fn adjust_video_budget(
-    room: &Room,
-    video: &PublishedVideo,
-    level: u8,
-    cpu: bool,
-) -> JoinHandle<()> {
-    video
-        .capture_level
-        .store(u32::from(level), Ordering::Release);
-    let participant = room.local_participant();
-    let track = video.track.clone();
-    let source = video.source;
-    let mut encoding = video.encoding.clone();
-    let factor = 0.65_f64.powi(i32::from(level));
-    encoding.max_bitrate = adapted_bitrate(encoding.max_bitrate, level);
-    // Low-motion screen content keeps pixels legible by surrendering frames
-    // first. Motion-oriented shares and cameras retain at least 15 fps.
-    let floor = if source == TrackSource::Screenshare && encoding.max_framerate <= 15.0 {
-        5.0
-    } else {
-        15.0
-    };
-    encoding.max_framerate = (encoding.max_framerate * factor.sqrt())
-        .max(floor)
-        .min(video.encoding.max_framerate);
-    let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
-    let options = TrackPublishOptions {
-        source,
-        simulcast: !(cpu && level > 0),
-        ..video_publish_options(encrypted, encoding)
-    };
-    let variants = video.variants.clone();
-    let original = TrackPublishOptions {
-        source,
-        ..video_publish_options(encrypted, video.encoding.clone())
-    };
-    tokio::spawn(async move {
-        // Shared sustained pressure retires the second encoder before reducing
-        // the universally supported track. Audio remains untouched.
-        let retired = variants
-            .lock()
-            .map(|mut tracks| std::mem::take(&mut *tracks))
-            .unwrap_or_default();
-        for variant in retired {
-            let _ = participant.unpublish_track(&variant.sid()).await;
-        }
-        // The public SDK has no sender handle. Re-publish the SAME source;
-        // room E2EE/key provider and capture ownership survive unchanged.
-        if participant.unpublish_track(&track.sid()).await.is_err() {
-            return;
-        }
-        if let Err(error) = participant
-            .publish_track(LocalTrack::Video(track.clone()), options)
-            .await
-        {
-            tracing::warn!(%error, "video adaptation failed; restoring fallback publication");
-            if let Err(error) = participant
-                .publish_track(LocalTrack::Video(track), original)
-                .await
+        if compatible {
+            if participant
+                .track_publications()
+                .contains_key(&original.sid())
+                && unpublish_budgeted_video(&participant, &original, &send_budget)
+                    .await
+                    .is_err()
             {
-                tracing::warn!(%error, "video fallback restoration failed");
+                return None;
+            }
+        } else {
+            let retired = variants
+                .lock()
+                .map(|mut tracks| std::mem::take(&mut *tracks))
+                .unwrap_or_default();
+            for retired in retired {
+                if unpublish_budgeted_video(&participant, &retired, &send_budget)
+                    .await
+                    .is_err()
+                {
+                    if let Ok(mut variants) = variants.lock() {
+                        variants.push(retired);
+                    }
+                    return None;
+                }
+            }
+        }
+        match publish_budgeted_video(
+            &participant,
+            &track,
+            options,
+            &send_budget,
+            &budget_source,
+            profile_bitrate,
+        )
+        .await
+        {
+            Ok(_) => {
+                if compatible {
+                    Some((track, codec))
+                } else {
+                    if let Ok(mut variants) = variants.lock() {
+                        variants.push(track);
+                    }
+                    None
+                }
+            }
+            Err(_) => {
+                fail();
+                if compatible {
+                    // Restore the previous compatible publication after a failed replacement.
+                    let restore = restore_options.unwrap_or_else(|| TrackPublishOptions {
+                        source: track_source,
+                        video_codec: original_codec,
+                        ..video_publish_options(encrypted, encoding)
+                    });
+                    let _ = publish_budgeted_video(
+                        &participant,
+                        &original,
+                        restore,
+                        &send_budget,
+                        &budget_source,
+                        profile_bitrate,
+                    )
+                    .await;
+                    Some((original, original_codec))
+                } else {
+                    None
+                }
             }
         }
     })
@@ -1853,8 +2468,34 @@ fn adjust_video_budget(
 struct VideoPeer {
     v: u8,
     codecs: Vec<String>,
+    #[serde(default, rename = "extendedCodecs")]
+    extended_codecs: Vec<String>,
     #[serde(default)]
     demand: BTreeMap<String, String>,
+}
+
+impl VideoPeer {
+    fn supports(&self, codec: &str) -> bool {
+        self.codecs.iter().any(|entry| entry == codec)
+            || (EXTENDED_VIDEO_CODECS.contains(&codec)
+                && self.extended_codecs.iter().any(|entry| entry == codec))
+    }
+
+    fn valid(&self) -> bool {
+        self.v == 1
+            && !self.codecs.is_empty()
+            && self.codecs.len() <= 3
+            && self
+                .codecs
+                .iter()
+                .all(|codec| LEGACY_VIDEO_CODECS.contains(&codec.as_str()))
+            && self.extended_codecs.len() <= 8
+            && self.extended_codecs.iter().all(|codec| codec.len() <= 16)
+            && self.demand.len() <= 64
+            && self.demand.iter().all(|(key, codec)| {
+                key.len() <= 256 && LEGACY_VIDEO_CODECS.contains(&codec.as_str())
+            })
+    }
 }
 
 #[derive(Default)]
@@ -1869,9 +2510,25 @@ struct ReceiverHealth {
     bad: u8,
     healthy: u8,
     health: &'static str,
+    /// Per-codec playback failures survive switching publications.
+    premium_backoff: VideoBackoff,
+    layer_trial_until: Option<Instant>,
 }
 
 impl ReceiverHealth {
+    fn fail_premium(&mut self, codec: &str, now: Instant) {
+        self.premium_backoff.fail(codec, now);
+    }
+
+    fn premium_blocked(&self, codec: &str, now: Instant) -> bool {
+        self.premium_backoff.blocked(codec, now)
+    }
+
+    fn needs_fallback(&self, now: Instant) -> bool {
+        matches!(self.health, "decode" | "download")
+            && self.layer_trial_until.is_none_or(|until| now >= until)
+    }
+
     fn unknown(&mut self) {
         self.bad = 0;
         self.healthy = 0;
@@ -1918,7 +2575,7 @@ impl ReceiverHealth {
         };
         if self.bad >= 3 {
             self.health = if download { "download" } else { "decode" };
-        } else if self.healthy >= 6 {
+        } else if self.healthy >= video_policy::RECOVER_SAMPLES {
             self.health = "healthy";
         } else {
             return None;
@@ -1931,7 +2588,7 @@ fn native_video_capabilities(receiver_health: &Mutex<BTreeMap<String, ReceiverHe
     let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
         .pc_factory()
         .get_rtp_receiver_capabilities(livekit::webrtc::MediaType::Video);
-    let codecs: Vec<_> = ["av1", "vp8", "h264"]
+    let codecs: Vec<_> = LEGACY_VIDEO_CODECS
         .into_iter()
         .filter(|codec| {
             capabilities.codecs.iter().any(|entry| {
@@ -1941,19 +2598,35 @@ fn native_video_capabilities(receiver_health: &Mutex<BTreeMap<String, ReceiverHe
             })
         })
         .collect();
+    let extended_codecs: Vec<_> = EXTENDED_VIDEO_CODECS
+        .into_iter()
+        .filter(|codec| {
+            (codec != &"h265" || native_video_probe::hardware_hevc_decode())
+                && capabilities.codecs.iter().any(|entry| {
+                    entry
+                        .mime_type
+                        .eq_ignore_ascii_case(&format!("video/{codec}"))
+                })
+        })
+        .collect();
     let mut health = BTreeMap::new();
     let mut demand = BTreeMap::new();
+    let now = Instant::now();
     if let Ok(states) = receiver_health.lock() {
         for (key, state) in states.iter() {
             if !state.health.is_empty() {
                 health.insert(key.clone(), state.health);
             }
-            if matches!(state.health, "decode" | "download") {
+            if state.needs_fallback(now)
+                || PREMIUM_CODECS
+                    .iter()
+                    .any(|codec| state.premium_blocked(codec.as_str(), now))
+            {
                 demand.insert(key.clone(), "vp8");
             }
         }
     }
-    serde_json::json!({"v": 1, "codecs": codecs, "demand": demand, "health": health})
+    serde_json::json!({"v": 1, "codecs": codecs, "extendedCodecs": extended_codecs, "demand": demand, "health": health})
         .to_string()
         .into_bytes()
 }
@@ -1982,6 +2655,9 @@ fn reconcile_video_subscriptions(
                 continue;
             }
             let mime = publication.mime_type().to_ascii_lowercase();
+            if mime == "video/h265" && !native_video_probe::hardware_hevc_decode() {
+                continue;
+            }
             if !mime.is_empty()
                 && !capabilities
                     .codecs
@@ -2006,14 +2682,20 @@ fn reconcile_video_subscriptions(
                 .lock()
                 .ok()
                 .and_then(|states| {
-                    states
-                        .get(&key)
-                        .map(|state| matches!(state.health, "decode" | "download"))
+                    states.get(&key).map(|state| {
+                        state.needs_fallback(Instant::now())
+                            || state.premium_blocked(
+                                mime.strip_prefix("video/").unwrap_or(""),
+                                Instant::now(),
+                            )
+                    })
                 })
                 .unwrap_or(false);
             let rank = (
-                if mime == "video/av1" {
-                    if decode_overload { 0 } else { 3 }
+                if premium_codec(mime.strip_prefix("video/").unwrap_or("")) {
+                    if decode_overload { 0 } else { 4 }
+                } else if mime == "video/vp9" {
+                    3
                 } else if mime == "video/h264" && publication.name().starts_with("kaede.video.v1:")
                 {
                     2
@@ -2044,6 +2726,7 @@ type PendingVideo<'a> = std::pin::Pin<
 >;
 
 struct CaptureStartupGuard {
+    send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
     stop: Option<Arc<AtomicBool>>,
     participant: LocalParticipant,
     track: LocalVideoTrack,
@@ -2055,32 +2738,40 @@ impl Drop for CaptureStartupGuard {
             stop.store(true, Ordering::Release);
             let participant = self.participant.clone();
             let track = self.track.clone();
+            let send_budget = self.send_budget.clone();
             tokio::spawn(async move {
-                let _ = participant.unpublish_track(&track.sid()).await;
+                if unpublish_budgeted_video(&participant, &track, &send_budget)
+                    .await
+                    .is_err()
+                {
+                    // Capture was stopped above, including cancellation during publication.
+                    send_budget.lock().await.remove(&track);
+                }
             });
         }
     }
 }
 
 struct PublishedVideo {
+    send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
+    budget_source: String,
     audio: Option<screen_audio::PublishedAudio>,
     audio_capture_thread: Option<thread::JoinHandle<()>>,
     capture_failure: screen_audio::CaptureFailure,
     track: LocalVideoTrack,
     source: TrackSource,
     encoding: VideoEncoding,
-    adjustment: Option<JoinHandle<()>>,
+    adjustment: Option<JoinHandle<Option<(LocalVideoTrack, VideoCodec)>>>,
     capture_level: Arc<AtomicU32>,
     variants: Arc<Mutex<Vec<LocalVideoTrack>>>,
-    requested_variant: Option<VideoCodec>,
-    variant_retry: u8,
+    compatible_codec: VideoCodec,
     stop: Arc<AtomicBool>,
     capture_thread: Option<thread::JoinHandle<()>>,
 }
 
 // The pinned native SDK reports codec MIME support and backend availability,
 // not hardware support for a codec at the requested dimensions/framerate.
-// Unknown AV1 acceleration must therefore use the interoperable single encode.
+// Unknown premium acceleration must therefore use the interoperable single encode.
 // Encryption belongs to the Room and never participates in codec selection.
 fn video_publish_options(_encrypted: bool, encoding: VideoEncoding) -> TrackPublishOptions {
     TrackPublishOptions {
@@ -2096,6 +2787,7 @@ async fn publish_screen_share(
     room: &Room,
     source_id: Option<&str>,
     settings: ScreenShareSettings,
+    send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
 ) -> Result<PublishedVideo, VoiceError> {
     let settings = ScreenShareSettings {
         width: settings.width.clamp(640, 3840),
@@ -2116,7 +2808,9 @@ async fn publish_screen_share(
         RtcVideoSource::Native(source.clone()),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let budget_source = track.rtc_track().id();
     let mut startup_guard = CaptureStartupGuard {
+        send_budget: send_budget.clone(),
         stop: Some(stop.clone()),
         participant: room.local_participant(),
         track: track.clone(),
@@ -2194,29 +2888,31 @@ async fn publish_screen_share(
     };
     #[cfg(target_os = "macos")]
     let audio_capture_thread: Option<thread::JoinHandle<()>> = None;
-    if let Err(error) = room
-        .local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Screenshare,
-                ..video_publish_options(
-                    room.e2ee_manager().encryption_type() != EncryptionType::None,
-                    VideoEncoding {
-                        max_bitrate: settings.max_bitrate,
-                        max_framerate: f64::from(settings.frame_rate),
-                    },
-                )
-            },
-        )
-        .await
+    if let Err(error) = publish_budgeted_video(
+        &room.local_participant(),
+        &track,
+        TrackPublishOptions {
+            source: TrackSource::Screenshare,
+            ..video_publish_options(
+                room.e2ee_manager().encryption_type() != EncryptionType::None,
+                VideoEncoding {
+                    max_bitrate: settings.max_bitrate,
+                    max_framerate: f64::from(settings.frame_rate),
+                },
+            )
+        },
+        &send_budget,
+        &budget_source,
+        settings.max_bitrate,
+    )
+    .await
     {
         stop.store(true, Ordering::Release);
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
         if let Some(worker) = audio_capture_thread {
             let _ = tokio::task::spawn_blocking(move || worker.join()).await;
         }
-        return Err(error.into());
+        return Err(error);
     }
     let audio = if settings.share_audio {
         match screen_audio::publish(room, audio_receiver, stop.clone(), failure.clone()).await {
@@ -2227,7 +2923,8 @@ async fn publish_screen_share(
                 if let Some(worker) = audio_capture_thread {
                     let _ = tokio::task::spawn_blocking(move || worker.join()).await;
                 }
-                let _ = room.local_participant().unpublish_track(&track.sid()).await;
+                let _ =
+                    unpublish_budgeted_video(&room.local_participant(), &track, &send_budget).await;
                 return Err(error);
             }
         }
@@ -2235,6 +2932,8 @@ async fn publish_screen_share(
         None
     };
     let video = PublishedVideo {
+        send_budget,
+        budget_source,
         audio,
         audio_capture_thread,
         capture_failure: failure,
@@ -2246,8 +2945,7 @@ async fn publish_screen_share(
         adjustment: None,
         capture_level,
         variants: Arc::new(Mutex::new(Vec::new())),
-        requested_variant: None,
-        variant_retry: 0,
+        compatible_codec: VideoCodec::VP8,
         track,
         stop,
         capture_thread: Some(capture_thread),
@@ -2493,6 +3191,7 @@ async fn publish_camera(
     room: &Room,
     device_id: Option<&str>,
     video_quality_mode: u8,
+    send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
 ) -> Result<PublishedVideo, VoiceError> {
     let settings = camera_settings(video_quality_mode);
     let camera_id = device_id.map(str::to_owned);
@@ -2508,7 +3207,9 @@ async fn publish_camera(
         RtcVideoSource::Native(source.clone()),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let budget_source = track.rtc_track().id();
     let mut startup_guard = CaptureStartupGuard {
+        send_budget: send_budget.clone(),
         stop: Some(stop.clone()),
         participant: room.local_participant(),
         track: track.clone(),
@@ -2548,28 +3249,32 @@ async fn publish_camera(
             return Err(VoiceError::CameraWorker(error.to_string()));
         }
     }
-    if let Err(error) = room
-        .local_participant()
-        .publish_track(
-            LocalTrack::Video(track.clone()),
-            TrackPublishOptions {
-                source: TrackSource::Camera,
-                ..video_publish_options(
-                    room.e2ee_manager().encryption_type() != EncryptionType::None,
-                    VideoEncoding {
-                        max_bitrate: settings.max_bitrate,
-                        max_framerate: f64::from(settings.frame_rate),
-                    },
-                )
-            },
-        )
-        .await
+    if let Err(error) = publish_budgeted_video(
+        &room.local_participant(),
+        &track,
+        TrackPublishOptions {
+            source: TrackSource::Camera,
+            ..video_publish_options(
+                room.e2ee_manager().encryption_type() != EncryptionType::None,
+                VideoEncoding {
+                    max_bitrate: settings.max_bitrate,
+                    max_framerate: f64::from(settings.frame_rate),
+                },
+            )
+        },
+        &send_budget,
+        &budget_source,
+        settings.max_bitrate,
+    )
+    .await
     {
         stop.store(true, Ordering::Release);
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
-        return Err(error.into());
+        return Err(error);
     }
     let video = PublishedVideo {
+        send_budget,
+        budget_source,
         audio: None,
         audio_capture_thread: None,
         capture_failure: failure,
@@ -2581,8 +3286,7 @@ async fn publish_camera(
         adjustment: None,
         capture_level,
         variants: Arc::new(Mutex::new(Vec::new())),
-        requested_variant: None,
-        variant_retry: 0,
+        compatible_codec: VideoCodec::VP8,
         track,
         stop,
         capture_thread: Some(capture_thread),
@@ -2775,12 +3479,12 @@ fn publish_camera_frame(
     y.copy_from_slice(&converted.y);
     u.copy_from_slice(&converted.u);
     v.copy_from_slice(&converted.v);
-    let shift = capture_level.load(Ordering::Acquire).min(3);
+    let level = capture_level.load(Ordering::Acquire);
     let (width, height) = bounded_dimensions(
         converted.width,
         converted.height,
-        (settings.width >> shift).max(320),
-        (settings.height >> shift).max(180),
+        adapted_dimension(settings.width, level, 320),
+        adapted_dimension(settings.height, level, 180),
     );
     let buffer = if width != converted.width || height != converted.height {
         let (Ok(width), Ok(height)) = (i32::try_from(width), i32::try_from(height)) else {
@@ -2812,8 +3516,11 @@ async fn stop_published_video(
     if let Some(worker) = publication.audio_capture_thread.take() {
         let _ = tokio::task::spawn_blocking(move || worker.join()).await;
     }
-    if let Some(adjustment) = publication.adjustment.take() {
-        let _ = adjustment.await;
+    if let Some(adjustment) = publication.adjustment.take()
+        && let Ok(Some((track, codec))) = adjustment.await
+    {
+        publication.track = track;
+        publication.compatible_codec = codec;
     }
     let variants = publication
         .variants
@@ -2821,19 +3528,27 @@ async fn stop_published_video(
         .map(|mut tracks| std::mem::take(&mut *tracks))
         .unwrap_or_default();
     for variant in variants {
-        let _ = room
-            .local_participant()
-            .unpublish_track(&variant.sid())
-            .await;
+        let _ = unpublish_budgeted_video(
+            &room.local_participant(),
+            &variant,
+            &publication.send_budget,
+        )
+        .await;
     }
     publication.stop.store(true, Ordering::Release);
     if let Some(capture_thread) = publication.capture_thread.take() {
         let _ = tokio::task::spawn_blocking(move || capture_thread.join()).await;
     }
-    room.local_participant()
-        .unpublish_track(&publication.track.sid())
-        .await?;
-    Ok(())
+    let result = unpublish_budgeted_video(
+        &room.local_participant(),
+        &publication.track,
+        &publication.send_budget,
+    )
+    .await;
+    let mut budget = publication.send_budget.lock().await;
+    budget.sources.remove(&publication.budget_source);
+    budget.apply(None);
+    result
 }
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
@@ -2911,18 +3626,7 @@ fn run_screen_capture(
     capturer.start_capture(selected, move |result| match result {
         Ok(frame) => {
             let level = frame_level.load(Ordering::Acquire).min(3);
-            // Text shares retain resolution until the lowest budget; motion
-            // shares trade pixels before dropping below smooth playback.
-            let shift = if settings.frame_rate <= 15 {
-                u32::from(level == 3)
-            } else {
-                level
-            };
-            let adapted = ScreenShareSettings {
-                width: (settings.width >> shift).max(640),
-                height: (settings.height >> shift).max(360),
-                ..settings
-            };
+            let adapted = adapted_screen_settings(settings, level);
             let Some(buffer) = prepare_screen_frame(&frame, adapted) else {
                 return;
             };
@@ -2949,7 +3653,12 @@ fn run_screen_capture(
         thread::sleep(Duration::from_millis(
             1000_u64
                 / u64::from(
-                    (settings.frame_rate >> capture_level.load(Ordering::Acquire).min(2)).max(5),
+                    adapted_frame_rate(
+                        settings.frame_rate,
+                        capture_level.load(Ordering::Acquire),
+                        settings.frame_rate <= 15,
+                    )
+                    .max(1),
                 ),
         ));
     }
@@ -2981,12 +3690,7 @@ fn run_macos_share(
             let _ = audio.try_send(samples.to_vec());
         },
         &|frame| {
-            let shift = level.load(Ordering::Acquire).min(3);
-            let adapted = ScreenShareSettings {
-                width: (settings.width >> shift).max(640),
-                height: (settings.height >> shift).max(360),
-                ..settings
-            };
+            let adapted = adapted_screen_settings(settings, level.load(Ordering::Acquire));
             if let Some(buffer) = prepare_packed_screen_frame(frame, adapted) {
                 source.capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, buffer));
                 if let Ok(mut ready) = ready.lock()
@@ -3093,6 +3797,8 @@ pub enum VoiceError {
     Audio(#[from] kaede_audio::AudioError),
     #[error("LiveKit failed: {0}")]
     LiveKit(#[from] livekit::RoomError),
+    #[error("video sender could not apply the shared upload limit")]
+    VideoSendBudget,
     #[error("camera capture failed: {0}")]
     Camera(#[from] nokhwa::NokhwaError),
     #[error("No cameras available")]
@@ -3128,6 +3834,7 @@ impl VoiceError {
             Self::Audio(kaede_audio::AudioError::Backend(_)) =>
                 "Kaede could not open the selected audio device. Check your system audio permissions, then choose the device again."
                     .to_owned(),
+            Self::VideoSendBudget => "Video could not start. Try sharing again.".to_owned(),
             Self::LiveKit(_) =>
                 "The voice service could not complete the connection. Check your connection and try joining voice again."
                     .to_owned(),
@@ -3264,48 +3971,377 @@ mod tests {
         }
     }
 
+    fn video_peer(codecs: &[&str], extended: &[&str]) -> super::VideoPeer {
+        super::VideoPeer {
+            v: 1,
+            codecs: codecs.iter().map(|codec| (*codec).to_owned()).collect(),
+            extended_codecs: extended.iter().map(|codec| (*codec).to_owned()).collect(),
+            demand: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn variant_context(level: u8, upload_constrained: bool) -> super::VariantContext {
+        super::VariantContext {
+            level,
+            upload_constrained,
+            cpu_spare: true,
+            cpu_recovered: true,
+            blocked: std::collections::BTreeSet::new(),
+        }
+    }
+
     #[test]
-    fn native_h264_requires_every_viewer_and_respects_explicit_demand() {
+    fn premium_choice_uses_audience_and_av1_wins_ties() {
         let key = "publisher/camera";
         let mut peers = std::collections::BTreeMap::new();
-        peers.insert(
-            "viewer".to_owned(),
-            super::VideoPeer {
-                v: 1,
-                codecs: vec!["vp8".to_owned(), "h264".to_owned()],
-                demand: std::collections::BTreeMap::default(),
-            },
-        );
+        peers.insert("a".to_owned(), video_peer(&["vp8", "av1"], &["h265"]));
+        let context = variant_context(0, false);
         assert_eq!(
-            super::preferred_native_variant(&peers, 1, key, 0),
-            Some(VideoCodec::H264)
-        );
-        assert_eq!(super::preferred_native_variant(&peers, 2, key, 0), None);
-        if let Some(viewer) = peers.get_mut("viewer") {
-            viewer.demand.insert(key.to_owned(), "vp8".to_owned());
-        } else {
-            panic!("viewer fixture is missing");
-        }
-        assert_eq!(super::preferred_native_variant(&peers, 1, key, 0), None);
-        if let Some(viewer) = peers.get_mut("viewer") {
-            viewer.demand.clear();
-            viewer.codecs.push("av1".to_owned());
-        } else {
-            panic!("viewer fixture is missing");
-        }
-        assert_eq!(
-            super::preferred_native_variant(&peers, 1, key, 0),
+            super::preferred_native_variant(&peers, 1, key, &context),
             Some(VideoCodec::AV1)
         );
+        peers.insert("b".to_owned(), video_peer(&["vp8"], &["h265"]));
         assert_eq!(
-            super::preferred_native_variant(&peers, 1, key, 1),
-            Some(VideoCodec::H264)
+            super::preferred_native_variant(&peers, 2, key, &context),
+            Some(VideoCodec::H265)
+        );
+        // A per-source compatible-track demand excludes the viewer from both premium audiences.
+        peers
+            .get_mut("b")
+            .unwrap_or_else(|| panic!("viewer fixture missing"))
+            .demand
+            .insert(key.to_owned(), "vp8".to_owned());
+        assert_eq!(
+            super::preferred_native_variant(&peers, 2, key, &context),
+            Some(VideoCodec::AV1)
+        );
+        let mut blocked = variant_context(0, false);
+        blocked.blocked.insert("av1".to_owned());
+        assert_eq!(
+            super::preferred_native_variant(&peers, 2, key, &blocked),
+            Some(VideoCodec::H265)
         );
     }
 
     #[test]
+    fn compatible_changes_require_the_entire_audience_and_vp9_pressure_only_on_entry() {
+        let key = "publisher/camera";
+        let mut peers = std::collections::BTreeMap::new();
+        peers.insert(
+            "viewer".to_owned(),
+            video_peer(&["vp8", "h264"], &["vp9", "h265"]),
+        );
+        assert_eq!(
+            super::preferred_native_compatible(
+                &peers,
+                1,
+                key,
+                VideoCodec::VP8,
+                &variant_context(0, false)
+            ),
+            VideoCodec::H264
+        );
+        assert_eq!(
+            super::preferred_native_compatible(
+                &peers,
+                2,
+                key,
+                VideoCodec::VP8,
+                &variant_context(0, false)
+            ),
+            VideoCodec::VP8
+        );
+        assert_eq!(
+            super::preferred_native_compatible(
+                &peers,
+                1,
+                key,
+                VideoCodec::VP8,
+                &variant_context(0, true)
+            ),
+            VideoCodec::VP9
+        );
+        // Once selected, bandwidth relief and the recovery counter reset must not flap VP9.
+        let mut relieved = variant_context(0, false);
+        relieved.cpu_recovered = false;
+        assert_eq!(
+            super::preferred_native_compatible(&peers, 1, key, VideoCodec::VP9, &relieved),
+            VideoCodec::VP9
+        );
+        relieved.upload_constrained = true;
+        assert_eq!(
+            super::preferred_native_compatible(&peers, 1, key, VideoCodec::VP8, &relieved),
+            VideoCodec::H264
+        );
+        // A late viewer without hints needs the VP8 publication restored immediately.
+        assert_eq!(
+            super::preferred_native_compatible(&peers, 2, key, VideoCodec::VP9, &relieved),
+            VideoCodec::VP8
+        );
+        let mut unmeasured = variant_context(0, true);
+        unmeasured.cpu_spare = false;
+        assert_eq!(
+            super::preferred_native_compatible(&peers, 1, key, VideoCodec::VP9, &unmeasured),
+            VideoCodec::H264
+        );
+        assert_eq!(
+            super::preferred_native_compatible(&peers, 1, key, VideoCodec::VP8, &unmeasured),
+            VideoCodec::H264
+        );
+        assert_eq!(
+            super::preferred_native_compatible(
+                &peers,
+                1,
+                key,
+                VideoCodec::VP8,
+                &variant_context(1, true)
+            ),
+            VideoCodec::H264
+        );
+        peers
+            .get_mut("viewer")
+            .unwrap_or_else(|| panic!("viewer fixture missing"))
+            .demand
+            .insert(key.to_owned(), "vp8".to_owned());
+        assert_eq!(
+            super::preferred_native_compatible(
+                &peers,
+                1,
+                key,
+                VideoCodec::VP8,
+                &variant_context(0, true)
+            ),
+            VideoCodec::VP8
+        );
+    }
+
+    #[test]
+    fn dual_cast_requires_audience_headroom_and_no_pressure() {
+        let key = "publisher/camera";
+        let mut peers = std::collections::BTreeMap::new();
+        peers.insert("a".to_owned(), video_peer(&["av1", "vp8"], &[]));
+        for name in ["b", "c", "d"] {
+            peers.insert(name.to_owned(), video_peer(&["vp8"], &[]));
+        }
+        assert_eq!(
+            super::preferred_native_variant(&peers, 4, key, &variant_context(0, false)),
+            None
+        );
+        peers.insert("b".to_owned(), video_peer(&["av1", "vp8"], &[]));
+        assert_eq!(
+            super::preferred_native_variant(&peers, 4, key, &variant_context(0, false)),
+            Some(VideoCodec::AV1)
+        );
+        assert_eq!(
+            super::preferred_native_variant(&peers, 4, key, &variant_context(1, false)),
+            None
+        );
+        assert_eq!(
+            super::preferred_native_variant(&peers, 4, key, &variant_context(0, true)),
+            None
+        );
+        assert!(super::pressure_retires_native_variant(
+            &peers,
+            4,
+            key,
+            "av1",
+            &variant_context(0, true)
+        ));
+        peers.remove("b");
+        assert!(!super::pressure_retires_native_variant(
+            &peers,
+            4,
+            key,
+            "av1",
+            &variant_context(0, true)
+        ));
+        assert!(!super::pressure_retires_native_variant(
+            &std::collections::BTreeMap::new(),
+            0,
+            key,
+            "av1",
+            &variant_context(3, true)
+        ));
+        peers.insert("b".to_owned(), video_peer(&["av1", "vp8"], &[]));
+        // An audience-driven swap under pressure does not penalize the previous codec.
+        peers.insert("c".to_owned(), video_peer(&["vp8"], &["h265"]));
+        peers.insert("d".to_owned(), video_peer(&["vp8"], &["h265"]));
+        peers.insert("e".to_owned(), video_peer(&["vp8"], &["h265"]));
+        assert!(!super::pressure_retires_native_variant(
+            &peers,
+            5,
+            key,
+            "av1",
+            &variant_context(1, true)
+        ));
+        peers.remove("e");
+        // One encode can continue under moderate pressure when everyone watches it.
+        peers.remove("c");
+        peers.remove("d");
+        assert_eq!(
+            super::preferred_native_variant(&peers, 2, key, &variant_context(2, true)),
+            Some(VideoCodec::AV1)
+        );
+        assert_eq!(
+            super::preferred_native_variant(&peers, 2, key, &variant_context(3, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn sender_caps_share_one_source_budget_and_restore_the_ladder() {
+        use livekit::webrtc::rtp_parameters::RtpEncodingParameters;
+        let original: Vec<_> = [
+            ("q", 250_000, 4.0),
+            ("h", 750_000, 2.0),
+            ("f", 3_000_000, 1.0),
+        ]
+        .into_iter()
+        .map(|(rid, bitrate, scale)| RtpEncodingParameters {
+            rid: rid.to_owned(),
+            max_bitrate: Some(bitrate),
+            scale_resolution_down_by: Some(scale),
+            ..RtpEncodingParameters::default()
+        })
+        .collect();
+        let mut encodings = original.clone();
+        encodings[0].active = false; // Dynacast still owns subscription-driven activity.
+        assert!((super::compatible_video_scale(3840, 2160) - 3.0).abs() < f64::EPSILON);
+        assert!((super::compatible_video_scale(2160, 3840) - 3.0).abs() < f64::EPSILON);
+        assert!((super::compatible_video_scale(640, 360) - 1.0).abs() < f64::EPSILON);
+        let dual = super::source_video_bitrate(12_000_000, 0, 2, 2);
+        assert_eq!(dual, 2_000_000);
+        assert!(super::limit_video_encodings(
+            &mut encodings,
+            &original,
+            dual,
+            3.0
+        ));
+        assert_eq!(
+            encodings
+                .iter()
+                .map(|encoding| encoding.max_bitrate.unwrap_or(0))
+                .sum::<u64>(),
+            dual
+        );
+        assert_eq!(encodings[0].max_bitrate, Some(125_000));
+        assert_eq!(encodings[2].max_bitrate, Some(1_500_000));
+        assert_eq!(encodings[0].scale_resolution_down_by, Some(4.0));
+        assert_eq!(encodings[1].scale_resolution_down_by, Some(3.0));
+        assert_eq!(encodings[2].scale_resolution_down_by, Some(3.0));
+        assert!(!encodings[0].active);
+        assert!(!super::limit_video_encodings(
+            &mut encodings,
+            &original,
+            dual,
+            3.0
+        ));
+        let single = super::source_video_bitrate(12_000_000, 0, 1, 1);
+        assert_eq!(single, 8_000_000);
+        assert!(super::limit_video_encodings(
+            &mut encodings,
+            &original,
+            single,
+            1.0
+        ));
+        assert_eq!(encodings[2].scale_resolution_down_by, Some(1.0));
+        assert_eq!(
+            encodings
+                .iter()
+                .map(|encoding| encoding.max_bitrate.unwrap_or(0))
+                .sum::<u64>(),
+            single
+        );
+        assert_eq!(super::source_video_bitrate(1_700_000, 0, 2, 2), 850_000);
+        assert_eq!(super::source_video_bitrate(200_000, 3, 1, 1), 200_000);
+        assert_eq!(super::source_video_bitrate(200_000, 3, 1, 2), 100_000);
+        let mut svc = vec![RtpEncodingParameters {
+            max_bitrate: Some(12_000_000),
+            scalability_mode: Some("L3T3_KEY".to_owned()),
+            ..RtpEncodingParameters::default()
+        }];
+        let mut original_svc = svc.clone();
+        original_svc[0].rid = "q".to_owned();
+        super::limit_video_encodings(&mut svc, &original_svc, dual, 1.0);
+        assert_eq!(svc[0].max_bitrate, Some(dual));
+        assert_eq!(svc[0].scalability_mode.as_deref(), Some("L3T3_KEY"));
+    }
+
+    #[test]
+    fn video_hints_extend_legacy_codecs_without_a_flag_day() {
+        let legacy: super::VideoPeer =
+            serde_json::from_str(r#"{"v":1,"codecs":["vp8","h264","av1"]}"#)
+                .unwrap_or_else(|error| panic!("invalid fixture: {error}"));
+        assert!(legacy.valid());
+        assert!(!legacy.supports("h265"));
+        let extended: super::VideoPeer = serde_json::from_str(r#"{"v":1,"codecs":["vp8","h264","av1"],"extendedCodecs":["h265","vp9","future"],"futureField":true}"#).unwrap_or_else(|error| panic!("invalid fixture: {error}"));
+        assert!(extended.valid());
+        assert!(extended.supports("h265"));
+        let wrong_field = video_peer(&["vp8", "h265"], &[]);
+        assert!(!wrong_field.valid());
+        let too_many = video_peer(&["vp8"], &["h265"; 9]);
+        assert!(!too_many.valid());
+    }
+
+    #[test]
+    fn spatial_layer_trial_delays_premium_fallback_but_not_codec_backoff() {
+        let start = std::time::Instant::now();
+        let mut health = super::ReceiverHealth {
+            health: "decode",
+            layer_trial_until: Some(start + std::time::Duration::from_secs(20)),
+            ..super::ReceiverHealth::default()
+        };
+        assert!(!health.needs_fallback(start + std::time::Duration::from_secs(19)));
+        assert!(health.needs_fallback(start + std::time::Duration::from_secs(20)));
+        health.fail_premium("h265", start);
+        assert!(health.premium_blocked("h265", start));
+        assert!(!health.premium_blocked("av1", start));
+    }
+
+    #[test]
+    fn failed_attempts_back_off_then_stop() {
+        let mut backoff = super::VideoBackoff::default();
+        let start = std::time::Instant::now();
+        assert!(!backoff.blocked("camera/av1/1280x720", start));
+        backoff.fail("camera/av1/1280x720", start);
+        assert!(backoff.blocked(
+            "camera/av1/1280x720",
+            start + std::time::Duration::from_secs(59)
+        ));
+        assert!(!backoff.blocked(
+            "camera/av1/1280x720",
+            start + std::time::Duration::from_mins(1)
+        ));
+        for _ in 0..3 {
+            backoff.fail("camera/av1/1280x720", start);
+        }
+        assert!(backoff.blocked(
+            "camera/av1/1280x720",
+            start + std::time::Duration::from_hours(24)
+        ));
+        let mut health = super::ReceiverHealth::default();
+        health.fail_premium("av1", start);
+        assert!(health.premium_blocked("av1", start + std::time::Duration::from_secs(30)));
+        assert!(!health.premium_blocked("h265", start));
+        assert!(!health.premium_blocked("av1", start + std::time::Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn capture_adaptation_matches_the_shared_steps() {
+        assert_eq!(super::adapted_dimension(1920, 0, 640), 1920);
+        assert_eq!(super::adapted_dimension(1920, 1, 640), 1536);
+        assert_eq!(super::adapted_dimension(1920, 3, 640), 983);
+        assert_eq!(super::adapted_dimension(640, 3, 640), 640);
+        assert_eq!(super::adapted_frame_rate(30, 1, false), 25);
+        assert_eq!(super::adapted_frame_rate(30, 3, false), 18);
+        assert_eq!(super::adapted_frame_rate(15, 2, true), 6);
+        assert_eq!(super::adapted_frame_rate(15, 3, true), 5);
+        assert_eq!(super::adapted_frame_rate(10, 3, false), 10);
+    }
+
+    #[test]
     fn bitrate_adaptation_is_bounded_and_does_not_overflow() {
-        for (level, expected) in [(0, 2_500_000), (1, 1_625_000), (2, 1_056_250), (3, 686_562)] {
+        for (level, expected) in [(0, 2_500_000), (1, 1_800_000), (2, 1_296_000), (3, 933_000)] {
             assert_eq!(super::adapted_bitrate(2_500_000, level), expected);
         }
         assert_eq!(super::adapted_bitrate(0, 3), 300_000);
@@ -3317,19 +4353,55 @@ mod tests {
     }
 
     #[test]
+    fn encode_headroom_survives_brief_stats_gaps_without_renewing_unknown_proof() {
+        let start = std::time::Instant::now();
+        let mut headroom = super::EncodeHeadroom::default();
+        headroom.observe(None, false, start);
+        assert!(!headroom.has_spare(start));
+        headroom.observe(Some(0.2), false, start);
+        for seconds in [2, 8, 9] {
+            let now = start + std::time::Duration::from_secs(seconds);
+            headroom.observe(None, false, now);
+            assert!(headroom.has_spare(now));
+        }
+        let expired = start + super::video_policy::UPLOAD_WARMUP;
+        assert!(!headroom.has_spare(expired));
+        headroom.observe(None, false, expired);
+        assert!(!headroom.has_spare(expired));
+        for (load, overloaded) in [(Some(0.5), false), (None, true), (Some(f64::NAN), false)] {
+            headroom.observe(Some(0.2), false, expired);
+            assert!(headroom.has_spare(expired));
+            headroom.observe(load, overloaded, expired);
+            assert!(!headroom.has_spare(expired));
+        }
+        headroom.observe(Some(0.2), false, expired);
+        assert!(headroom.has_spare(expired + std::time::Duration::from_secs(9)));
+    }
+
+    #[test]
     fn combined_video_budget_requires_sustained_evidence_and_slow_recovery() {
         let mut budget = super::VideoBudget::default();
-        assert!(!budget.observe(true, false));
-        assert!(!budget.observe(false, false));
-        assert!(!budget.observe(false, true));
-        assert!(!budget.observe(false, true));
-        assert!(budget.observe(false, true));
+        assert!(!budget.observe(true));
+        assert!(!budget.observe(false));
+        assert!(!budget.observe(true));
+        assert!(!budget.observe(true));
+        assert!(budget.observe(true));
         assert_eq!(budget.level, 1);
-        for _ in 0..5 {
-            assert!(!budget.observe(false, false));
+        for _ in 0..14 {
+            assert!(!budget.observe(false));
         }
-        assert!(budget.observe(false, false));
+        assert!(budget.observe(false));
         assert_eq!(budget.level, 0);
+        // Upload pressure never raises the encode level; it is tracked apart.
+        let mut upload = super::UploadPressure::default();
+        for _ in 0..3 {
+            upload.observe(true);
+        }
+        assert!(upload.constrained);
+        for _ in 0..15 {
+            upload.observe(false);
+        }
+        assert!(!upload.constrained);
     }
 
     #[test]

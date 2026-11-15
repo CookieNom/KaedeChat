@@ -298,13 +298,8 @@ describe('self voice-state publication', () => {
     const rooms = [new FakeVoiceRoom(), candidate];
     const voice = new VoiceSession(() => rooms.shift() as unknown as Room);
     await voice.connect(grant({ expires_at: '2099-07-19T12:15:00Z' }), plaintextChannel);
-    await voice.toggleCamera();
-    await voice.startScreenShare({
-      screenProfile: 'smooth',
-      audioQuality: 'standard',
-      shareAudio: false,
-      dtx: true
-    });
+    voice.camera = true;
+    voice.screen = true;
 
     await voice.reconcileBrowserPermissions({
       canConnect: true,
@@ -344,13 +339,8 @@ describe('self voice-state publication', () => {
     expect(voice.pushToTalkRequired).toBe(false);
 
     await voice.toggleMicrophone();
-    await voice.toggleCamera();
-    await voice.startScreenShare({
-      screenProfile: 'smooth',
-      audioQuality: 'standard',
-      shareAudio: false,
-      dtx: true
-    });
+    voice.camera = true;
+    voice.screen = true;
     await voice.reconcileParticipantPermissions({
       canSpeak: false,
       canStream: false,

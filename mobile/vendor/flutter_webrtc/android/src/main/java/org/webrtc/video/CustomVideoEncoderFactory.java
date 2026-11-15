@@ -5,6 +5,13 @@ import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.os.Build;
 import org.webrtc.HardwareVideoEncoderFactory;
+import org.webrtc.EncodedImage;
+import org.webrtc.JavaI420Buffer;
+import org.webrtc.VideoFrame;
+import org.webrtc.VideoCodecStatus;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.cloudwebrtc.webrtc.SimulcastVideoEncoderFactoryWrapper;
 
@@ -44,25 +51,77 @@ public class CustomVideoEncoderFactory implements VideoEncoderFactory {
 
     // Query the encoder selected by the same primary factory used for sending,
     // not an arbitrary MediaCodec which WebRTC may never choose.
-    public String hardwareEncoderForSettings(String codec, int width, int height, int fps, int bitrate) {
-        if (Build.VERSION.SDK_INT < 29 || forceSWCodec || width <= 0 || height <= 0 || fps <= 0 || bitrate <= 0) return null;
+    public String hardwareEncoderForSettings(String codec, int width, int height, int fps, int bitrate,
+                                             String scalabilityMode) {
+        // Java's encoder settings do not carry scalability modes. Prove only the
+        // single-layer configuration that this bridge can actually initialize.
+        if (!"L1T1".equals(scalabilityMode) || Build.VERSION.SDK_INT < 29 || forceSWCodec ||
+            width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
+            fps <= 0 || fps > 120 || bitrate <= 0 || bitrate > 100000000) return null;
+        final String mime;
+        switch (codec.toLowerCase(java.util.Locale.ROOT)) {
+            case "av1": mime = "video/av01"; break;
+            case "vp8": mime = "video/x-vnd.on2.vp8"; break;
+            case "vp9": mime = "video/x-vnd.on2.vp9"; break;
+            case "h264": mime = "video/avc"; break;
+            case "h265": mime = "video/hevc"; break;
+            default: return null;
+        }
         for (String forced : forceSWCodecs) if (forced.equalsIgnoreCase(codec)) return null;
         for (VideoCodecInfo info : hardwareFactory.getSupportedCodecs()) {
             if (!info.name.equalsIgnoreCase(codec)) continue;
             VideoEncoder encoder = hardwareFactory.createEncoder(info);
             if (encoder == null) continue;
-            String selected = encoder.getImplementationName();
-            // HardwareVideoEncoder construction does not allocate a MediaCodec;
-            // release it on the creating thread before inspecting capabilities.
-            encoder.release();
-            for (MediaCodecInfo candidate : new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos()) {
-                if (!candidate.getName().equals(selected) || !candidate.isEncoder() || !candidate.isHardwareAccelerated()) continue;
-                String mime = codec.equalsIgnoreCase("av1") ? "video/av01" : codec.equalsIgnoreCase("vp8") ? "video/x-vnd.on2.vp8" : "video/avc";
-                try {
+            try {
+                String selected = encoder.getImplementationName();
+                boolean capable = false;
+                for (MediaCodecInfo candidate : new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos()) {
+                    if (!candidate.getName().equals(selected) || !candidate.isEncoder() || !candidate.isHardwareAccelerated()) continue;
                     MediaCodecInfo.VideoCapabilities video = candidate.getCapabilitiesForType(mime).getVideoCapabilities();
-                    return video != null && video.areSizeAndRateSupported(width, height, fps) && video.getBitrateRange().contains(bitrate) ? selected : null;
-                } catch (IllegalArgumentException ignored) { return null; }
-            }
+                    capable = video != null && video.areSizeAndRateSupported(width, height, fps) && video.getBitrateRange().contains(bitrate);
+                    break;
+                }
+                if (!capable) continue;
+                final int frames = Math.max(1, Math.min(15, fps / 2));
+                CountDownLatch output = new CountDownLatch(frames);
+                AtomicBoolean failed = new AtomicBoolean(false);
+                VideoEncoder.Settings settings = new VideoEncoder.Settings(
+                    Math.max(1, Runtime.getRuntime().availableProcessors()), width, height,
+                    Math.max(1, bitrate / 1000), fps, 1, false);
+                if (encoder.initEncode(settings, (image, details) -> {
+                    if (image.encodedWidth != width || image.encodedHeight != height || image.buffer.remaining() == 0) failed.set(true);
+                    output.countDown();
+                }) != VideoCodecStatus.OK) continue;
+                if (encoder.setRateAllocation(new VideoEncoder.BitrateAllocation(new int[][] {{bitrate}}), fps) != VideoCodecStatus.OK) continue;
+                long started = System.nanoTime();
+                for (int i = 0; i < frames; i++) {
+                    // Burst submission measures queue depth and drops frames on otherwise capable hardware.
+                    long waitNanos = started + i * 1000000000L / fps - System.nanoTime();
+                    if (waitNanos > 0) TimeUnit.NANOSECONDS.sleep(waitNanos);
+                    JavaI420Buffer buffer = JavaI420Buffer.allocate(width, height);
+                    // An initialized synthetic image avoids reading uninitialized pixel memory.
+                    java.nio.ByteBuffer y = buffer.getDataY(), u = buffer.getDataU(), v = buffer.getDataV();
+                    while (y.hasRemaining()) y.put((byte)64);
+                    while (u.hasRemaining()) u.put((byte)128);
+                    while (v.hasRemaining()) v.put((byte)128);
+                    VideoFrame frame = new VideoFrame(buffer, 0, i * 1000000000L / fps);
+                    try {
+                        EncodedImage.FrameType type = i == 0 ? EncodedImage.FrameType.VideoFrameKey : EncodedImage.FrameType.VideoFrameDelta;
+                        if (encoder.encode(frame, new VideoEncoder.EncodeInfo(new EncodedImage.FrameType[] {type})) != VideoCodecStatus.OK) {
+                            failed.set(true);
+                            break;
+                        }
+                    } finally { frame.release(); }
+                }
+                boolean complete = output.await(1500, TimeUnit.MILLISECONDS);
+                if (complete && !failed.get() &&
+                    System.nanoTime() - started <= (long)(1000000000.0 * frames / fps * 1.25)) return selected;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (RuntimeException unavailable) {
+                // A listed encoder can still reject initialization or run out of sessions.
+            } finally { encoder.release(); }
         }
         return null;
     }
@@ -70,6 +129,11 @@ public class CustomVideoEncoderFactory implements VideoEncoderFactory {
     @Nullable
     @Override
     public VideoEncoder createEncoder(VideoCodecInfo videoCodecInfo) {
+        if (videoCodecInfo.name.equalsIgnoreCase("h265")) {
+            if (forceSWCodec) return null;
+            for (String codec : forceSWCodecs) if (codec.equalsIgnoreCase("h265")) return null;
+            return hardwareFactory.createEncoder(videoCodecInfo);
+        }
         if(forceSWCodec) {
             return softwareVideoEncoderFactory.createEncoder(videoCodecInfo);
         }

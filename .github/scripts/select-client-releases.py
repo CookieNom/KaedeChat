@@ -37,6 +37,8 @@ def required_assets(tag):
 
 
 def affected_clients(path):
+    if path == "docs/av1-e2ee/webrtc-build.patch":
+        return {"android", "ios"}
     # Documentation and retired clients don't change shipping binaries.
     if path.endswith(".md") or path.startswith(("desktop/docs/", "desktop/legacy-slint/")):
         return set()

@@ -1,33 +1,35 @@
-# Encrypted AV1 validation
+# Premium codec and E2EE validation
 
-Encrypted and plaintext calls follow the same codec policy: a compatible VP8 or
-H.264 track, plus a separate single-layer AV1 track when the sender proves a
-hardware encoder and a viewer can use it. Encrypted AV1 requires coordinated updates of all
-desktop, browser and mobile installations. Current Rust dependency
-pins are in [desktop/Cargo.toml](../../desktop/Cargo.toml); the browser patch is
-[the LiveKit patch](../../frontend/patches/livekit-client@2.20.1.patch), and the
-mobile build changes are in [webrtc-build.patch](webrtc-build.patch).
+Encrypted and plaintext calls share the [codec policy](../screen-sharing-quality.md#codec-defaults):
+one compatible stream and at most one hardware-encoded AV1 or HEVC stream per
+source. AV1 wins equal audiences. HEVC requires hardware decoding too. VP9 may
+replace the compatible stream under upload pressure with a fully capable audience
+and measured CPU headroom. Encryption stays enabled through every transition.
 
-The original failures came from encrypting AV1 OBU structure needed by RTP,
-browser cryptors rejecting AV1, and missing cryptors on backup senders. Desktop
-and mobile also used PBKDF2 while the browser's raw key provider used HKDF; the
-application now explicitly selects HKDF on all three platforms with its existing
-`kaede-livekit-v1` salt.
+The `kaede.video.v1` legacy fields remain compatible with existing Kaede clients.
+Only the additive `extendedCodecs` field advertises HEVC/VP9; old clients ignore
+it and retain compatible video. Clients without hints become VP8-only after the
+eight-second grace period. The existing Kaede AV1 encryption format is unchanged.
+An upstream client's AV1 MIME support alone is still not evidence that it
+implements that format.
 
-The patch keeps necessary AV1 structure clear **and authenticated**, encrypts the
-remaining bytes using the existing AES-GCM implementation, and carries the IV/tag
-in a versioned metadata OBU. This is a Kaede-specific experimental wire format.
-See the Rust fork's `webrtc-sys/src/av1_e2ee/README.md` for details and ABI limits.
-An upstream client advertising AV1 does not imply support for this encryption
-format. Kaede ships matching native mobile binaries and patched Flutter packages
-from `mobile/vendor/livekit_client` and `mobile/vendor/flutter_webrtc`. The latter
-forwards the HKDF setting through the Android/iOS native bridges.
-Older clients must update before joining
-this rollout; there is no version-negotiation layer.
+The AV1 cryptor leaves required OBU structure clear **and authenticated**, encrypts
+the remaining bytes with AES-GCM, and carries the IV/tag in a versioned metadata
+OBU. HEVC uses the H.265 NAL path. H.264/HEVC headers are authenticated, including
+long parameter sets; native clear-prefix lengths use `size_t`, not `uint8_t`.
+Annex B start codes are normalized before authentication, and escaped ciphertext
+is restored before extracting the IV/trailer. All clients retain HKDF and the
+existing `kaede-livekit-v1` salt. No key material should appear in native logs.
 
-## Reproduce
+The browser patch is [livekit-client 2.24.1](../../frontend/patches/livekit-client@2.24.1.patch),
+including upstream's H.264/H.265 detection fixes. It preserves the explicitly
+requested scalability mode on screen shares. AV1/VP9 spatial modes and HEVC
+temporal modes are used only after the exact mode passes the encoder probe;
+mobile's native bridge currently proves and publishes `L1T1` only.
 
-Browser cryptor tests (Node 22):
+## Browser checks and diagnostics
+
+With Node 22:
 
 ```sh
 cd frontend
@@ -35,59 +37,132 @@ pnpm install --frozen-lockfile
 pnpm test:livekit-crypto
 ```
 
-For real RTP interoperability, start LiveKit 1.13.3 in dev mode on loopback
-port 17880, using its devkey/secret credentials, and build the Rust fork tests:
+Tests cover AV1 layered OBUs, HEVC key/delta frames with long parameter sets,
+three/four-byte start codes, header/ciphertext tampering, plaintext, key rotation,
+and compatible/premium sender cleanup. The SDK options tests ensure screen
+shares preserve the requested mode and HEVC cannot acquire spatial layers or
+simulcast implicitly.
 
-```sh
-cargo test -p livekit --features __lk-e2e-test --test backup_codec_test --no-run
-```
-
-Install Python Playwright and its Chromium browser in a disposable environment,
-then from the app repository:
-
-```sh
-LIVEKIT_INTEROP_TEST_BINARY=/absolute/path/to/target/debug/deps/backup_codec_test-HASH \
-  python docs/av1-e2ee/interop.py
-```
-
-The harness uses synthetic keys, localhost only, and checks decoded frames plus
-actual RTP codec statistics. It runs AV1 in both directions and a late-joining VP8
-receiver while another receiver uses AV1. `LIVEKIT_JS_DIST` optionally selects a
-patch workspace's `dist` directory. Native logs go to the temporary directory.
+Open `/codec-probe` to inspect advertised and observed encode/decode support at
+720p, 1080p or 4K. Download its JSON when investigating driver differences.
+Hardware names can be hidden without active camera permission; the optional
+**Reveal hardware names** control explains and requests that access. Synthetic
+loopback results do not prove encrypted RTP interoperability.
 
 To rebuild the browser patch, create a pnpm patch workspace for livekit-client
-2.20.1, edit its source, then run `node scripts/rebuild-livekit-patch.mjs /path/to/workspace`
-from `frontend` and `pnpm patch-commit /path/to/workspace`. Re-run both cryptor and
-interop tests. The rebuild script uses the existing Vite/esbuild dependency.
+2.24.1, edit its source, then run
+`node scripts/rebuild-livekit-patch.mjs /path/to/workspace` from `frontend`, followed
+by `pnpm patch-commit /path/to/workspace`. Re-run the cryptor and RTP checks.
 
-## Mobile native builds and rollout
+## Desktop native artifacts
 
-The mobile WebRTC CI workflow builds and caches the patched Android AAR and iOS
-XCFramework from pinned source revisions. Main CI consumes those artifacts before
-building either app. Gradle substitutes the hosted Android library with the local
-Maven artifact; CocoaPods resolves both plugins' WebRTC dependency to the local
-framework. Missing artifacts fail the build instead of using the stock cryptor.
+Desktop source pins and header download hashes live in
+[codec_sources.json](../../desktop/tool/codec_sources.json). The
+[preparation script](../../desktop/tool/prepare_codecs.py) applies repository
+patches to an ignored `desktop/native/rust-sdks` checkout without editing the
+Cargo cache or requiring a fork push. Cargo uses the patched `livekit`,
+`libwebrtc` and `webrtc-sys` crates, including initial sender bitrate controls.
+The custom WebRTC archive must match those sources and enable
+`rtc_use_h265`; `LK_CUSTOM_WEBRTC` selects it. A mismatched or incomplete artifact
+fails verification.
 
-For local builds, run from the repository root (Linux for Android, macOS for iOS):
+The native workflow builds this archive on each target OS; release/CI jobs
+consume it and obtain pinned CUDA headers without installing a CUDA toolkit.
+NVIDIA driver libraries are loaded at runtime. Windows machines without NVIDIA
+can use their registered hardware Media Foundation transforms; macOS uses
+VideoToolbox. Codec advertisement and hardware probes remain authoritative:
+NVIDIA's NVENC has no VP9 encoder, and a GPU model or OS version alone never
+proves a particular codec/configuration.
+
+Media Foundation enumerates hardware transforms across adapters, including an
+Intel iGPU alongside a discrete GPU. Microsoft's HEVC codec is an
+[optional codec installation](https://support.microsoft.com/en-us/windows/apps/windowsmediaplayer/codecs-faq);
+vendor transforms may be registered independently. Its
+[decoder can fall back to software](https://learn.microsoft.com/en-us/windows/win32/medfound/h-265---hevc-video-decoder),
+so installing the extension does not establish Kaede hardware support.
+
+For an explicitly requested local native build, prepare sources and build on the
+target OS (the default workflow is CI):
+
+```sh
+python3 desktop/tool/prepare_codecs.py --cuda
+python3 desktop/tool/build_webrtc.py --work-dir /absolute/empty/build-directory
+python3 desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc
+```
+
+Use the printed `LK_CUSTOM_WEBRTC` and `CUDA_HOME` paths for the desktop build.
+The SDK/WebRTC pins are an ABI pair, not interchangeable with the latest SDK
+release: the fork carries Kaede's AV1 wire format and native extensions. Update
+the pair and rebase its patches together; do not replace a single prebuilt or
+claim an untested upstream revision is compatible.
+
+## RTP interoperability
+
+Use a hardware-capable host and a browser with HEVC WebRTC support. Start
+LiveKit 1.13.3 in dev mode on loopback port 17880 with devkey/secret. Prepare the
+patched native sources/artifact above, then build the native fixture in CI or an
+explicitly authorized local native validation:
+
+```sh
+cargo test --manifest-path desktop/native/rust-sdks/Cargo.toml \
+  -p livekit --features __lk-e2e-test --test backup_codec_test --no-run
+```
+
+Install Python Playwright and its browser in a disposable environment, then run
+from the application repository:
+
+```sh
+LIVEKIT_INTEROP_TEST_BINARY=/absolute/path/to/backup_codec_test-HASH \
+  python docs/av1-e2ee/interop.py --codecs av1 h265 --modes L1T1 L1T3 L3T3_KEY
+```
+
+HEVC spatial-mode cases are excluded. The remaining matrix covers encrypted and
+plaintext video in both directions, with and without a late VP8-only viewer.
+It checks decoded frames, actual RTP codec/mode, and HEVC hardware evidence.
+Missing hardware is a failed requirement, not a successful skip. Select a
+suitable installed Chrome through `PLAYWRIGHT_CHROMIUM_EXECUTABLE`; use
+`--headed` when the hardware driver needs a visible browser. The harness grants
+access only to Chromium's synthetic camera to expose hardware statistics.
+`LIVEKIT_JS_DIST` optionally selects a patch workspace's `dist` directory.
+Keys are synthetic, signaling is localhost-only, and native logs use temporary
+files.
+
+## Mobile native artifacts
+
+The mobile WebRTC workflow builds the patched Android AAR and iOS XCFramework
+from WebRTC 150.7871.06 and [webrtc-build.patch](webrtc-build.patch), with exact
+source and build-helper commits in `mobile/tool/build_webrtc.py`. The vendored
+Dart packages are LiveKit 2.13.2 and flutter_webrtc 1.6.3, rebased with Kaede's
+track/cryptor extensions. The M150 update includes upstream's TURN/TLS trust-root
+removal and current H.264 encryption fixes. Update the native pins, plugin
+constraints and patch together. App CI consumes these artifacts. Gradle uses the generated Maven package and CocoaPods uses the
+local framework; missing artifacts fail the build instead of selecting stock
+cryptors. The native H.26x header regression vectors run in that workflow.
+
+The vendored Flutter SDK installs cryptors for AV1, HEVC and VP9 before
+negotiation and retains key rotation/cleanup for all senders. Android rejects
+unknown probe codecs and tests the encoder selected by its actual hardware
+factory. Apple advertises HEVC only through its VideoToolbox path and requires
+hardware sessions. HEVC publishing requires iOS 17.4+, and decoding requires iOS
+17+, because those releases expose the hardware requirement and verification
+properties; earlier iOS versions retain compatible video. The iOS AV1 software
+encoder never passes the hardware probe. VP9 is explicitly enabled in the native
+build but remains subject to the compatible-track upload and CPU policy.
+
+For explicitly requested local builds (Linux for Android, macOS for iOS):
 
 ```sh
 python3 mobile/tool/build_webrtc.py android --work-dir /tmp/kaede-webrtc-android
 python3 mobile/tool/build_webrtc.py ios --work-dir /tmp/kaede-webrtc-ios
 ```
 
-These are substantial Chromium/WebRTC source builds requiring native build tools,
-network access and ample disk space. Alternatively, download the matching
-`kaede-webrtc-android` or `kaede-webrtc-ios` artifact from this revision's CI and
-extract its tar file into `mobile/native/webrtc`. Rebuild after changing the source
-pins or native patch. The generated build manifest records both pins and patch hash.
+Alternatively, extract this revision's `kaede-webrtc-android` or
+`kaede-webrtc-ios` artifact into `mobile/native/webrtc`. Rebuild after changing
+source pins or patches; manifests record both pins and the patch hash.
 
-Flutter queries sender codec capabilities for encrypted calls as well as plaintext
-calls. Publishing uses the same baseline track and adaptive AV1 variant in both
-cases, and encryption remains enabled either way. The vendored SDK installs
-video encryptors before negotiation, attaches AV1 receiver decryptors, and covers
-backup senders in key rotation and unpublish cleanup.
-
-Before distributing the coordinated update, validate Android/iOS device calls,
-Windows/macOS native builds, mixed AV1/VP8 receivers, camera and screen sharing,
-late joins and reconnects. Refresh existing browser tabs and replace older test builds;
-ordinary AV1 capability does not make those older builds compatible.
+Before release, validate physical Android/iOS devices, Windows Intel/AMD/NVIDIA
+(including multiple adapters), macOS and Linux/NVIDIA. Include camera and screen
+sharing, both encryption modes, AV1/HEVC audience ties, late VP8 viewers,
+reconnects, key rotation, driver/session exhaustion, and upload/encode pressure.
+Native compilation in CI and successful hardware RTP runs are separate required
+evidence; source patches and browser cryptor tests alone do not establish them.

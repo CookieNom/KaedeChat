@@ -17,6 +17,15 @@ the normal Make targets or release workflow.
 Install Node 22, pnpm 10.34, Rust 1.97.1, the Tauri CLI, and the native libraries
 listed in [platform support](docs/platform-support.md). Then:
 
+Prepare the patched codec SDK and extract the matching `kaede-desktop-webrtc`
+CI artifact for your OS/architecture into `desktop/native/webrtc`. See the
+[native codec instructions](../docs/av1-e2ee/README.md#desktop-native-artifacts)
+for rebuilding it. From the repository root, run
+`python3 desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc`
+and export the printed `LK_CUSTOM_WEBRTC` and (on Windows/Linux) `CUDA_HOME`
+paths before running Cargo or the desktop Make targets. Stock WebRTC prebuilts
+do not contain the required HEVC support.
+
 ```sh
 pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend build

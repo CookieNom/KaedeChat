@@ -78,7 +78,8 @@ class StreamTextOptions {
   });
 
   @override
-  String toString() => '${runtimeType}'
+  String toString() =>
+      '${runtimeType}'
       '(topic: $topic, destinationIdentities: $destinationIdentities, '
       'streamId: $streamId, totalSize: $totalSize, type: $type, version: $version, '
       'replyToStreamId: $replyToStreamId, attachedStreamIds: $attachedStreamIds)';
@@ -106,7 +107,8 @@ class StreamBytesOptions {
   });
 
   @override
-  String toString() => '${runtimeType}'
+  String toString() =>
+      '${runtimeType}'
       '(name: $name, mimeType: $mimeType, topic: $topic, destinationIdentities: $destinationIdentities, '
       'attributes: $attributes, streamId: $streamId, totalSize: $totalSize, encryptionType: $encryptionType)';
 }
@@ -159,11 +161,22 @@ class DataStreamController<T extends DataStream_Chunk> {
     this.endTime,
   });
 
-  Future<void> close() => streamController.close();
+  bool get isClosed => streamController.isClosed;
 
-  void write(T chunk) => streamController.add(chunk);
+  Future<void> close() {
+    if (isClosed) return Future.value();
+    return streamController.close();
+  }
 
-  void error(DataStreamError error) => streamController.addError(error);
+  void write(T chunk) {
+    if (isClosed) return;
+    streamController.add(chunk);
+  }
+
+  void error(DataStreamError error) {
+    if (isClosed) return;
+    streamController.addError(error);
+  }
 }
 
 class ByteStreamInfo extends BaseStreamInfo {
@@ -179,18 +192,19 @@ class ByteStreamInfo extends BaseStreamInfo {
     required String sendingParticipantIdentity,
     EncryptionType encryptionType = EncryptionType.kNone,
   }) : super(
-          id: id,
-          mimeType: mimeType,
-          topic: topic,
-          timestamp: timestamp,
-          size: size,
-          attributes: attributes,
-          sendingParticipantIdentity: sendingParticipantIdentity,
-          encryptionType: encryptionType,
-        );
+         id: id,
+         mimeType: mimeType,
+         topic: topic,
+         timestamp: timestamp,
+         size: size,
+         attributes: attributes,
+         sendingParticipantIdentity: sendingParticipantIdentity,
+         encryptionType: encryptionType,
+       );
 
   @override
-  String toString() => '${runtimeType}'
+  String toString() =>
+      '${runtimeType}'
       '(name: $name, id: $id, mimeType: $mimeType, topic: $topic, '
       'timestamp: $timestamp, size: $size, attributes: $attributes)';
 }
@@ -263,18 +277,19 @@ class TextStreamInfo extends BaseStreamInfo {
     required String sendingParticipantIdentity,
     EncryptionType encryptionType = EncryptionType.kNone,
   }) : super(
-          id: id,
-          mimeType: mimeType,
-          topic: topic,
-          timestamp: timestamp,
-          size: size,
-          attributes: attributes,
-          encryptionType: encryptionType,
-          sendingParticipantIdentity: sendingParticipantIdentity,
-        );
+         id: id,
+         mimeType: mimeType,
+         topic: topic,
+         timestamp: timestamp,
+         size: size,
+         attributes: attributes,
+         encryptionType: encryptionType,
+         sendingParticipantIdentity: sendingParticipantIdentity,
+       );
 
   @override
-  String toString() => '${runtimeType}'
+  String toString() =>
+      '${runtimeType}'
       '(id: $id, mimeType: $mimeType, topic: $topic, '
       'timestamp: $timestamp, size: $size, attributes: $attributes)';
 }

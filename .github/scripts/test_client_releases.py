@@ -93,6 +93,8 @@ fi
             "mobile/lib/main.dart": {"android", "ios"},
             "mobile/pubspec.lock": {"android", "ios"},
             "mobile/tool/build_e2ee_native.sh": {"android", "ios"},
+            "docs/av1-e2ee/webrtc-build.patch": {"android", "ios"},
+            "desktop/patches/livekit-hardware-codecs.patch": {"desktop"},
             "mobile/android/app/build.gradle.kts": {"android"},
             "mobile/ios/Podfile.lock": {"ios"},
             "desktop/crates/kaede-e2ee/src/lib.rs": set(selector.CLIENTS),

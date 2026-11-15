@@ -69,16 +69,16 @@ abstract class TrackPublication<T extends Track> extends Disposable {
   TrackPublication({
     required lk_models.TrackInfo info,
     required T? track,
-  })  : sid = info.sid,
-        name = info.name,
-        kind = info.type.toLKType(),
-        source = info.source.toLKType(),
-        // TODO, figure out the replacements to simulcast, width, height.
-        // ignore: deprecated_member_use_from_same_package
-        _simulcasted = info.simulcast,
-        _metadataMuted = info.muted,
-        _mimeType = info.mimeType,
-        _track = track {
+  }) : sid = info.sid,
+       name = info.name,
+       kind = info.type.toLKType(),
+       source = info.source.toLKType(),
+       // TODO, figure out the replacements to simulcast, width, height.
+       // ignore: deprecated_member_use_from_same_package
+       _simulcasted = info.simulcast,
+       _metadataMuted = info.muted,
+       _mimeType = info.mimeType,
+       _track = track {
     if (track != null) _attachTrackListener(track);
     updateFromInfo(info);
   }
@@ -86,6 +86,7 @@ abstract class TrackPublication<T extends Track> extends Disposable {
   /// True when the track is published with source [TrackSource.screenShareVideo].
   bool get isScreenShare => kind == TrackType.VIDEO && source == TrackSource.screenShareVideo;
 
+  @internal
   void updateFromInfo(lk_models.TrackInfo info) {
     // ignore: deprecated_member_use_from_same_package
     _simulcasted = info.simulcast;

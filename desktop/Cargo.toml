@@ -2,6 +2,7 @@
 resolver = "2"
 members = ["crates/*", "tauri/src-tauri"]
 exclude = [
+    "native/rust-sdks",
     "legacy-slint/crates/kaede-desktop",
     "legacy-slint/crates/kaede-media-viewer",
     "legacy-slint/crates/kaede-ui",
@@ -89,5 +90,10 @@ openmls_traits = { version = "=0.6.0" }
 openmls_memory_storage = { version = "=0.6.0" }
 
 [patch."https://github.com/CookieNom/rust-sdks"]
-# This upstream ZIP fix preserves the fork's WebRTC 89d790b ABI; 0.3.21 changes it.
+# Generated reproducibly by desktop/tool/prepare_codecs.py; includes hardware/E2EE fixes.
+livekit = { path = "native/rust-sdks/livekit" }
+libwebrtc = { path = "native/rust-sdks/libwebrtc" }
+webrtc-sys = { path = "native/rust-sdks/webrtc-sys" }
+# Keep the upstream ZIP fix without changing the fork's M150 C++ ABI.
+# The custom WebRTC source revision is pinned in tool/codec_sources.json.
 webrtc-sys-build = { version = "=0.3.20" }

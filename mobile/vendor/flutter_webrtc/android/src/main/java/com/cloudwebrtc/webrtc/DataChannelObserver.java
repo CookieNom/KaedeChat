@@ -20,6 +20,8 @@ class DataChannelObserver implements DataChannel.Observer, EventChannel.StreamHa
     private final EventChannel eventChannel;
     private EventChannel.EventSink eventSink;
     private final ArrayList eventQueue = new ArrayList();
+    private final Object eventLock = new Object();
+    private volatile boolean disposed = false;
 
     DataChannelObserver(BinaryMessenger messenger, String peerConnectionId, String flutterId,
                         DataChannel dataChannel) {
@@ -28,6 +30,31 @@ class DataChannelObserver implements DataChannel.Observer, EventChannel.StreamHa
         eventChannel =
                 new EventChannel(messenger, "FlutterWebRTC/dataChannelEvent" + peerConnectionId + flutterId);
         eventChannel.setStreamHandler(this);
+    }
+
+    /**
+     * Stops delivering events for this data channel and releases everything that
+     * keeps this observer alive. The binary messenger holds on to a stream
+     * handler until it is cleared, so without this the observer and the data
+     * channel it points at stay alive for the whole life of the process. The
+     * native observer is unregistered first so that the JNI adapter holding a
+     * global reference to this object is destroyed too. Calling this more than
+     * once does nothing.
+     *
+     * <p>Must be called while the data channel is still valid, so before
+     * DataChannel.dispose().
+     */
+    void dispose() {
+        if (disposed) {
+            return;
+        }
+        disposed = true;
+        dataChannel.unregisterObserver();
+        eventChannel.setStreamHandler(null);
+        synchronized (eventLock) {
+            eventSink = null;
+            eventQueue.clear();
+        }
     }
 
     private String dataChannelStateString(DataChannel.State dataChannelState) {
@@ -46,18 +73,22 @@ class DataChannelObserver implements DataChannel.Observer, EventChannel.StreamHa
 
     @Override
     public void onListen(Object o, EventChannel.EventSink sink) {
-        eventSink = new AnyThreadSink(sink);
-        for(Object event : eventQueue) {
-            eventSink.success(event);
+        synchronized (eventLock) {
+            eventSink = new AnyThreadSink(sink);
+            for (Object event : eventQueue) {
+                eventSink.success(event);
+            }
+            eventQueue.clear();
         }
-        eventQueue.clear();
     }
 
     @Override
     public void onCancel(Object o) {
-        eventSink = null;
+        synchronized (eventLock) {
+            eventSink = null;
+        }
     }
-    
+
     @Override
     public void onBufferedAmountChange(long amount) {
         ConstraintsMap params = new ConstraintsMap();
@@ -103,10 +134,12 @@ class DataChannelObserver implements DataChannel.Observer, EventChannel.StreamHa
     }
 
     private void sendEvent(ConstraintsMap params) {
-        if (eventSink != null) {
-            eventSink.success(params.toMap());
-        } else {
-            eventQueue.add(params.toMap());
+        synchronized (eventLock) {
+            if (eventSink != null) {
+                eventSink.success(params.toMap());
+            } else {
+                eventQueue.add(params.toMap());
+            }
         }
     }
 }

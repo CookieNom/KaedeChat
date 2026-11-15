@@ -38,7 +38,7 @@
     result([FlutterError errorWithCode:@"mediaStreamTrackSetTorchFailed" message:@"device is nil" details:nil]);
     return;
   }
-  
+
   if (![device isTorchModeSupported:AVCaptureTorchModeOn]) {
     NSLog(@"Current capture device does not support torch. Can't set torch");
     result([FlutterError errorWithCode:@"mediaStreamTrackSetTorchFailed" message:@"device does not support torch" details:nil]);
@@ -75,7 +75,7 @@
     result([FlutterError errorWithCode:@"mediaStreamTrackSetZoomFailed" message:error.localizedDescription details:nil]);
     return;
   }
-  
+
   CGFloat desiredZoomFactor = (CGFloat)zoomLevel;
   device.videoZoomFactor = MAX(1.0, MIN(desiredZoomFactor, device.activeFormat.videoMaxZoomFactor));
   [device unlockForConfiguration];

@@ -31,19 +31,25 @@ void main() {
       ),
       VoiceConnectionPhase.reconnecting,
     );
-    expect(
-      voiceDisconnectIsRecoverable(
-        DisconnectReason.reconnectAttemptsExceeded,
-      ),
-      isTrue,
-    );
+    for (final reason in [
+      DisconnectReason.reconnectAttemptsExceeded,
+      DisconnectReason.migration,
+      DisconnectReason.signalClose,
+      DisconnectReason.connectionTimeout,
+      DisconnectReason.mediaFailure,
+    ]) {
+      expect(voiceDisconnectIsRecoverable(reason), isTrue);
+    }
   });
 
   test('does not auto-restore authoritative voice removals', () {
-    expect(
-      voiceDisconnectIsRecoverable(DisconnectReason.participantRemoved),
-      isFalse,
-    );
+    for (final reason in [
+      DisconnectReason.participantRemoved,
+      DisconnectReason.roomClosed,
+      DisconnectReason.userRejected,
+    ]) {
+      expect(voiceDisconnectIsRecoverable(reason), isFalse);
+    }
     expect(
       resolveVoiceConnectionPhase(
         connecting: false,

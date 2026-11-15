@@ -63,6 +63,8 @@
 }
 
 - (void)dispose {
+  [_eventChannel setStreamHandler:nil];
+  _eventChannel = nil;
   os_unfair_lock_lock(&_lock);
   [_registry unregisterTexture:_textureId];
   _textureId = -1;
@@ -207,11 +209,14 @@
   }
   os_unfair_lock_unlock(&_lock);
 
+  // Frames arrive on a decoder thread and this block runs later on the main
+  // queue, so the renderer may already have been disposed and freed by the
+  // time it runs. The weak reference is then nil and must not be dereferenced.
   __weak FlutterRTCVideoRenderer* weakSelf = self;
   if (_renderSize.width != frame.width || _renderSize.height != frame.height) {
     dispatch_async(dispatch_get_main_queue(), ^{
       FlutterRTCVideoRenderer* strongSelf = weakSelf;
-      if (strongSelf.eventSink) {
+      if (strongSelf != nil && strongSelf.eventSink) {
         strongSelf.eventSink(@{
           @"event" : @"didTextureChangeVideoSize",
           @"id" : @(strongSelf.textureId),
@@ -226,7 +231,7 @@
   if (frame.rotation != _rotation) {
     dispatch_async(dispatch_get_main_queue(), ^{
       FlutterRTCVideoRenderer* strongSelf = weakSelf;
-      if (strongSelf.eventSink) {
+      if (strongSelf != nil && strongSelf.eventSink) {
         strongSelf.eventSink(@{
           @"event" : @"didTextureChangeRotation",
           @"id" : @(strongSelf.textureId),
@@ -238,16 +243,19 @@
     _rotation = frame.rotation;
   }
 
-  // Notify the Flutter new pixelBufferRef to be ready.
-  dispatch_async(dispatch_get_main_queue(), ^{
-    FlutterRTCVideoRenderer* strongSelf = weakSelf;
-    if (!strongSelf->_isFirstFrameRendered) {
+  // Notify Flutter once the first frame has been rendered.
+  if (!_isFirstFrameRendered) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      FlutterRTCVideoRenderer* strongSelf = weakSelf;
+      if (strongSelf == nil || strongSelf->_isFirstFrameRendered) {
+        return;
+      }
       if (strongSelf.eventSink) {
         strongSelf.eventSink(@{@"event" : @"didFirstFrameRendered"});
         strongSelf->_isFirstFrameRendered = true;
       }
-    }
-  });
+    });
+  }
 }
 
 /**

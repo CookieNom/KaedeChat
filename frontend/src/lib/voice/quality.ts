@@ -2,8 +2,10 @@ import {
   VideoPresets,
   type ScreenShareCaptureOptions,
   type TrackPublishOptions,
+  type ScalabilityMode,
   type VideoCaptureOptions
 } from 'livekit-client';
+import { CODECS, VIDEO_CODECS, type Codec } from './video-codecs';
 
 export type ScreenShareProfileId = 'data_saver' | 'smooth' | 'sharp' | 'source';
 export type AudioQualityId = 'data_saver' | 'standard' | 'high' | 'studio';
@@ -249,6 +251,7 @@ export interface VideoCapabilitySettings {
   height: number;
   frameRate: number;
   bitrate: number;
+  scalabilityMode?: ScalabilityMode;
 }
 
 /** Power efficiency alone may also describe software; require an actual hardware implementation. */
@@ -265,84 +268,360 @@ export function isHardwareVideoEncoder(stats: {
   );
 }
 
-export async function webVideoCodecCapabilities(settings: VideoCapabilitySettings): Promise<{
+/*
+ * Probe results persist per browser build and capture settings, so repeated
+ * shares start on the right codec without another loopback encode. Negative
+ * results expire sooner because drivers and power state change. Storage
+ * failures (private mode, blocked site data) only disable persistence.
+ */
+const PROBE_CACHE_KEY = 'kaede.video.hardware.v3';
+const PROBE_POSITIVE_TTL = 7 * 24 * 60 * 60 * 1000;
+// Encoder-session contention, power state and permission changes are transient.
+const PROBE_NEGATIVE_TTL = 60_000;
+type ProbeEntry = { hardware: boolean; at: number; proof?: VideoCodecProbe };
+type ProbeCache = { ua: string; entries: Record<string, ProbeEntry> };
+const sessionProofs = new Map<string, ProbeEntry>();
+const pendingProofs = new Map<string, Promise<VideoCodecProbe>>();
+let probeQueue: Promise<void> = Promise.resolve();
+let cacheGeneration = 0;
+
+function probeKey(codec: string, settings: VideoCapabilitySettings): string {
+  return [
+    codec,
+    settings.scalabilityMode ?? 'L1T1',
+    Math.round(settings.width),
+    Math.round(settings.height),
+    Math.round(settings.frameRate),
+    Math.round(settings.bitrate / 100_000)
+  ].join('/');
+}
+
+function readProbeCache(): ProbeCache {
+  const ua = globalThis.navigator?.userAgent ?? '';
+  try {
+    const value = JSON.parse(globalThis.localStorage?.getItem(PROBE_CACHE_KEY) ?? 'null');
+    if (value && value.ua === ua && value.entries && typeof value.entries === 'object')
+      return value as ProbeCache;
+  } catch {
+    /* Unavailable or malformed storage behaves as an empty cache. */
+  }
+  return { ua, entries: {} };
+}
+
+function cachedProbe(codec: string, settings: VideoCapabilitySettings): boolean | undefined {
+  const entry = readProbeCache().entries[probeKey(codec, settings)];
+  if (!entry || typeof entry.hardware !== 'boolean' || typeof entry.at !== 'number') return;
+  const ttl = entry.hardware ? PROBE_POSITIVE_TTL : PROBE_NEGATIVE_TTL;
+  const age = Date.now() - entry.at;
+  return age >= 0 && age < ttl ? entry.hardware : undefined;
+}
+
+function sessionProbeKey(codec: Codec, settings: VideoCapabilitySettings): string {
+  return `${globalThis.navigator?.userAgent ?? ''}/${probeKey(codec, settings)}`;
+}
+
+function forgetProbe(codec: Codec, settings: VideoCapabilitySettings): void {
+  sessionProofs.delete(sessionProbeKey(codec, settings));
+  try {
+    const cache = readProbeCache();
+    delete cache.entries[probeKey(codec, settings)];
+    globalThis.localStorage?.setItem(PROBE_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    /* Missing storage cannot retain a stale in-memory proof. */
+  }
+}
+
+function cachedCodecProof(
+  codec: Codec,
+  settings: VideoCapabilitySettings
+): VideoCodecProbe | undefined {
+  const entry =
+    sessionProofs.get(sessionProbeKey(codec, settings)) ??
+    readProbeCache().entries[probeKey(codec, settings)];
+  const proof = entry?.proof;
+  if (!proof || proof.codec !== codec || proof.mode !== (settings.scalabilityMode ?? 'L1T1'))
+    return;
+  const ttl =
+    proof.encoded && (proof.hardwareEncode || codec === 'vp9')
+      ? PROBE_POSITIVE_TTL
+      : PROBE_NEGATIVE_TTL;
+  const age = Date.now() - entry.at;
+  if (age >= 0 && age < ttl) return { ...proof };
+}
+
+/** Shared exact-settings proof for controllers. All loopbacks use one encoder at a time. */
+export function cachedVideoCodecProbe(
+  codec: Codec,
+  settings: VideoCapabilitySettings,
+  options: { fresh?: boolean } = {}
+): Promise<VideoCodecProbe> {
+  const key = sessionProbeKey(codec, settings);
+  if (options.fresh) forgetProbe(codec, settings);
+  const pending = pendingProofs.get(key);
+  if (pending) return pending;
+  const cached = options.fresh ? undefined : cachedCodecProof(codec, settings);
+  if (cached) return Promise.resolve(cached);
+  const generation = cacheGeneration;
+  const task = probeVideoCodec(codec, settings).then((proof) => {
+    // Unknown, aborted and privacy-redacted results do not poison future probes.
+    if (
+      generation === cacheGeneration &&
+      (proof.encoded || proof.decoded) &&
+      (proof.encoder || proof.decoder)
+    ) {
+      const entry = { hardware: proof.hardwareEncode, at: Date.now(), proof: { ...proof } };
+      sessionProofs.set(key, entry);
+      try {
+        const cache = readProbeCache();
+        cache.entries[probeKey(codec, settings)] = entry;
+        globalThis.localStorage?.setItem(PROBE_CACHE_KEY, JSON.stringify(cache));
+      } catch {
+        /* The in-memory result remains useful when storage is unavailable. */
+      }
+    }
+    return proof;
+  });
+  pendingProofs.set(key, task);
+  // Both handlers settle successfully: an ignored finally() would create a rejected promise.
+  void task.then(
+    () => pendingProofs.delete(key),
+    () => pendingProofs.delete(key)
+  );
+  return task;
+}
+
+/** Records probe or live-call evidence, e.g. a "hardware" AV1 encoder that fell back to software. */
+export function recordVideoHardwareResult(
+  codec: string,
+  settings: VideoCapabilitySettings,
+  hardware: boolean
+): void {
+  sessionProofs.delete(sessionProbeKey(codec as Codec, settings));
+  try {
+    const cache = readProbeCache();
+    cache.entries[probeKey(codec, settings)] = { hardware, at: Date.now() };
+    globalThis.localStorage?.setItem(PROBE_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    /* Storage is a convenience only. */
+  }
+}
+
+export function clearVideoHardwareCache(): void {
+  cacheGeneration++;
+  sessionProofs.clear();
+  try {
+    globalThis.localStorage?.removeItem(PROBE_CACHE_KEY);
+  } catch {
+    /* Storage is a convenience only. */
+  }
+}
+
+export interface VideoCodecProbe {
+  codec: Codec;
+  mode: ScalabilityMode;
+  advertisedEncode: boolean;
+  advertisedDecode: boolean;
+  encoded: boolean;
+  decoded: boolean;
+  hardwareEncode: boolean;
+  hardwareDecode: boolean;
+  encoder: string;
+  decoder: string;
+  actualMode?: string;
+  detail: string;
+}
+
+export function isHardwareVideoDecoder(stats: {
+  powerEfficientDecoder?: boolean;
+  decoderImplementation?: string;
+}): boolean {
+  return isHardwareVideoEncoder({
+    powerEfficientEncoder: stats.powerEfficientDecoder,
+    encoderImplementation: stats.decoderImplementation?.replace(
+      'ExternalDecoder',
+      'ExternalEncoder'
+    )
+  });
+}
+
+export async function webVideoCodecCapabilities(
+  settings: VideoCapabilitySettings,
+  options: { fresh?: boolean; codecs?: string[]; scalable?: boolean } = {}
+): Promise<{
   decode: string[];
   encode: string[];
   hardware: string[];
+  modes?: Partial<Record<Codec, ScalabilityMode>>;
 }> {
   const supported = (codecs: RTCRtpCodec[]) =>
     [...new Set(codecs.map((codec) => codec.mimeType.toLowerCase().replace('video/', '')))].filter(
-      (codec) => ['av1', 'vp8', 'h264'].includes(codec)
+      (codec) => CODECS.includes(codec as Codec)
     );
-  const senderCodecs = globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? [];
-  const encode = supported(senderCodecs);
-  // Software decoders are admitted; the receiver controller judges actual playback.
-  const decode = supported(globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs ?? []);
+  const encode = supported(globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? []);
+  const decode = supported(globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs ?? [])
+    // HEVC decoding is admitted separately after a hardware loopback proof.
+    .filter((codec) => codec !== 'h265');
   const hardware: string[] = [];
-  if (!Object.values(settings).every((value) => Number.isFinite(value) && value > 0)) {
-    return { decode, encode, hardware };
-  }
-  for (const codec of encode) {
-    let queryTimeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const query = globalThis.navigator?.mediaCapabilities?.encodingInfo({
-        type: 'webrtc',
-        video: {
-          contentType: `video/${codec}`,
-          width: settings.width,
-          height: settings.height,
-          bitrate: settings.bitrate,
-          framerate: settings.frameRate,
-          ...(codec === 'av1' ? { scalabilityMode: 'L1T1' } : {})
+  const modes: Partial<Record<Codec, ScalabilityMode>> = {};
+  const result = () => ({ decode, encode, hardware, ...(options.scalable ? { modes } : {}) });
+  if (
+    ![settings.width, settings.height, settings.frameRate, settings.bitrate].every(
+      (value) => Number.isFinite(value) && value > 0
+    )
+  )
+    return result();
+  for (const name of encode) {
+    const codec = name as Codec;
+    if (options.codecs && !options.codecs.includes(codec)) continue;
+    const candidates =
+      options.scalable && ['av1', 'vp9', 'h265'].includes(codec)
+        ? VIDEO_CODECS[codec].modes
+        : [settings.scalabilityMode ?? 'L1T1'];
+    for (const mode of candidates) {
+      const exact = { ...settings, scalabilityMode: mode };
+      if (options.fresh) forgetProbe(codec, exact);
+      const previousProof = options.fresh ? undefined : cachedCodecProof(codec, exact);
+      const cached = options.fresh ? undefined : cachedProbe(codec, exact);
+      if (codec === 'h265' && previousProof?.hardwareDecode && !decode.includes(codec))
+        decode.push(codec);
+      if (previousProof?.encoded && (previousProof.hardwareEncode || codec === 'vp9')) {
+        if (previousProof.hardwareEncode) hardware.push(codec);
+        modes[codec] = mode;
+        break;
+      }
+      if (cached !== undefined && (codec !== 'vp9' || previousProof)) {
+        if (cached) {
+          hardware.push(codec);
+          modes[codec] = mode;
+          break;
         }
-      });
-      const info = await Promise.race([
-        query,
-        new Promise<undefined>((resolve) => {
-          queryTimeout = setTimeout(() => resolve(undefined), 800);
-        })
-      ]);
-      clearTimeout(queryTimeout);
-      if (
-        info?.supported &&
-        info.smooth &&
-        info.powerEfficient &&
-        (await probeHardwareEncoder(codec, senderCodecs, settings))
-      )
-        hardware.push(codec);
-    } catch {
-      // Missing, rejected, or privacy-redacted information remains unknown.
-    } finally {
-      clearTimeout(queryTimeout);
+        continue;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const info = await Promise.race([
+          globalThis.navigator?.mediaCapabilities?.encodingInfo({
+            type: 'webrtc',
+            video: {
+              contentType: `video/${codec}`,
+              width: settings.width,
+              height: settings.height,
+              bitrate: settings.bitrate,
+              framerate: settings.frameRate,
+              scalabilityMode: mode
+            }
+          }),
+          new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), 800);
+          })
+        ]);
+        // Power-efficient capability is only a prefilter; actual RTP proves hardware and mode.
+        if (!info) continue;
+        if (!info.supported || !info.smooth || (!info.powerEfficient && codec !== 'vp9')) {
+          continue;
+        }
+        const proof = await cachedVideoCodecProbe(codec, exact, { fresh: options.fresh });
+        if (codec === 'h265' && proof.decoded) {
+          if (proof.hardwareDecode && !decode.includes(codec)) decode.push(codec);
+        }
+        if (!proof.encoded) continue; // Failure/timeout remains unknown.
+        if (proof.hardwareEncode) hardware.push(codec);
+        if (proof.hardwareEncode || codec === 'vp9') {
+          modes[codec] = mode;
+          break;
+        }
+      } catch {
+        // Missing or privacy-redacted information never establishes hardware support.
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
-  return { decode, encode, hardware };
+  return result();
 }
 
-/** Bounded local loopback verifies the encoder actually chosen at the requested settings.
- * No room, key material, microphone, camera, STUN, or TURN is involved.
- */
-async function probeHardwareEncoder(
-  codec: string,
-  codecs: RTCRtpCodec[],
-  settings: VideoCapabilitySettings
-): Promise<boolean> {
-  if (typeof document === 'undefined' || typeof RTCPeerConnection === 'undefined') return false;
+/** Fresh local RTP loopback; queued with cached controller probes to avoid hardware contention. */
+export function probeVideoCodec(
+  codec: Codec,
+  settings: VideoCapabilitySettings,
+  signal?: AbortSignal
+): Promise<VideoCodecProbe> {
+  const task = probeQueue.then(() => runVideoCodecProbe(codec, settings, signal));
+  probeQueue = task.then(
+    () => {},
+    () => {}
+  );
+  return task;
+}
+
+/** Synthetic pixels only; a decode-only device cannot establish hardware proof through loopback. */
+async function runVideoCodecProbe(
+  codec: Codec,
+  settings: VideoCapabilitySettings,
+  signal?: AbortSignal
+): Promise<VideoCodecProbe> {
+  const mode = settings.scalabilityMode ?? 'L1T1';
+  const senderCodecs = globalThis.RTCRtpSender?.getCapabilities?.('video')?.codecs ?? [];
+  const receiverCodecs = globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs ?? [];
+  const matches = (value: RTCRtpCodec) => value.mimeType.toLowerCase() === `video/${codec}`;
+  const result: VideoCodecProbe = {
+    codec,
+    mode,
+    advertisedEncode: senderCodecs.some(matches),
+    advertisedDecode: receiverCodecs.some(matches),
+    encoded: false,
+    decoded: false,
+    hardwareEncode: false,
+    hardwareDecode: false,
+    encoder: '',
+    decoder: '',
+    detail: ''
+  };
+  if (!result.advertisedEncode || !result.advertisedDecode) {
+    result.detail = 'A local loopback needs both an advertised encoder and decoder.';
+    return result;
+  }
+  if (signal?.aborted) {
+    result.detail = 'Stopped';
+    return result;
+  }
+  if (typeof document === 'undefined' || typeof RTCPeerConnection === 'undefined') return result;
   const canvas = document.createElement('canvas');
   canvas.width = settings.width;
   canvas.height = settings.height;
   const context = canvas.getContext('2d');
-  if (!context || !canvas.captureStream) return false;
-  const stream = canvas.captureStream(settings.frameRate);
-  const sender = new RTCPeerConnection({ iceServers: [] });
-  const receiver = new RTCPeerConnection({ iceServers: [] });
+  if (!context || !canvas.captureStream) {
+    result.detail = 'Canvas capture unavailable';
+    return result;
+  }
+  const peers: RTCPeerConnection[] = [];
+  let stream: MediaStream | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let draw: ReturnType<typeof setInterval> | undefined;
   let frame = 0;
-  const draw = setInterval(() => {
-    context.fillStyle = `rgb(${frame++ % 255},64,128)`;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-  }, 1000 / settings.frameRate);
+  let done = false;
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  const abort = () => {
+    done = true;
+    peers.forEach((peer) => peer.close());
+  };
   try {
+    stream = canvas.captureStream(settings.frameRate);
+    const sender = new RTCPeerConnection({ iceServers: [] });
+    peers.push(sender);
+    const receiver = new RTCPeerConnection({ iceServers: [] });
+    peers.push(receiver);
+    draw = setInterval(() => {
+      context.fillStyle = `rgb(${frame++ % 255},64,128)`;
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }, 1000 / settings.frameRate);
+    signal?.addEventListener('abort', abort, { once: true });
+    receiver.ontrack = (event) => {
+      video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+      void video.play().catch(() => {});
+    };
     const transceiver = sender.addTransceiver(stream.getVideoTracks()[0], {
       direction: 'sendonly',
       streams: [stream],
@@ -350,53 +629,91 @@ async function probeHardwareEncoder(
         {
           maxBitrate: settings.bitrate,
           maxFramerate: settings.frameRate,
-          ...(codec === 'av1' ? { scalabilityMode: 'L1T1' } : {})
+          ...{ scalabilityMode: mode }
         }
       ]
     });
-    transceiver.setCodecPreferences(
-      codecs.filter((value) => value.mimeType.toLowerCase() === `video/${codec}`)
-    );
+    transceiver.setCodecPreferences(senderCodecs.filter(matches));
+    // Candidates can arrive before the other description; apply after negotiation.
+    const toReceiver: RTCIceCandidate[] = [],
+      toSender: RTCIceCandidate[] = [];
     sender.onicecandidate = (event) => {
-      if (event.candidate) void receiver.addIceCandidate(event.candidate).catch(() => undefined);
+      if (!event.candidate) return;
+      if (receiver.remoteDescription)
+        void receiver.addIceCandidate(event.candidate).catch(() => {});
+      else toReceiver.push(event.candidate);
     };
     receiver.onicecandidate = (event) => {
-      if (event.candidate) void sender.addIceCandidate(event.candidate).catch(() => undefined);
+      if (!event.candidate) return;
+      if (sender.remoteDescription) void sender.addIceCandidate(event.candidate).catch(() => {});
+      else toSender.push(event.candidate);
     };
     const probe = async () => {
       await sender.setLocalDescription(await sender.createOffer());
       await receiver.setRemoteDescription(sender.localDescription!);
       await receiver.setLocalDescription(await receiver.createAnswer());
       await sender.setRemoteDescription(receiver.localDescription!);
-      while (sender.connectionState !== 'closed') {
-        const stats = await transceiver.sender.getStats();
-        let confirmed = false;
-        stats.forEach((report) => {
-          if (
-            report.type === 'outbound-rtp' &&
+      await Promise.all(toReceiver.map((candidate) => receiver.addIceCandidate(candidate)));
+      await Promise.all(toSender.map((candidate) => sender.addIceCandidate(candidate)));
+      while (!done && sender.connectionState !== 'closed') {
+        const outbound = await transceiver.sender.getStats();
+        if (done) return;
+        outbound.forEach((report) => {
+          if (report.type !== 'outbound-rtp') return;
+          result.encoder = report.encoderImplementation ?? '';
+          result.actualMode = report.scalabilityMode;
+          const actualCodec = outbound.get(report.codecId)?.mimeType?.toLowerCase();
+          result.encoded =
             report.framesEncoded >= 3 &&
             report.frameWidth === settings.width &&
             report.frameHeight === settings.height &&
-            isHardwareVideoEncoder(report)
-          )
-            confirmed = true;
+            actualCodec === `video/${codec}` &&
+            (report.scalabilityMode === mode ||
+              (report.scalabilityMode === undefined &&
+                mode === 'L1T1' &&
+                (codec === 'vp8' || codec === 'h264')));
+          result.hardwareEncode = result.encoded && isHardwareVideoEncoder(report);
         });
-        if (confirmed) return true;
+        const inbound = await receiver.getStats();
+        if (done) return;
+        inbound.forEach((report) => {
+          if (report.type !== 'inbound-rtp') return;
+          result.decoder = report.decoderImplementation ?? '';
+          result.decoded =
+            report.framesDecoded >= 3 &&
+            report.frameWidth === settings.width &&
+            report.frameHeight === settings.height &&
+            inbound.get(report.codecId)?.mimeType?.toLowerCase() === `video/${codec}`;
+          result.hardwareDecode = result.decoded && isHardwareVideoDecoder(report);
+        });
+        if (result.encoded && result.decoded) return;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      return false;
     };
-    return await Promise.race([
-      probe().catch(() => false),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), 1800);
+    await Promise.race([
+      probe(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 2400);
       })
     ]);
+    result.detail = signal?.aborted
+      ? 'Stopped'
+      : result.encoded && result.decoded
+        ? 'Verified with local video frames'
+        : result.actualMode && result.actualMode !== mode
+          ? `Browser used ${result.actualMode} instead of ${mode}`
+          : 'Not verified before timeout; support may be unavailable or hidden';
+  } catch (error) {
+    result.detail = error instanceof Error ? error.message : 'Probe failed';
   } finally {
+    done = true;
     clearTimeout(timer);
     clearInterval(draw);
-    sender.close();
-    receiver.close();
-    stream.getTracks().forEach((track) => track.stop());
+    signal?.removeEventListener('abort', abort);
+    peers.forEach((peer) => peer.close());
+    video.pause();
+    video.srcObject = null;
+    stream?.getTracks().forEach((track) => track.stop());
   }
+  return result;
 }

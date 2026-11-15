@@ -1,0 +1,18 @@
+name: Prepare desktop codecs
+description: Restore and verify the matching HEVC WebRTC archive, patched SDK, and CUDA headers.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      with:
+        python-version: "3.13.15"
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        name: kaede-desktop-webrtc-${{ runner.os }}-${{ runner.arch }}
+        path: ${{ runner.temp }}/desktop-codecs
+    - name: Restore custom WebRTC
+      shell: bash
+      run: |
+        mkdir -p desktop/native/webrtc
+        tar -xf "$RUNNER_TEMP/desktop-codecs/desktop-webrtc.tar" -C desktop/native/webrtc
+        python desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc --github-env

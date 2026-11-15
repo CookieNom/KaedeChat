@@ -33,6 +33,11 @@ class FlutterVideoRenderer
 
   void SetVideoTrack(scoped_refptr<RTCVideoTrack> track);
 
+  // Stops frame delivery and closes the event channel. Call on the platform
+  // thread when the texture is disposed; the renderer itself may outlive this
+  // until the engine has released the texture.
+  void Dispose();
+
   int64_t texture_id() { return texture_id_; }
 
   bool CheckMediaStream(std::string mediaId);
@@ -55,7 +60,7 @@ class FlutterVideoRenderer
   scoped_refptr<RTCVideoFrame> frame_;
   std::unique_ptr<flutter::TextureVariant> texture_;
   std::shared_ptr<FlutterDesktopPixelBuffer> pixel_buffer_;
-  mutable std::shared_ptr<uint8_t> rgb_buffer_;
+  mutable std::shared_ptr<uint8_t[]> rgb_buffer_;
   mutable std::mutex mutex_;
   RTCVideoFrame::VideoRotation rotation_ = RTCVideoFrame::kVideoRotation_0;
 };

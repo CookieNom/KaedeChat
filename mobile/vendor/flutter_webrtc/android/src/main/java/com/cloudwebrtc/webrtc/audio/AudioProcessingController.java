@@ -20,5 +20,5 @@ public class AudioProcessingController {
         this.externalAudioProcessingFactory.setCapturePostProcessing(capturePostProcessing);
         this.externalAudioProcessingFactory.setRenderPreProcessing(renderPreProcessing);
     }
-    
+
 }

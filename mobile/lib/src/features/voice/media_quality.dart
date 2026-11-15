@@ -158,8 +158,11 @@ final class MobileMediaQuality {
 
   AudioPublishOptions audioPublishOptionsForChannel(int channelBitrate) =>
       AudioPublishOptions(
-        audioBitrate:
-            audio.bitrate < channelBitrate ? audio.bitrate : channelBitrate,
+        encoding: AudioEncoding(
+          maxBitrate:
+              audio.bitrate < channelBitrate ? audio.bitrate : channelBitrate,
+          networkPriority: Priority.high,
+        ),
         dtx: dtx,
         red: true,
       );

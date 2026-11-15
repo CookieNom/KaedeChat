@@ -50,7 +50,7 @@ jobs:
       - name: Select Xcode
         if: runner.os == 'macOS'
         run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-      - name: Build encrypted AV1 WebRTC
+      - name: Build encrypted premium-codec WebRTC
         if: steps.native.outputs.cache-hit != 'true'
         run: python3 mobile/tool/build_webrtc.py "${{ inputs.platform }}" --work-dir "$RUNNER_TEMP/kaede-webrtc"
       - name: Preserve framework symlinks

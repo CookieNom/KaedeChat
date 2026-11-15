@@ -35,7 +35,7 @@ namespace webrtc {
         virtual void UnregisterObserver(ObserverInterface* observer) = 0;
         virtual ~NotifierInterface() {}
     };
-    
+
     enum class RefCountReleaseStatus { kDroppedLastRef, kOtherRefsRemained };
     // Interfaces where refcounting is part of the public api should
     // inherit this abstract interface. The implementation of these
@@ -71,7 +71,7 @@ namespace webrtc {
                             int sample_rate,
                             size_t number_of_channels,
                             size_t number_of_frames) {
-            
+
         };
         virtual void OnData(const void* audio_data,
                             int bits_per_sample,
@@ -117,7 +117,7 @@ namespace webrtc {
     };
 }
 namespace rtc {
-    
+
     template <class T>
     class scoped_refptr {
      public:

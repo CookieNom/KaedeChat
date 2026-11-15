@@ -43,11 +43,12 @@ void main() {
     const standard = MobileMediaQuality();
     const studio = MobileMediaQuality(audio: VoiceAudioQuality.studio);
 
-    expect(standard.audioPublishOptions.audioBitrate, greaterThan(0));
+    expect(standard.audioPublishOptions.encoding!.maxBitrate, greaterThan(0));
     expect(standard.audioPublishOptions.dtx, isTrue);
-    expect(studio.audioPublishOptions.audioBitrate,
-        greaterThan(standard.audioPublishOptions.audioBitrate));
-    expect(studio.audioPublishOptions.audioBitrate, lessThanOrEqualTo(510000));
+    expect(studio.audioPublishOptions.encoding!.maxBitrate,
+        greaterThan(standard.audioPublishOptions.encoding!.maxBitrate));
+    expect(studio.audioPublishOptions.encoding!.maxBitrate,
+        lessThanOrEqualTo(510000));
     expect(studio.audioPublishOptions.dtx, isTrue);
     expect(
         const MobileMediaQuality(dtx: false).audioPublishOptions.dtx, isFalse);
@@ -72,8 +73,10 @@ void main() {
     const studio = MobileMediaQuality(audio: VoiceAudioQuality.studio);
     const dataSaver = MobileMediaQuality(audio: VoiceAudioQuality.dataSaver);
 
-    expect(studio.audioPublishOptionsForChannel(32000).audioBitrate, 32000);
-    expect(dataSaver.audioPublishOptionsForChannel(96000).audioBitrate, 24000);
+    expect(studio.audioPublishOptionsForChannel(32000).encoding!.maxBitrate,
+        32000);
+    expect(dataSaver.audioPublishOptionsForChannel(96000).encoding!.maxBitrate,
+        24000);
     expect(studio.audioPublishOptionsForChannel(32000).dtx, isTrue);
   });
 

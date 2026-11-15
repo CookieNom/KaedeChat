@@ -1,0 +1,80 @@
+diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm b/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
+index b0d0601..b9959ba 100644
+--- a/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
++++ b/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
+@@ -436,13 +436,33 @@ CMSampleBufferRef H265BufferToCMSampleBuffer(const uint8_t *buffer, size_t buffe
+       h265DecompressionOutputCallback,
+       (__bridge void *)self,
+   };
+-  OSStatus status = VTDecompressionSessionCreate(nullptr, _videoFormat, nullptr, attributes,
+-                                                 &record, &_decompressionSession);
++  NSDictionary* decoderSpecs;
++  if (@available(iOS 17.0, macCatalyst 17.0, macOS 10.13, tvOS 17.0, visionOS 1.0, *)) {
++    decoderSpecs = @{
++      (__bridge NSString*)kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: @YES
++    };
++  } else {
++    CFRelease(attributes);
++    return WEBRTC_VIDEO_CODEC_ERROR;
++  }
++  OSStatus status = VTDecompressionSessionCreate(nullptr, _videoFormat,
++      (__bridge CFDictionaryRef)decoderSpecs, attributes, &record, &_decompressionSession);
+   CFRelease(attributes);
+   if (status != noErr) {
+     [self destroyDecompressionSession];
+     return WEBRTC_VIDEO_CODEC_ERROR;
+   }
++  if (@available(iOS 17.0, macCatalyst 17.0, macOS 10.13, tvOS 17.0, visionOS 1.0, *)) {
++    CFBooleanRef hardware = nullptr;
++    status = VTSessionCopyProperty(_decompressionSession,
++        kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, kCFAllocatorDefault, &hardware);
++    const bool proven = status == noErr && hardware && CFBooleanGetValue(hardware);
++    if (hardware) CFRelease(hardware);
++    if (!proven) {
++      [self destroyDecompressionSession];
++      return WEBRTC_VIDEO_CODEC_ERROR;
++    }
++  }
+   [self configureDecompressionSession];
+ 
+   return WEBRTC_VIDEO_CODEC_OK;
+diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm b/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
+index 2682d4d..7ac1a6b 100644
+--- a/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
++++ b/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
+@@ -388,8 +388,13 @@ void compressionOutputCallback(void* encoder, void* params, OSStatus status,
+ 
+   if (@available(iOS 17.4, macCatalyst 17.4, macOS 10.9, tvOS 17.4, visionOS 1.1, *)) {
+     CFDictionarySetValue(encoder_specs,
+-                         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
++                         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
+                          kCFBooleanTrue);
++  } else {
++    // Older iOS cannot prove or enforce hardware HEVC; keep its compatible track.
++    CFRelease(encoder_specs);
++    CFRelease(sourceAttributes);
++    return WEBRTC_VIDEO_CODEC_ERROR;
+   }
+ 
+   // kVTVideoEncoderSpecification_EnableLowLatencyRateControl restricts the encoder to "High
+@@ -429,7 +434,8 @@ void compressionOutputCallback(void* encoder, void* params, OSStatus status,
+     status = VTSessionCopyProperty(_compressionSession,
+                                    kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                                    kCFAllocatorDefault, &hwaccl_enabled);
+-    if (status == noErr && (CFBooleanGetValue(hwaccl_enabled))) {
++    const bool hardware = status == noErr && hwaccl_enabled && CFBooleanGetValue(hwaccl_enabled);
++    if (hardware) {
+       RTC_LOG(LS_INFO) << "Compression session created with hw accl enabled";
+     } else {
+       RTC_LOG(LS_INFO) << "Compression session created with hw accl disabled";
+@@ -437,6 +443,10 @@ void compressionOutputCallback(void* encoder, void* params, OSStatus status,
+     if (hwaccl_enabled) {
+       CFRelease(hwaccl_enabled);
+     }
++    if (!hardware) {
++      [self destroyCompressionSession];
++      return WEBRTC_VIDEO_CODEC_ERROR;
++    }
+   }
+   [self configureCompressionSession];
+   return WEBRTC_VIDEO_CODEC_OK;

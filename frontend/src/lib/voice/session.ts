@@ -4,10 +4,11 @@ import {
   Room,
   RoomEvent,
   Track,
-  type Participant
+  type Participant,
+  type TrackPublishOptions
 } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
-import { AdaptiveVideoController } from './adaptive-video';
+import { AdaptiveVideoController, managedTrackName } from './adaptive-video';
 import { userErrorMessage } from '$lib/api/client';
 import type { Channel } from '$lib/chat/types';
 import {
@@ -1009,11 +1010,18 @@ export class VoiceSession extends EventTarget {
     }
     const camera = webCameraDefaults(this.#voiceMediaPolicy.video_quality_mode);
     if (!enabled) await this.#adaptiveVideo?.stopSource(Track.Source.Camera);
-    const publication = await this.room.localParticipant.setCameraEnabled(
-      enabled,
-      { ...camera.capture, ...(enabled && cameras[0]?.id ? { deviceId: cameras[0].id } : {}) },
-      camera.publish
-    );
+    const options = { ...camera.publish, name: managedTrackName(Track.Source.Camera) };
+    const publish = (configured: TrackPublishOptions) =>
+      this.room.localParticipant.setCameraEnabled(
+        enabled,
+        { ...camera.capture, ...(enabled && cameras[0]?.id ? { deviceId: cameras[0].id } : {}) },
+        configured
+      );
+    const publication =
+      enabled && this.#adaptiveVideo
+        ? await this.#adaptiveVideo.publishInitial(Track.Source.Camera, options, publish)
+        : await publish(options);
+    if (enabled && !publication) return;
     if (enabled && publication)
       await this.#adaptiveVideo?.managePublished(publication, camera.publish);
     this.camera = enabled;
@@ -1062,10 +1070,19 @@ export class VoiceSession extends EventTarget {
             ? 'monitor'
             : undefined;
     const { capture, publish } = webScreenShareOptions(preferences, preferredSurface);
-    const publication = await this.room.localParticipant.setScreenShareEnabled(true, capture, {
+    const options = {
       ...publish,
-      ...webAudioPublishOptions(preferences)
-    });
+      ...webAudioPublishOptions(preferences),
+      // The SDK applies this name to share audio too; receivers match managed
+      // names against the video source, so the audio track stays unmanaged.
+      name: managedTrackName(Track.Source.ScreenShare)
+    };
+    const publishInitial = (configured: TrackPublishOptions) =>
+      this.room.localParticipant.setScreenShareEnabled(true, capture, configured);
+    const publication = this.#adaptiveVideo
+      ? await this.#adaptiveVideo.publishInitial(Track.Source.ScreenShare, options, publishInitial)
+      : await publishInitial(options);
+    if (!publication) return;
     if (publication) await this.#adaptiveVideo?.managePublished(publication, publish);
     this.screen = true;
     this.#changed();

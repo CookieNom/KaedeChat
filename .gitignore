@@ -65,3 +65,6 @@ tmp/
 vendor/photodna-sdk/
 
 .kaede-federation-kubeconfig
+
+# Generated patched desktop codec sources, headers, and custom WebRTC artifacts.
+desktop/native/

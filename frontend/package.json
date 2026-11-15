@@ -28,14 +28,14 @@
       "cookie@<0.7.2": "0.7.2"
     },
     "patchedDependencies": {
-      "livekit-client@2.20.1": "patches/livekit-client@2.20.1.patch"
+      "livekit-client@2.24.1": "patches/livekit-client@2.24.1.patch"
     }
   },
   "dependencies": {
     "dompurify": "3.4.17",
     "emojibase-data": "17.0.0",
     "intl-messageformat": "^11.2.15",
-    "livekit-client": "2.20.1",
+    "livekit-client": "2.24.1",
     "marked": "18.0.6"
   },
   "devDependencies": {
@@ -43,8 +43,8 @@
     "@fontsource-variable/bricolage-grotesque": "^5.2.10",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
-    "@sveltejs/adapter-static": "^4.0.0",
-    "@sveltejs/kit": "3.0.0",
+    "@sveltejs/adapter-static": "^4.0.1",
+    "@sveltejs/kit": "3.1.1",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^22.13.4",
     "esbuild": "0.28.2",

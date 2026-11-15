@@ -187,12 +187,103 @@ Encrypted media requires the room's current MLS state; see [E2EE](e2ee.md).
 
 ## Codec defaults
 
-Camera and screen sharing publish VP8 by default, or H.264 when only H.264 has
-hardware acceleration. If a viewer can use AV1 and the sender proves a hardware
-AV1 encoder at the current settings, Kaede adds a separate single-layer AV1 track
-alongside the compatible one. Sustained CPU or upload pressure retires that track.
-SDK backup codecs are off on every client.
+Camera and screen sharing start with VP8, or switch to H.264 when only H.264 has
+proven hardware acceleration and every viewer accepts it. Each source has at most
+one compatible track and one premium track. The premium choices are AV1 and
+HEVC (H.265): choose the codec that serves the most viewers, with AV1 winning ties,
+including when everyone supports both. HEVC is never a compatible or software
+fallback codec. SDK backup codecs remain disabled on all clients.
 
-Encrypted and plaintext calls follow the same policy. All clients must run the coordinated update containing Kaede's
-AV1 cryptor; codec support alone does not establish compatibility. The
-[AV1 notes](av1-e2ee/README.md) describe native builds and rollout validation.
+Premium encoding must pass a settings-specific hardware probe. The selected
+implementation, codec, dimensions and scalability mode must match the publication.
+HEVC also requires hardware decoding evidence; an advertised MIME type alone is
+insufficient. A missing, redacted or timed-out result never proves hardware.
+The desktop decoder probe uses a prerecorded HEVC frame and works without an
+encoder. Browser HEVC decoder probes currently need a local HEVC encoder for
+their loopback; browser-only decoder devices conservatively keep the compatible track.
+
+Running two tracks costs another encoder and extra upload. Dual-cast requires at
+least a third of viewers to use the selected premium codec, no encoder pressure,
+and an unconstrained uplink. Phones also skip dual-cast on cellular data or in
+low-power mode. When everyone takes the premium track, the compatible stream is
+dropped or paused (desktop uses LiveKit dynacast). A viewer without hints gets
+eight seconds to send them before it counts as VP8-only; unchanged hints repeat
+every four seconds. While hints are pending, a compatible stream is restored
+immediately and the existing premium choice stays warm. A late VP8-only viewer
+keeps the compatible stream without replacing the premium stream for others.
+
+The `kaede.video.v1` message retains only `vp8`, `h264` and `av1` in its legacy
+`codecs` list. The additive `extendedCodecs` field carries `h265` and `vp9`.
+Unknown extension strings are ignored; the bounded list never changes the old
+field. Fallback `demand` values also stay within the legacy set. Existing Kaede
+clients can ignore the extension and continue using their compatible track;
+HEVC does not require a coordinated client upgrade.
+
+VP9 can replace the compatible track only when every viewer accepts it, upload
+is constrained, and thirty seconds of healthy encoder evidence shows CPU load
+below half a core. A viewer asking for VP8 or H.264 prevents that replacement.
+Once selected, VP9 remains selected when it relieves upload pressure; it still
+requires a compatible audience and measured CPU headroom.
+A replacement encoder has up to ten seconds to produce new statistics; missing
+statistics cannot extend the last successful CPU proof indefinitely.
+Encoder pressure or an incompatible late join restores the compatible codec.
+The choice is made per codec, so a usable Intel encoder is not excluded merely
+because a discrete GPU is also present.
+
+### Scalability and pressure
+
+Web and desktop try spatial/temporal modes (`L3T3_KEY`, then `L1T3`, then `L1T1`)
+for AV1/VP9 when the actual encoder proves them. HEVC uses temporal layers only
+(`L1T3` or `L1T1`). Unsupported modes fall back to a proven simpler mode. Browser
+publishing preserves the requested mode instead of LiveKit forcing AV1 screen
+shares to `L1T3`. The mobile native probe currently proves only `L1T1`; mobile
+publishing explicitly requests that same mode. Compatible VP8/H.264 tracks retain
+their simulcast ladders.
+
+A struggling receiver first requests a lower spatial layer when one is available,
+allowing an adaptation interval before switching codec. Single-spatial-layer
+streams require a compatible encode for a lower resolution. Temporal scalability
+reduces frame rate, not resolution. Encoder load is measured across actual
+senders rather than treating one SVC publication as free work.
+
+Encode pressure lowers resolution or frame rate one step at a time; text shares
+keep their pixels and give up frames. Upload pressure retires a dual-cast premium
+track. The selected profile and the shared 8 Mbps video ceiling bound each source;
+active codec tracks split that source's allowance equally. Simulcast layers share
+their track's allowance proportionally, while inclusive SVC layers count as one
+stream. During dual-cast, compatible video fits within 1280×720 (or 720×1280 in
+portrait). Retiring a track restores the remaining track's allowance and size.
+WebRTC congestion control can reduce rates further. Web and mobile retain
+audience-based priorities within these limits. Desktop reserves a paused
+dynacast publication's share so it can resume without exceeding the ceiling.
+Budget changes apply in place. Phone thermal state works like encode pressure.
+
+All clients sample every two seconds, degrade after six seconds of evidence,
+recover after thirty healthy seconds, and wait at least twenty seconds between
+steps. Each failed premium codec backs off independently for one minute, five,
+fifteen, then the rest of the call. Five minutes of healthy playback clears its
+failure history. Software fallback on a hardware-only HEVC path revokes its use.
+The browser `VIDEO_POLICY`, mobile `VideoPolicy`, and desktop `video_policy`
+constants must stay in step.
+
+### Capability diagnostics and encryption
+
+Open `/codec-probe` on the frontend to test each codec and scalability mode at
+720p, 1080p or 4K. It reports advertised support, observed encode/decode frames,
+actual mode and implementation names, and exports JSON. Tests use synthetic
+pixels and local peer connections. **Reveal hardware names** offers optional
+camera access because browsers can hide implementation names without it; camera
+frames are not sent, and the camera stops when the tests finish. This page tests
+the browser engine, not the desktop app's separate native encoder factory.
+Call setup reuses exact-setting probe results and serializes hardware loopbacks
+across encoding and decoding checks. Transient negative evidence expires after
+one minute; missing mode statistics are accepted only for baseline VP8/H.264
+`L1T1`, never as proof of a scalable or premium mode.
+
+Encrypted and plaintext calls use the same policy. Encryption remains enabled
+through codec changes, late joins and key rotation. The existing Kaede AV1 wire
+format is unchanged; HEVC uses the existing H.265 NAL cryptor, with full-width
+clear-prefix lengths and authenticated headers. See the
+[codec/E2EE validation notes](av1-e2ee/README.md) for native artifacts and the
+hardware interoperability matrix. A capability-probe pass does not replace those
+E2EE tests.

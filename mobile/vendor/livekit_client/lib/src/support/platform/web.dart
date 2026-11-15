@@ -15,7 +15,7 @@
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 
 import 'package:web/web.dart' as web;
 
@@ -40,8 +40,9 @@ bool isScriptTransformSupported() {
 bool isInsertableStreamSupported() {
   return web.window.hasProperty('RTCRtpSender'.toJS).isDefinedAndNotNull &&
       ((web.window.getProperty('RTCRtpSender'.toJS) as JSObject).getProperty(
-        'prototype'.toJS,
-      ) as JSObject)
+                'prototype'.toJS,
+              )
+              as JSObject)
           .getProperty('createEncodedStreams'.toJS)
           .isDefinedAndNotNull;
 }

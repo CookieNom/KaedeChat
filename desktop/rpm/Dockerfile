@@ -5,7 +5,7 @@ RUN dnf install -y dnf-plugins-core epel-release \
     && dnf config-manager --set-enabled crb \
     && dnf install -y \
       alsa-lib-devel clang cmake curl-minimal dbus-devel file gcc gcc-c++ git \
-      gtk3-devel libappindicator-gtk3-devel librsvg2-devel libxcb-devel \
+      gtk3-devel libappindicator-gtk3-devel librsvg2-devel libva-devel libxcb-devel \
       make openssl-devel pkgconf-pkg-config pulseaudio-libs-devel \
       systemd-devel tar unzip webkit2gtk4.1-devel \
     && dnf clean all

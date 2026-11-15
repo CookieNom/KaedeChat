@@ -34,6 +34,12 @@ await build({
 });
 await build({
   ...common,
+  entryPoints: [`${root}/src/core.ts`],
+  outfile: `${root}/dist/core/core.mjs`,
+  format: 'esm'
+});
+await build({
+  ...common,
   entryPoints: [`${root}/src/index.ts`],
   outfile: `${root}/dist/livekit-client.umd.js`,
   format: 'iife',

@@ -6,6 +6,12 @@
 #include "rtc_dtmf_sender.h"
 #include "rtc_rtp_parameters.h"
 
+#ifdef _WIN32
+// Worker thread for off-platform-thread track publish
+// (see AddTransceiver / AddTrack).
+#include <thread>
+#endif
+
 namespace flutter_webrtc_plugin {
 
 std::string RTCMediaTypeToString(RTCMediaType type) {
@@ -108,6 +114,39 @@ const char* iceGatheringStateString(RTCIceGatheringState state) {
   return "";
 }
 
+double stringToBitratePriority(const std::string& priority) {
+  if (priority == "very-low") return 0.5;
+  if (priority == "low") return 1.0;
+  if (priority == "medium") return 2.0;
+  if (priority == "high") return 4.0;
+  return 1.0;
+}
+
+std::string bitratePriorityToString(double bitratePriority) {
+  if (bitratePriority <= 0.5) return "very-low";
+  if (bitratePriority <= 1.0) return "low";
+  if (bitratePriority <= 2.0) return "medium";
+  return "high";
+}
+
+libwebrtc::RTCPriority stringToRTCPriority(const std::string& priority) {
+  if (priority == "very-low") return libwebrtc::RTCPriority::kVeryLow;
+  if (priority == "low") return libwebrtc::RTCPriority::kLow;
+  if (priority == "medium") return libwebrtc::RTCPriority::kMedium;
+  if (priority == "high") return libwebrtc::RTCPriority::kHigh;
+  return libwebrtc::RTCPriority::kLow;
+}
+
+std::string rtcPriorityToString(libwebrtc::RTCPriority priority) {
+  switch (priority) {
+    case libwebrtc::RTCPriority::kVeryLow: return "very-low";
+    case libwebrtc::RTCPriority::kLow: return "low";
+    case libwebrtc::RTCPriority::kMedium: return "medium";
+    case libwebrtc::RTCPriority::kHigh: return "high";
+  }
+  return "low";
+}
+
 EncodableMap rtpParametersToMap(
     libwebrtc::scoped_refptr<libwebrtc::RTCRtpParameters> rtpParameters) {
   EncodableMap info;
@@ -152,6 +191,10 @@ EncodableMap rtpParametersToMap(
         EncodableValue(encoding->scalability_mode().std_string());
     map[EncodableValue("ssrc")] =
         EncodableValue(static_cast<int>(encoding->ssrc()));
+    map[EncodableValue("priority")] =
+        EncodableValue(bitratePriorityToString(encoding->bitrate_priority()));
+    map[EncodableValue("networkPriority")] =
+        EncodableValue(rtcPriorityToString(encoding->network_priority()));
     encodings_info.push_back(EncodableValue(map));
   }
   info[EncodableValue("encodings")] = EncodableValue(encodings_info);
@@ -193,9 +236,9 @@ EncodableMap rtpParametersToMap(
       info[EncodableValue("degradationPreference")] =
           EncodableValue("balanced");
       break;
-    case libwebrtc::RTCDegradationPreference::DISABLED:
+    case libwebrtc::RTCDegradationPreference::MAINTAIN_FRAMERATE_AND_RESOLUTION:
       info[EncodableValue("degradationPreference")] =
-          EncodableValue("disabled");
+          EncodableValue("maintain-framerate-and-resolution");
       break;
     default:
       info[EncodableValue("degradationPreference")] =
@@ -358,10 +401,6 @@ void FlutterPeerConnection::RTCPeerConnectionClose(
     base_->peerconnections_.erase(it2);
   }
 
-  auto it = base_->peerconnection_observers_.find(uuid);
-  if (it != base_->peerconnection_observers_.end())
-    base_->peerconnection_observers_.erase(it);
-
   result->Success();
 }
 
@@ -369,6 +408,16 @@ void FlutterPeerConnection::RTCPeerConnectionDispose(
     RTCPeerConnection* pc,
     const std::string& uuid,
     std::unique_ptr<MethodResultProxy> result) {
+  auto it = base_->peerconnection_observers_.find(uuid);
+  if (it != base_->peerconnection_observers_.end()) {
+    // Close() can still deliver OnRemoveStream callbacks. Keep the observer
+    // alive until native teardown completes, then detach it before deletion.
+    pc->Close();
+    pc->DeRegisterRTCPeerConnectionObserver();
+    base_->peerconnection_observers_.erase(it);
+  }
+
+  // Leave the connection map entry for a subsequent peerConnectionClose call.
   result->Success();
 }
 
@@ -515,6 +564,8 @@ FlutterPeerConnection::mapToEncoding(const EncodableMap& params) {
 
   encoding->set_active(true);
   encoding->set_scale_resolution_down_by(1.0);
+  encoding->set_bitrate_priority(1.0);
+  encoding->set_network_priority(libwebrtc::RTCPriority::kLow);
 
   EncodableValue value = findEncodableValue(params, "active");
   if (!value.IsNull()) {
@@ -562,6 +613,16 @@ FlutterPeerConnection::mapToEncoding(const EncodableMap& params) {
     encoding->set_scalability_mode(GetValue<std::string>(value));
   }
 
+  value = findEncodableValue(params, "priority");
+  if (!value.IsNull()) {
+    encoding->set_bitrate_priority(stringToBitratePriority(GetValue<std::string>(value)));
+  }
+
+  value = findEncodableValue(params, "networkPriority");
+  if (!value.IsNull()) {
+    encoding->set_network_priority(stringToRTCPriority(GetValue<std::string>(value)));
+  }
+
   return encoding;
 }
 
@@ -584,31 +645,59 @@ void FlutterPeerConnection::AddTransceiver(
     std::unique_ptr<MethodResultProxy> result) {
   std::shared_ptr<MethodResultProxy> result_ptr(result.release());
 
-  RTCMediaTrack* track = base_->MediaTrackForId(trackId);
+  // Hold a ref to the track (base_ owns one in local_tracks_) so it stays alive
+  // for the possibly-deferred worker below. May be null (the mediaType path).
+  scoped_refptr<RTCMediaTrack> track = base_->MediaTrackForId(trackId);
   RTCMediaType type = stringToMediaType(mediaType);
 
-  if (0 < transceiverInit.size()) {
-    auto transceiver =
-        track != nullptr ? pc->AddTransceiver(
-                               track, mapToRtpTransceiverInit(transceiverInit))
-                         : pc->AddTransceiver(
-                               type, mapToRtpTransceiverInit(transceiverInit));
-    if (nullptr != transceiver.get()) {
-      result_ptr->Success(EncodableValue(transceiverToMap(transceiver)));
-      return;
+  // Parse the init on the CALLING thread (cheap, no signaling-thread work) and
+  // capture the refcounted result — so the worker below needs neither the
+  // EncodableMap nor the FlutterPeerConnection instance.
+  const bool has_init = 0 < transceiverInit.size();
+  scoped_refptr<RTCRtpTransceiverInit> init =
+      has_init ? mapToRtpTransceiverInit(transceiverInit)
+               : scoped_refptr<RTCRtpTransceiverInit>();
+
+  // The actual libwebrtc call + result completion. pc->AddTransceiver() is a
+  // proxy that BLOCKS the caller until the signaling thread finishes it.
+  auto do_add = [pc, track, type, has_init, init, result_ptr]() {
+    if (has_init) {
+      auto transceiver = track.get() != nullptr
+                             ? pc->AddTransceiver(track.get(), init)
+                             : pc->AddTransceiver(type, init);
+      if (nullptr != transceiver.get()) {
+        result_ptr->Success(EncodableValue(transceiverToMap(transceiver)));
+        return;
+      }
+      result_ptr->Error("AddTransceiver(track | mediaType, init)",
+                        "AddTransceiver error");
+    } else {
+      auto transceiver = track.get() != nullptr ? pc->AddTransceiver(track.get())
+                                                : pc->AddTransceiver(type);
+      if (nullptr != transceiver.get()) {
+        result_ptr->Success(EncodableValue(transceiverToMap(transceiver)));
+        return;
+      }
+      result_ptr->Error("AddTransceiver(track, mediaType)",
+                        "AddTransceiver error");
     }
-    result_ptr->Error("AddTransceiver(track | mediaType, init)",
-                      "AddTransceiver error");
-  } else {
-    auto transceiver =
-        track != nullptr ? pc->AddTransceiver(track) : pc->AddTransceiver(type);
-    if (nullptr != transceiver.get()) {
-      result_ptr->Success(EncodableValue(transceiverToMap(transceiver)));
-      return;
-    }
-    result_ptr->Error("AddTransceiver(track, mediaType)",
-                      "AddTransceiver error");
-  }
+  };
+
+#ifdef _WIN32
+  // the FIRST audio transceiver triggers the cold publish
+  // init (RTP audio sender + Opus encoder + APM allocation), ~600ms, and
+  // pc->AddTransceiver() blocks the caller for the whole time. LiveKit publishes
+  // the mic via addTransceiver (engine.dart), so on Flutter Windows — where the
+  // platform thread IS the UI message loop — first voice join froze the mouse
+  // for ~600ms. Run it on a worker and complete the MethodResult from there
+  // (house style, see CreateOffer). The proxy is thread-safe (it marshals to the
+  // signaling thread regardless of caller), and LiveKit awaits this result
+  // before it negotiates (createOffer/setLocalDescription), so ordering holds.
+  // pc outlives the in-flight publish (Dart awaits this before any teardown).
+  std::thread(std::move(do_add)).detach();
+#else
+  do_add();
+#endif
 }
 
 void FlutterPeerConnection::GetTransceivers(
@@ -734,9 +823,19 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
       if (!value.IsNull()) {
         param->set_scalability_mode(GetValue<std::string>(value));
       }
+      value = findEncodableValue(map, "priority");
+      if (!value.IsNull()) {
+        param->set_bitrate_priority(stringToBitratePriority(GetValue<std::string>(value)));
+      }
+      value = findEncodableValue(map, "networkPriority");
+      if (!value.IsNull()) {
+        param->set_network_priority(stringToRTCPriority(GetValue<std::string>(value)));
+      }
       encoding++;
     }
   }
+  // encodings() returns copies, so the changes above must be written back.
+  parameters->set_encodings(params);
 
   EncodableValue value =
       findEncodableValue(newParameters, "degradationPreference");
@@ -1080,23 +1179,39 @@ void FlutterPeerConnection::AddTrack(
     std::vector<std::string> streamIds,
     std::unique_ptr<MethodResultProxy> result) {
   std::shared_ptr<MethodResultProxy> result_ptr(result.release());
-  std::string kind = track->kind().std_string();
-  if (0 == kind.compare("audio")) {
-    auto sender =
-        pc->AddTrack(reinterpret_cast<RTCAudioTrack*>(track.get()), streamIds);
-    if (sender.get() != nullptr) {
-      result_ptr->Success(EncodableValue(rtpSenderToMap(sender)));
-      return;
+
+  // The actual libwebrtc call + result completion. pc->AddTrack() is a proxy
+  // that BLOCKS the caller until the signaling thread finishes it (which, for a
+  // first audio track, includes the cold RTP-sender/encoder/APM init).
+  auto do_add = [pc, track, streamIds, result_ptr]() {
+    std::string kind = track->kind().std_string();
+    if (0 == kind.compare("audio")) {
+      auto sender =
+          pc->AddTrack(reinterpret_cast<RTCAudioTrack*>(track.get()), streamIds);
+      if (sender.get() != nullptr) {
+        result_ptr->Success(EncodableValue(rtpSenderToMap(sender)));
+        return;
+      }
+    } else if (0 == kind.compare("video")) {
+      auto sender =
+          pc->AddTrack(reinterpret_cast<RTCVideoTrack*>(track.get()), streamIds);
+      if (sender.get() != nullptr) {
+        result_ptr->Success(EncodableValue(rtpSenderToMap(sender)));
+        return;
+      }
     }
-  } else if (0 == kind.compare("video")) {
-    auto sender =
-        pc->AddTrack(reinterpret_cast<RTCVideoTrack*>(track.get()), streamIds);
-    if (sender.get() != nullptr) {
-      result_ptr->Success(EncodableValue(rtpSenderToMap(sender)));
-      return;
-    }
-  }
-  result->Success();
+    result_ptr->Success();  // was result->Success() — a use-after-release bug
+  };
+
+#ifdef _WIN32
+  // same rationale as AddTransceiver — run the blocking
+  // proxy call off the platform (UI) thread so a track publish can't freeze the
+  // mouse. LiveKit uses addTransceiver for publishing, but keep AddTrack off the
+  // UI thread too for any code path that goes through it.
+  std::thread(std::move(do_add)).detach();
+#else
+  do_add();
+#endif
 }
 
 void FlutterPeerConnection::RemoveTrack(
@@ -1236,6 +1351,9 @@ void FlutterPeerConnectionObserver::OnAddTrack(
     vector<scoped_refptr<RTCMediaStream>> streams,
     scoped_refptr<RTCRtpReceiver> receiver) {
   auto track = receiver->track();
+  if (track.get()) {
+    remote_tracks_[track->id().std_string()] = track;
+  }
 
   std::vector<scoped_refptr<RTCMediaStream>> mediaStreams;
   for (scoped_refptr<RTCMediaStream> stream : streams.std_vector()) {
@@ -1265,6 +1383,10 @@ void FlutterPeerConnectionObserver::OnAddTrack(
 void FlutterPeerConnectionObserver::OnTrack(
     scoped_refptr<RTCRtpTransceiver> transceiver) {
   auto receiver = transceiver->receiver();
+  auto track = receiver->track();
+  if (track.get()) {
+    remote_tracks_[track->id().std_string()] = track;
+  }
   EncodableMap params;
   EncodableList streams_info;
   auto streams = receiver->streams();
@@ -1286,6 +1408,9 @@ void FlutterPeerConnectionObserver::OnTrack(
 void FlutterPeerConnectionObserver::OnRemoveTrack(
     scoped_refptr<RTCRtpReceiver> receiver) {
   auto track = receiver->track();
+  if (track.get()) {
+    remote_tracks_.erase(track->id().std_string());
+  }
 
   EncodableMap params;
   params[EncodableValue("event")] = "onRemoveTrack";
@@ -1360,6 +1485,10 @@ scoped_refptr<RTCMediaStream> FlutterPeerConnectionObserver::MediaStreamForId(
 
 scoped_refptr<RTCMediaTrack> FlutterPeerConnectionObserver::MediaTrackForId(
     const std::string& id) {
+  auto known = remote_tracks_.find(id);
+  if (known != remote_tracks_.end())
+    return (*known).second;
+
   for (auto it = remote_streams_.begin(); it != remote_streams_.end(); it++) {
     auto remoteStream = (*it).second;
     auto audio_tracks = remoteStream->audio_tracks();

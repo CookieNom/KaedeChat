@@ -18,7 +18,8 @@ releases as needed. The selected clients' files go to one GitHub Release:
 Each client package has a SHA-256 `.sha256` file beside it. Linux and macOS
 updater signatures also have checksums; `latest.json` and the Windows `.sig`
 do not. The publish job downloads only `kaede-chat-*` artifacts. The native
-WebRTC build inputs, `webrtc-android.tar` and `webrtc-ios.tar`, remain CI
+WebRTC build inputs, `webrtc-android.tar`, `webrtc-ios.tar`, and each platform's
+`desktop-webrtc.tar`, remain CI
 artifacts and are not uploaded to the GitHub Release. A branch push, pull
 request, or manual workflow dispatch cannot publish a release.
 
@@ -36,13 +37,14 @@ preflight rather than silently skipping builds.
 | `mobile/android/` | Android |
 | `mobile/ios/` | iOS, when `IOS_RELEASE_ENABLED=true` |
 | Shared `mobile/` files, including Dart, assets, pubspec, and tools | Android and enabled iOS |
+| `docs/av1-e2ee/webrtc-build.patch` (mobile native codec/cryptor source) | Android and enabled iOS |
 | `desktop/crates/kaede-e2ee/`, `kaede-e2ee-ffi/`, workspace Cargo manifest/lock, Rust toolchain, or Cargo configuration | Desktop and mobile |
 | Release workflow or `.github/scripts/` | Desktop and mobile |
 | Markdown/docs, retired Slint code, backend, or deployment files alone | No client release |
 
 Directory matching is conservative: shared lockfile, `desktop-release.yml`, and
-`.github/scripts/` changes rebuild all consumers. Other CI files and the WebRTC
-patch don't select a client. CI still runs for every tag. If no client is selected
+`.github/scripts/` changes rebuild all consumers. Other CI files don't select a
+client. CI still runs for every tag. If no client is selected
 (after the iOS enable flag), no GitHub Release or store upload is created.
 Unchanged apps keep their existing downloads under their previous release tags.
 Mobile-only releases carry forward the previous desktop `latest.json` unchanged,

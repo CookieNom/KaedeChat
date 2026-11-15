@@ -11,6 +11,10 @@
 @interface RTCFrameCryptor (Flutter) <FlutterStreamHandler>
 @property(nonatomic, strong, nullable) FlutterEventSink eventSink;
 @property(nonatomic, strong, nullable) FlutterEventChannel* eventChannel;
+// Buffers state-change events fired by the native cryptor before the Dart side
+// has attached its event-channel listener, so they are not lost. Mirrors the
+// Android implementation's eventQueue. Flushed in -onListenWithArguments:.
+@property(nonatomic, strong, nullable) NSMutableArray* eventQueue;
 @end
 
 
@@ -28,10 +32,10 @@
                         result:(nonnull FlutterResult)result;
 
 - (void)frameCryptorSetEnabled:(nonnull NSDictionary*)constraints
-                          result:(nonnull FlutterResult)result; 
+                          result:(nonnull FlutterResult)result;
 
 - (void)frameCryptorGetEnabled:(nonnull NSDictionary*)constraints
-                            result:(nonnull FlutterResult)result;   
+                            result:(nonnull FlutterResult)result;
 
 - (void)frameCryptorDispose:(nonnull NSDictionary*)constraints
                             result:(nonnull FlutterResult)result;

@@ -1,31 +1,96 @@
-<!doctype html><html><body><script type="module">
-import {Room, RoomEvent, ExternalE2EEKeyProvider, LocalVideoTrack, Track} from '/sdk.mjs';
-window.start = async (url, token, role, backup = false) => {
-  const keys = new ExternalE2EEKeyProvider({ratchetWindowSize:16});
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Kaede codec interoperability fixture</title>
+<body>
+<script type="module">
+import { Room, RoomEvent, ExternalE2EEKeyProvider, LocalVideoTrack, Track } from '/sdk.mjs';
+
+window.start = async ({ url, token, role, codec, mode, encrypted, late }) => {
+  // The harness grants access to Chromium's fake camera only, exposing hardware stats.
+  window.hardwarePermission = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  const keys = new ExternalE2EEKeyProvider({ ratchetWindowSize: 16 });
   await keys.setKey(new Uint8Array(32).fill(7).buffer);
-  const room = window.room = new Room({dynacast:true, e2ee:{keyProvider:keys, worker:new Worker('/worker.mjs',{type:'module'})}, publishDefaults:{videoCodec:'av1',backupCodec:backup ? {codec:backup} : false,backupCodecPolicy:1,scalabilityMode:'L3T3_KEY'}});
+  const room = window.room = new Room({
+    dynacast: true,
+    ...(encrypted ? { e2ee: { keyProvider: keys, worker: new Worker('/worker.mjs', { type: 'module' }) } } : {}),
+    publishDefaults: { backupCodec: false, simulcast: false }
+  });
+  const subscribe = (publication) => {
+    if (publication.kind === 'video') {
+      publication.setSubscribed(publication.mimeType?.toLowerCase() === `video/${codec}`);
+    }
+  };
+  room.on(RoomEvent.TrackPublished, subscribe);
   room.on(RoomEvent.TrackSubscribed, (track) => {
     if (track.kind !== 'video') return;
-    const video = track.attach(); video.muted=true; video.autoplay=true;document.body.append(video);
-    const timer = setInterval(async () => {
+    const video = track.attach();
+    video.muted = true;
+    video.autoplay = true;
+    document.body.append(video);
+    setInterval(async () => {
       const report = await track.getRTCStatsReport();
       for (const stat of report?.values() ?? []) {
         if (stat.type === 'inbound-rtp' && stat.framesDecoded > 0) {
-          window.decoded = {frames:stat.framesDecoded,codec:report.get(stat.codecId)?.mimeType};clearInterval(timer);
+          window.decoded = { frames: stat.framesDecoded, codec: report.get(stat.codecId)?.mimeType,
+            hardware: stat.powerEfficientDecoder, decoder: stat.decoderImplementation };
         }
       }
-    },100);
+    }, 100);
   });
-  room.on(RoomEvent.EncryptionError, error => console.error('encryption', error.message));
-  await room.connect(url,token);
-  await room.setE2EEEnabled(true);
+  room.on(RoomEvent.EncryptionError, (error) => console.error('encryption', error.message));
+  await room.connect(url, token, { autoSubscribe: false });
+  if (encrypted) await room.setE2EEEnabled(true);
+  for (const participant of room.remoteParticipants.values()) {
+    for (const publication of participant.trackPublications.values()) subscribe(publication);
+  }
   if (role === 'publisher') {
-    const canvas = document.createElement('canvas');canvas.width=640;canvas.height=360;document.body.append(canvas);
-    const ctx=canvas.getContext('2d');let t=0;
-    setInterval(()=>{ctx.fillStyle=`hsl(${t++%360},80%,50%)`;ctx.fillRect(0,0,640,360);ctx.fillStyle='black';ctx.fillRect(t%600,100,40,100)},100);
-    const media=canvas.captureStream(10).getVideoTracks()[0];
-    await room.localParticipant.publishTrack(new LocalVideoTrack(media),{source:Track.Source.ScreenShare,videoCodec:'av1',backupCodec:backup ? {codec:backup} : false,backupCodecPolicy:1,scalabilityMode:'L3T3_KEY'});
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 360;
+    document.body.append(canvas);
+    const ctx = canvas.getContext('2d');
+    let tick = 0;
+    setInterval(() => {
+      ctx.fillStyle = `hsl(${tick++ % 360},80%,50%)`;
+      ctx.fillRect(0, 0, 640, 360);
+      ctx.fillStyle = 'black';
+      ctx.fillRect(tick % 600, 100, 40, 100);
+    }, 100);
+    const media = canvas.captureStream(10).getVideoTracks()[0];
+    let compatible;
+    const publishCompatible = async (participant) => {
+      if (!late || participant.identity !== 'vp8-native' || compatible) return;
+      compatible = room.localParticipant.publishTrack(new LocalVideoTrack(media.clone()), {
+        source: Track.Source.ScreenShare, name: 'kaede.video.v1:screen_share:vp8',
+        videoCodec: 'vp8', backupCodec: false, simulcast: false
+      });
+      await compatible;
+      if (room.localParticipant.videoTrackPublications.size > 2) throw new Error('more than two video tracks');
+    };
+    room.on(RoomEvent.ParticipantConnected, (participant) => {
+      publishCompatible(participant).catch((error) => console.error(error));
+    });
+    const publication = await room.localParticipant.publishTrack(new LocalVideoTrack(media), {
+      source: Track.Source.ScreenShare, name: `kaede.video.v1:screen_share:${codec}`,
+      videoCodec: codec, backupCodec: false, simulcast: false, scalabilityMode: mode
+    });
+    for (const participant of room.remoteParticipants.values()) await publishCompatible(participant);
+    setInterval(async () => {
+      const report = await publication.track.getRTCStatsReport();
+      for (const stat of report?.values() ?? []) {
+        if (stat.type === 'outbound-rtp' && stat.framesEncoded > 0) {
+          window.encoded = {
+            frames: stat.framesEncoded, codec: report.get(stat.codecId)?.mimeType,
+            mode: stat.scalabilityMode, encoder: stat.encoderImplementation,
+            hardware: stat.powerEfficientEncoder
+          };
+        }
+      }
+    }, 100);
   }
   return true;
 };
-</script></body></html>
+</script>
+</body>
+</html>

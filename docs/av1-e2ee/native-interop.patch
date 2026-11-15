@@ -1,0 +1,227 @@
+diff --git a/livekit/tests/backup_codec_test.rs b/livekit/tests/backup_codec_test.rs
+index c2edeed..c59a308 100644
+--- a/livekit/tests/backup_codec_test.rs
++++ b/livekit/tests/backup_codec_test.rs
+@@ -33,6 +33,7 @@ async fn connect(
+     encrypted: bool,
+     incompatible: bool,
+     single_pc: bool,
++    auto_subscribe: bool,
+ ) -> Result<(Room, UnboundedReceiver<RoomEvent>)> {
+     let api_key = env::var("LIVEKIT_API_KEY").unwrap_or("devkey".into());
+     let api_secret = env::var("LIVEKIT_API_SECRET").unwrap_or("secret".into());
+@@ -49,6 +50,7 @@ async fn connect(
+     let mut options = RoomOptions::default();
+     options.single_peer_connection = single_pc && !incompatible;
+     options.dynacast = true;
++    options.auto_subscribe = auto_subscribe;
+     if encrypted {
+         options.encryption = Some(E2eeOptions {
+             encryption_type: EncryptionType::Gcm,
+@@ -133,9 +135,10 @@ async fn late_joiner_gets_backup_without_replacing_av1(
+ ) -> Result<()> {
+     let name = format!("backup-{}", create_random_uuid());
+     let (publisher, mut publisher_events) =
+-        connect(&name, "publisher", encrypted, false, single_pc).await?;
++        connect(&name, "publisher", encrypted, false, single_pc, true).await?;
+     let publisher = Arc::new(publisher);
+-    let (av1_receiver, mut av1_events) = connect(&name, "av1", encrypted, false, single_pc).await?;
++    let (av1_receiver, mut av1_events) =
++        connect(&name, "av1", encrypted, false, single_pc, true).await?;
+     let mut source = SolidColorTrack::new(
+         publisher.clone(),
+         SolidColorParams { width: 640, height: 360, luma: 180 },
+@@ -169,7 +172,8 @@ async fn late_joiner_gets_backup_without_replacing_av1(
+     ensure!(!before.iter().any(|s| matches!(s, RtcStats::Codec(c) if c.codec.mime_type.eq_ignore_ascii_case(&format!("video/{}", backup_codec.as_str())))),
+         "backup encoder should not exist before it is requested");
+ 
+-    let (vp8_receiver, mut vp8_events) = connect(&name, "vp8", encrypted, true, false).await?;
++    let (vp8_receiver, mut vp8_events) =
++        connect(&name, "vp8", encrypted, true, false, true).await?;
+     let backup =
+         receive_video(&mut vp8_events, &format!("video/{}", backup_codec.as_str())).await?;
+     ensure!(backup.sid() == original_sid && primary.sid() == original_sid);
+@@ -215,9 +219,9 @@ async fn video_encryption_probe() -> Result<()> {
+     let mode = env::var("PROBE_SVC").unwrap_or("L1T1".into());
+     eprintln!("probe codec={codec:?} encrypted={encrypted} mode={mode}");
+     let name = format!("encryption-probe-{}", create_random_uuid());
+-    let (publisher, _) = connect(&name, "publisher", encrypted, false, false).await?;
++    let (publisher, _) = connect(&name, "publisher", encrypted, false, false, true).await?;
+     let publisher = Arc::new(publisher);
+-    let (receiver, mut events) = connect(&name, "receiver", encrypted, false, false).await?;
++    let (receiver, mut events) = connect(&name, "receiver", encrypted, false, false, true).await?;
+     use libwebrtc::{
+         prelude::{I420Buffer, RtcVideoSource, VideoFrame, VideoResolution, VideoRotation},
+         video_source::native::NativeVideoSource,
+@@ -266,24 +270,83 @@ async fn video_encryption_probe() -> Result<()> {
+ }
+ 
+ /// Used by the headless Chromium interoperability harness.
++/// Select one publication, without ever subscribing the VP8 viewer to a premium track.
++async fn receive_variant(
++    room: &Room,
++    events: &mut UnboundedReceiver<RoomEvent>,
++    codec: &str,
++) -> Result<RemoteVideoTrack> {
++    let mime = format!("video/{codec}");
++    let mut selected = false;
++    for participant in room.remote_participants().into_values() {
++        for publication in participant.track_publications().into_values() {
++            if publication.mime_type().eq_ignore_ascii_case(&mime) {
++                publication.set_subscribed(true);
++                selected = true;
++            }
++        }
++    }
++    if !selected {
++        timeout(Duration::from_secs(30), async {
++            while let Some(event) = events.recv().await {
++                if let RoomEvent::TrackPublished { publication, .. } = event {
++                    if publication.mime_type().eq_ignore_ascii_case(&mime) {
++                        publication.set_subscribed(true);
++                        return Ok(());
++                    }
++                }
++            }
++            Err(anyhow!("room ended before {mime} was published"))
++        })
++        .await??;
++    }
++    let track = receive_video(events, &mime).await?;
++    if codec == "h265" {
++        ensure!(
++            track.get_stats().await?.iter().any(|stat| matches!(
++                stat, RtcStats::InboundRtp(stat) if stat.inbound.power_efficient_decoder
++            )),
++            "HEVC requires proven hardware decoding"
++        );
++    }
++    Ok(track)
++}
++
+ #[test_log::test(tokio::test)]
+-#[ignore = "requires the browser interoperability harness"]
++#[ignore = "requires the browser interoperability harness and codec-capable hardware"]
+ async fn browser_encryption_interop() -> Result<()> {
+     let name = env::var("INTEROP_ROOM")?;
+-    let backup = env::var("INTEROP_BACKUP").ok();
+-    let compatible = if backup.is_some() {
+-        let (room, mut events) = connect(&name, "av1-native", true, false, false).await?;
+-        receive_video(&mut events, "video/av1").await?;
+-        Some(room)
+-    } else {
+-        None
++    let codec = env::var("INTEROP_CODEC").unwrap_or("av1".into());
++    let video_codec = match codec.as_str() {
++        "av1" => VideoCodec::AV1,
++        "h265" => VideoCodec::H265,
++        _ => return Err(anyhow!("unsupported INTEROP_CODEC")),
+     };
+-    let (room, mut events) = connect(&name, "native", true, backup.is_some(), false).await?;
++    let mode = env::var("INTEROP_SCALABILITY_MODE").unwrap_or("L1T1".into());
++    ensure!(matches!(mode.as_str(), "L1T1" | "L1T3" | "L3T3_KEY"));
++    ensure!(codec != "h265" || mode != "L3T3_KEY");
++    let encrypted = env::var("INTEROP_ENCRYPTED").as_deref() != Ok("0");
++    let late = env::var("INTEROP_LATE_VP8").as_deref() == Ok("1");
++    let (room, mut events) = connect(&name, "native", encrypted, false, false, false).await?;
+     let room = Arc::new(room);
+     eprintln!("INTEROP_READY");
+     if env::var("INTEROP_ROLE").as_deref() == Ok("receiver") {
+-        receive_video(&mut events, &format!("video/{}", backup.as_deref().unwrap_or("av1")))
+-            .await?;
++        let primary = receive_variant(&room, &mut events, &codec).await?;
++        if late {
++            let (viewer, mut viewer_events) =
++                connect(&name, "vp8-native", encrypted, false, false, false).await?;
++            let compatible = receive_variant(&viewer, &mut viewer_events, "vp8").await?;
++            ensure!(
++                primary.sid() != compatible.sid(),
++                "compatible video must be a separate publication"
++            );
++            let mut primary_stream = NativeVideoStream::new(primary.rtc_track());
++            ensure!(
++                timeout(Duration::from_secs(10), primary_stream.next()).await?.is_some(),
++                "premium video stopped after the VP8 viewer joined"
++            );
++            viewer.close().await?;
++        }
+     } else {
+         let mut source = SolidColorTrack::new(
+             room.clone(),
+@@ -291,18 +354,69 @@ async fn browser_encryption_interop() -> Result<()> {
+         );
+         source
+             .publish_with_options(TrackPublishOptions {
+-                video_codec: VideoCodec::AV1,
+-                scalability_mode: Some("L3T3_KEY".into()),
+-                video_encoder: VideoEncoderBackend::Software,
++                source: TrackSource::Screenshare,
++                video_codec,
++                scalability_mode: Some(mode),
++                // Software AV1 remains useful for the portable cryptor fixture; HEVC never permits it.
++                video_encoder: if codec == "h265" {
++                    VideoEncoderBackend::Hardware
++                } else {
++                    VideoEncoderBackend::Software
++                },
++                backup_codec: None,
++                simulcast: false,
+                 ..Default::default()
+             })
+             .await?;
+-        sleep(Duration::from_secs(15)).await;
++        let mut baseline = None;
++        if late {
++            timeout(Duration::from_secs(30), async {
++                while let Some(event) = events.recv().await {
++                    if let RoomEvent::ParticipantConnected(participant) = event {
++                        if participant.identity().as_str() == "vp8-browser" {
++                            return Ok(());
++                        }
++                    }
++                }
++                Err(anyhow!("late VP8 viewer did not join"))
++            })
++            .await??;
++            let mut compatible = SolidColorTrack::new(
++                room.clone(),
++                SolidColorParams { width: 640, height: 360, luma: 180 },
++            );
++            compatible
++                .publish_with_options(TrackPublishOptions {
++                    source: TrackSource::Screenshare,
++                    video_codec: VideoCodec::VP8,
++                    backup_codec: None,
++                    simulcast: false,
++                    ..Default::default()
++                })
++                .await?;
++            baseline = Some(compatible);
++        }
++        sleep(Duration::from_secs(10)).await;
++        let publications = room.local_participant().track_publications();
++        ensure!(publications.len() == if late { 2 } else { 1 });
++        if codec == "h265" {
++            let mut proved = false;
++            for publication in publications.into_values() {
++                if publication.mime_type().eq_ignore_ascii_case("video/h265") {
++                    if let Some(LocalTrack::Video(track)) = publication.track() {
++                        proved |= track.get_stats().await?.iter().any(|stat| matches!(
++                            stat, RtcStats::OutboundRtp(stat) if stat.outbound.frames_encoded > 0 && stat.outbound.power_efficient_encoder
++                        ));
++                    }
++                }
++            }
++            ensure!(proved, "HEVC requires proven hardware encoding");
++        }
++        if let Some(mut compatible) = baseline {
++            compatible.unpublish().await?;
++        }
+         source.unpublish().await?;
+     }
+     room.close().await?;
+-    if let Some(compatible) = compatible {
+-        compatible.close().await?;
+-    }
+     Ok(())
+ }

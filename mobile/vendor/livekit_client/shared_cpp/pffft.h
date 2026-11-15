@@ -1,4 +1,4 @@
-/* Copyright (c) 2013  Julien Pommier ( pommier@modartt.com ) 
+/* Copyright (c) 2013  Julien Pommier ( pommier@modartt.com )
 
    Based on original fortran 77 code from FFTPACKv4 from NETLIB,
    authored by Dr Paul Swarztrauber of NCAR, in 1985.
@@ -24,7 +24,7 @@
    Laboratory, the University Corporation for Atmospheric Research,
    nor the names of its sponsors or contributors may be used to
    endorse or promote products derived from this Software without
-   specific prior written permission.  
+   specific prior written permission.
 
    - Redistributions of source code must retain the above copyright
    notices, this list of conditions, and the disclaimer below.
@@ -44,18 +44,18 @@
    CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH THE
    SOFTWARE.
 */
-   
+
 /*
    PFFFT : a Pretty Fast FFT.
 
    This is basically an adaptation of the single precision fftpack
    (v4) as found on netlib taking advantage of SIMD instruction found
    on cpus such as intel x86 (SSE1), powerpc (Altivec), and arm (NEON).
-   
-   For architectures where no SIMD instruction is available, the code
-   falls back to a scalar version.  
 
-   Restrictions: 
+   For architectures where no SIMD instruction is available, the code
+   falls back to a scalar version.
+
+   Restrictions:
 
    - 1D transforms only, with 32-bit single precision.
 
@@ -67,7 +67,7 @@
    - all (float*) pointers in the functions below are expected to
    have an "simd-compatible" alignment, that is 16 bytes on x86 and
    powerpc CPUs.
-  
+
    You can allocate such buffers with the functions
    pffft_aligned_malloc / pffft_aligned_free (or with stuff like
    posix_memalign..)
@@ -187,7 +187,7 @@ void pffft_zconvolve_accumulate(PFFFT_Setup* setup,
 void* pffft_aligned_malloc(size_t nb_bytes);
 void pffft_aligned_free(void*);
 
-/* return 4 or 1 wether support SSE/Altivec instructions was enable when
+/* return 4 or 1 whether support for SSE/Altivec instructions was enabled when
  * building pffft.c */
 int pffft_simd_size();
 

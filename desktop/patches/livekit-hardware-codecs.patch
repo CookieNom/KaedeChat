@@ -1,0 +1,1185 @@
+diff --git a/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp b/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp
+--- a/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp
++++ b/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp
+@@ -8,6 +8,8 @@
+ * is strictly prohibited.
+ *
+ */
++
++#include "nvidia_driver.h"
+ 
+ #include <iostream>
+ #include <algorithm>
+@@ -199,7 +201,7 @@
+ 
+     CUDA_DRVAPI_CALL(cuCtxPushCurrent(m_cuContext));
+     NVDEC_API_CALL(cuvidGetDecoderCaps(&decodecaps));
+-    CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++    CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+ 
+     if(!decodecaps.bIsSupported){
+         NVDEC_THROW_ERROR("Codec not supported on this GPU", CUDA_ERROR_NOT_SUPPORTED);
+@@ -350,7 +352,7 @@
+ 
+     CUDA_DRVAPI_CALL(cuCtxPushCurrent(m_cuContext));
+     NVDEC_API_CALL(cuvidCreateDecoder(&m_hDecoder, &videoDecodeCreateInfo));
+-    CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++    CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+     STOP_TIMER("Session Initialization Time: ");
+     NvDecoder::addDecoderSessionOverHead(getDecoderSessionID(), elapsedTime);
+     return nDecodeSurface;
+@@ -461,7 +463,7 @@
+     START_TIMER
+     CUDA_DRVAPI_CALL(cuCtxPushCurrent(m_cuContext));
+     NVDEC_API_CALL(cuvidReconfigureDecoder(m_hDecoder, &reconfigParams));
+-    CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++    CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+     STOP_TIMER("Session Reconfigure Time: ");
+ 
+     return nDecodeSurface;
+@@ -499,7 +501,7 @@
+         {
+             CUDA_DRVAPI_CALL(cuCtxPushCurrent(m_cuContext));
+             CUDA_DRVAPI_CALL(cuMemFree((CUdeviceptr)pFrame));
+-            CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++            CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+         }
+         else
+         {
+@@ -531,7 +533,7 @@
+         dispInfo.top_field_first = pPicParams->bottom_field_flag ^ 1;
+         HandlePictureDisplay(&dispInfo);
+     }
+-    CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++    CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+     return 1;
+ }
+ 
+@@ -656,7 +658,7 @@
+         CUDA_DRVAPI_CALL(cuMemcpy2DAsync(&m, m_cuvidStream));
+     }
+     CUDA_DRVAPI_CALL(cuStreamSynchronize(m_cuvidStream));
+-    CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++    CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+ 
+     if ((int)m_vTimestamp.size() < m_nDecodedFrame) {
+         m_vTimestamp.resize(m_vpFrame.size());
+@@ -777,7 +779,7 @@
+             delete[] pFrame;
+         }
+     }
+-    cuCtxPopCurrent(NULL);
++    cuCtxPopCurrent(nullptr);
+ 
+     cuvidCtxLockDestroy(m_ctxLock);
+ 
+diff --git a/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp b/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp
+--- a/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp
++++ b/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp
+@@ -8,6 +8,8 @@
+  * is strictly prohibited.
+  *
+  */
++
++#include "nvidia_driver.h"
+ 
+ #include "NvEncoder.h"
+ 
+@@ -75,9 +77,9 @@
+ void NvEncoder::LoadNvEncApi() {
+ #if defined(_WIN32)
+ #if defined(_WIN64)
+-  HMODULE hModule = LoadLibrary(TEXT("nvEncodeAPI64.dll"));
++  HMODULE hModule = LoadLibraryExW(L"nvEncodeAPI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+ #else
+-  HMODULE hModule = LoadLibrary(TEXT("nvEncodeAPI.dll"));
++  HMODULE hModule = LoadLibraryExW(L"nvEncodeAPI.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+ #endif
+ #else
+   void* hModule = dlopen("libnvidia-encode.so.1", RTLD_LAZY);
+diff --git a/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp b/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp
+--- a/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp
++++ b/webrtc-sys/src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp
+@@ -8,6 +8,8 @@
+  * is strictly prohibited.
+  *
+  */
++
++#include "nvidia_driver.h"
+ 
+ #include "NvEncoderCuda.h"
+ 
+@@ -71,7 +73,7 @@
+           GetMaxEncodeHeight() + chromaHeight, 16));
+       inputFrames.push_back((void*)pDeviceFrame);
+     }
+-    CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++    CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+ 
+     RegisterInputResources(
+         inputFrames, NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+@@ -117,7 +119,7 @@
+   }
+   m_vReferenceFrames.clear();
+ 
+-  cuCtxPopCurrent(NULL);
++  cuCtxPopCurrent(nullptr);
+   m_cuContext = nullptr;
+ }
+ 
+@@ -194,7 +196,7 @@
+       }
+     }
+   }
+-  CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++  CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+ }
+ 
+ void NvEncoderCuda::CopyToDeviceFrame(CUcontext device,
+@@ -267,5 +269,5 @@
+       }
+     }
+   }
+-  CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
+-}
++  CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
++}
+diff --git a/webrtc-sys/src/nvidia/av1_encoder_impl.cpp b/webrtc-sys/src/nvidia/av1_encoder_impl.cpp
+--- a/webrtc-sys/src/nvidia/av1_encoder_impl.cpp
++++ b/webrtc-sys/src/nvidia/av1_encoder_impl.cpp
+@@ -1,3 +1,5 @@
++#include "nvidia_driver.h"
++
+ #include "av1_encoder_impl.h"
+ 
+ #include <algorithm>
+@@ -163,9 +165,15 @@
+   GUID encodeGuid = NV_ENC_CODEC_AV1_GUID;
+   GUID presetGuid = NV_ENC_PRESET_P4_GUID;
+ 
+-  encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
+-                                       presetGuid,
+-                                       NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
++  try {
++    encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
++                                         presetGuid,
++                                         NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
++  } catch (const NVENCException& e) {
++    RTC_LOG(LS_ERROR) << "Failed to configure NvEncoder " << e.what();
++    ReportError();
++    return WEBRTC_VIDEO_CODEC_ERROR;
++  }
+ 
+   nv_initialize_params_.frameRateNum = std::max<uint32_t>(
+       1, static_cast<uint32_t>(std::round(configuration_.max_frame_rate)));
+diff --git a/webrtc-sys/src/nvidia/cuda_context.cpp b/webrtc-sys/src/nvidia/cuda_context.cpp
+--- a/webrtc-sys/src/nvidia/cuda_context.cpp
++++ b/webrtc-sys/src/nvidia/cuda_context.cpp
+@@ -1,3 +1,5 @@
++#include "nvidia_driver.h"
++
+ #include "cuda_context.h"
+ 
+ #include "rtc_base/checks.h"
+@@ -30,35 +32,21 @@
+ 
+ #define CUCTX_CUDA_CALL_ERROR(call) \
+   do {                              \
+-    __CUCTX_CUDA_CALL(call, err__); \
++    __CUCTX_CUDA_CALL(call, false); \
+   } while (0)
+ 
+-static void* s_module_ptr = nullptr;
+ static const int kRequiredDriverVersion = 11000;
+ 
+ static bool load_cuda_modules() {
+-  if (s_module_ptr)
+-    return true;
+-
+-#if defined(WIN32)
+-  // dll delay load
+-  HMODULE module = LoadLibrary(TEXT("nvcuda.dll"));
+-  if (!module) {
+-    RTC_LOG(LS_INFO) << "nvcuda.dll is not found.";
+-    return false;
+-  }
+-  s_module_ptr = module;
+-#elif defined(__linux__)
+-  s_module_ptr = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_GLOBAL);
+-  if (!s_module_ptr)
+-    return false;
+-
+-  // Close handle immediately because going to call `dlopen` again
+-  // in the implib module when cuda api called on Linux.
+-  dlclose(s_module_ptr);
+-  s_module_ptr = nullptr;
++#ifdef _WIN32
++  return NvidiaDriverLibrary(false) != nullptr;
++#else
++  void* module = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_LOCAL);
++  if (!module) return false;
++  // Linux's generated lazy-import module owns the persistent driver handle.
++  dlclose(module);
++  return true;
+ #endif
+-  return true;
+ }
+ 
+ static bool check_cuda_device() {
+@@ -103,6 +91,8 @@
+ }
+ 
+ bool CudaContext::Initialize() {
++  std::lock_guard<std::mutex> lock(mutex_);
++  if (cu_context_) return true;
+   // Initialize CUDA context
+ 
+   bool success = load_cuda_modules();
+@@ -171,31 +161,25 @@
+   // Ensure the context is current
+   CUcontext current;
+   if (cuCtxGetCurrent(&current) != CUDA_SUCCESS) {
+-    throw;
++    return nullptr;
+   }
+   if (cu_context_ == current) {
+     return cu_context_;
+   }
+   if (cuCtxSetCurrent(cu_context_) != CUDA_SUCCESS) {
+-    throw;
++    return nullptr;
+   }
+   return cu_context_;
+ }
+ 
+ void CudaContext::Shutdown() {
++  std::lock_guard<std::mutex> lock(mutex_);
+   // Shutdown CUDA context
+   if (cu_context_) {
+     cuCtxDestroy(cu_context_);
+     cu_context_ = nullptr;
+   }
+-  if (s_module_ptr) {
+-#if defined(WIN32)
+-    FreeLibrary((HMODULE)s_module_ptr);
+-#elif defined(__linux__)
+-    dlclose(s_module_ptr);
+-#endif
+-    s_module_ptr = nullptr;
+-  }
++
+ }
+ 
+ }  // namespace livekit_ffi
+diff --git a/webrtc-sys/src/nvidia/cuda_context.h b/webrtc-sys/src/nvidia/cuda_context.h
+--- a/webrtc-sys/src/nvidia/cuda_context.h
++++ b/webrtc-sys/src/nvidia/cuda_context.h
+@@ -2,6 +2,7 @@
+ #define WEBRTC_SYS_NVIDIA_CUDA_CONTEXT_H
+ 
+ #include <cuda.h>
++#include <mutex>
+ 
+ namespace livekit_ffi {
+ 
+@@ -20,6 +21,7 @@
+   void Shutdown();
+ 
+  private:
++  mutable std::mutex mutex_;
+   CUdevice cu_device_ = 0;
+   CUcontext cu_context_ = nullptr;
+ };
+diff --git a/webrtc-sys/src/nvidia/h264_decoder_impl.cpp b/webrtc-sys/src/nvidia/h264_decoder_impl.cpp
+--- a/webrtc-sys/src/nvidia/h264_decoder_impl.cpp
++++ b/webrtc-sys/src/nvidia/h264_decoder_impl.cpp
+@@ -1,5 +1,8 @@
++#include "nvidia_driver.h"
++
+ #include "h264_decoder_impl.h"
+ 
++#include <limits>
+ #include <api/video/i420_buffer.h>
+ #include <api/video/video_codec_type.h>
+ #include <modules/video_coding/include/video_error_codes.h>
+@@ -70,9 +73,14 @@
+   int maxHeight = 4096;
+ 
+   // bUseDeviceFrame: allocate in memory or cuda device memory
+-  decoder_ = std::make_unique<NvDecoder>(
+-      cu_context_, false, cudaVideoCodec_H264, true, false, nullptr, nullptr,
+-      false, maxWidth, maxHeight);
++  try {
++    decoder_ = std::make_unique<NvDecoder>(
++        cu_context_, false, cudaVideoCodec_H264, true, false, nullptr, nullptr,
++        false, maxWidth, maxHeight);
++  } catch (const std::exception& error) {
++    RTC_LOG(LS_WARNING) << "NVDEC initialization failed: " << error.what();
++    return false;
++  }
+   return true;
+ }
+ 
+@@ -83,6 +91,8 @@
+ }
+ 
+ int32_t NvidiaH264DecoderImpl::Release() {
++  decoder_.reset();
++  is_configured_decoder_ = false;
+   buffer_pool_.Release();
+   return WEBRTC_VIDEO_CODEC_OK;
+ }
+@@ -90,21 +100,14 @@
+ int32_t NvidiaH264DecoderImpl::Decode(const EncodedImage& input_image,
+                                       bool missing_frames,
+                                       int64_t render_time_ms) {
+-  CUcontext current;
+-  if (!ck(cuCtxGetCurrent(&current))) {
+-    RTC_LOG(LS_ERROR) << "decode failed on cuCtxGetCurrent is failed";
+-    return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+-  }
+-  if (current != cu_context_) {
+-    RTC_LOG(LS_ERROR)
+-        << "decode failed on not match current context and hold context";
++  if (!decoder_ || cuCtxSetCurrent(cu_context_) != CUDA_SUCCESS) {
+     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+   }
+   if (decoded_complete_callback_ == nullptr) {
+     RTC_LOG(LS_ERROR) << "decode failed on not set m_decodedCompleteCallback";
+     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+   }
+-  if (!input_image.data() || !input_image.size()) {
++  if (!input_image.data() || !input_image.size() || input_image.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+     RTC_LOG(LS_ERROR) << "decode failed on input image is null";
+     return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
+   }
+@@ -122,11 +125,15 @@
+   }
+ 
+   int nFrameReturnd = 0;
+-  do {
++  try {
+     nFrameReturnd = decoder_->Decode(
+         input_image.data(), static_cast<int>(input_image.size()),
+         CUVID_PKT_TIMESTAMP, input_image.RtpTimestamp());
+-  } while (nFrameReturnd == 0);
++  } catch (const std::exception& error) {
++    RTC_LOG(LS_WARNING) << "NVDEC decode failed: " << error.what();
++    return WEBRTC_VIDEO_CODEC_ERROR;
++  }
++  if (nFrameReturnd == 0) return WEBRTC_VIDEO_CODEC_OK;
+ 
+   is_configured_decoder_ = true;
+ 
+diff --git a/webrtc-sys/src/nvidia/h264_encoder_impl.cpp b/webrtc-sys/src/nvidia/h264_encoder_impl.cpp
+--- a/webrtc-sys/src/nvidia/h264_encoder_impl.cpp
++++ b/webrtc-sys/src/nvidia/h264_encoder_impl.cpp
+@@ -1,3 +1,5 @@
++#include "nvidia_driver.h"
++
+ #include "h264_encoder_impl.h"
+ 
+ #include <algorithm>
+@@ -206,9 +208,15 @@
+   GUID encodeGuid = NV_ENC_CODEC_H264_GUID;
+   GUID presetGuid = NV_ENC_PRESET_P4_GUID;
+ 
+-  encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
+-                                       presetGuid,
+-                                       NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
++  try {
++    encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
++                                         presetGuid,
++                                         NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
++  } catch (const NVENCException& e) {
++    RTC_LOG(LS_ERROR) << "Failed to configure NvEncoder " << e.what();
++    ReportError();
++    return WEBRTC_VIDEO_CODEC_ERROR;
++  }
+ 
+   nv_initialize_params_.frameRateNum = std::max<uint32_t>(
+       1, static_cast<uint32_t>(std::round(configuration_.max_frame_rate)));
+@@ -303,7 +311,7 @@
+ 
+   bool send_key_frame =
+       is_keyframe_needed ||
+-      (frame_types && (*frame_types)[0] == VideoFrameType::kVideoFrameKey);
++      (frame_types && !frame_types->empty() && (*frame_types)[0] == VideoFrameType::kVideoFrameKey);
+   if (send_key_frame) {
+     is_keyframe_needed = true;
+     configuration_.key_frame_request = false;
+@@ -316,7 +324,7 @@
+     return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
+   }
+ 
+-  if (frame_types != nullptr) {
++  if (frame_types != nullptr && !frame_types->empty()) {
+     // Skip frame?
+     if ((*frame_types)[0] == VideoFrameType::kEmptyFrame) {
+       return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
+diff --git a/webrtc-sys/src/nvidia/h265_decoder_impl.cpp b/webrtc-sys/src/nvidia/h265_decoder_impl.cpp
+--- a/webrtc-sys/src/nvidia/h265_decoder_impl.cpp
++++ b/webrtc-sys/src/nvidia/h265_decoder_impl.cpp
+@@ -1,5 +1,8 @@
++#include "nvidia_driver.h"
++
+ #include "h265_decoder_impl.h"
+ 
++#include <limits>
+ #include <api/video/i420_buffer.h>
+ #include <api/video/video_codec_type.h>
+ #include <modules/video_coding/include/video_error_codes.h>
+@@ -24,25 +27,26 @@
+           format.video_signal_description.video_full_range_flag));
+ }
+ 
+-NvidiaH265DecoderImpl::NvidiaH265DecoderImpl(CUcontext context)
++NvidiaHardwareDecoderImpl::NvidiaHardwareDecoderImpl(CUcontext context, VideoCodecType codec)
+     : cu_context_(context),
++      codec_(codec),
+       decoder_(nullptr),
+       is_configured_decoder_(false),
+       decoded_complete_callback_(nullptr),
+       buffer_pool_(false) {}
+ 
+-NvidiaH265DecoderImpl::~NvidiaH265DecoderImpl() { Release(); }
++NvidiaHardwareDecoderImpl::~NvidiaHardwareDecoderImpl() { Release(); }
+ 
+-VideoDecoder::DecoderInfo NvidiaH265DecoderImpl::GetDecoderInfo() const {
++VideoDecoder::DecoderInfo NvidiaHardwareDecoderImpl::GetDecoderInfo() const {
+   VideoDecoder::DecoderInfo info;
+-  info.implementation_name = "NVIDIA H265 Decoder";
++  info.implementation_name = codec_ == kVideoCodecAV1 ? "NVIDIA AV1 Decoder" : codec_ == kVideoCodecVP9 ? "NVIDIA VP9 Decoder" : "NVIDIA H265 Decoder";
+   info.is_hardware_accelerated = true;
+   return info;
+ }
+ 
+-bool NvidiaH265DecoderImpl::Configure(const Settings& settings) {
+-  if (settings.codec_type() != kVideoCodecH265) {
+-    RTC_LOG(LS_ERROR) << "initialization failed: codec type is not H265";
++bool NvidiaHardwareDecoderImpl::Configure(const Settings& settings) {
++  if (settings.codec_type() != codec_) {
++    RTC_LOG(LS_ERROR) << "initialization failed: codec type does not match decoder";
+     return false;
+   }
+   if (!settings.max_render_resolution().Valid()) {
+@@ -63,51 +67,58 @@
+   int maxWidth = 4096;
+   int maxHeight = 4096;
+ 
+-  decoder_ = std::make_unique<NvDecoder>(
+-      cu_context_, false, cudaVideoCodec_HEVC, true, false, nullptr, nullptr,
+-      false, maxWidth, maxHeight);
++  const cudaVideoCodec codec = codec_ == kVideoCodecAV1 ? cudaVideoCodec_AV1
++      : codec_ == kVideoCodecVP9 ? cudaVideoCodec_VP9 : cudaVideoCodec_HEVC;
++  try {
++    decoder_ = std::make_unique<NvDecoder>(
++        cu_context_, false, codec, true, false, nullptr, nullptr,
++        false, maxWidth, maxHeight);
++  } catch (const std::exception& error) {
++    RTC_LOG(LS_WARNING) << "NVDEC initialization failed: " << error.what();
++    return false;
++  }
+   return true;
+ }
+ 
+-int32_t NvidiaH265DecoderImpl::RegisterDecodeCompleteCallback(
++int32_t NvidiaHardwareDecoderImpl::RegisterDecodeCompleteCallback(
+     DecodedImageCallback* callback) {
+   decoded_complete_callback_ = callback;
+   return WEBRTC_VIDEO_CODEC_OK;
+ }
+ 
+-int32_t NvidiaH265DecoderImpl::Release() {
++int32_t NvidiaHardwareDecoderImpl::Release() {
++  decoder_.reset();
++  is_configured_decoder_ = false;
+   buffer_pool_.Release();
+   return WEBRTC_VIDEO_CODEC_OK;
+ }
+ 
+-int32_t NvidiaH265DecoderImpl::Decode(const EncodedImage& input_image,
++int32_t NvidiaHardwareDecoderImpl::Decode(const EncodedImage& input_image,
+                                       bool /*missing_frames*/,
+                                       int64_t /*render_time_ms*/) {
+-  CUcontext current;
+-  if (!ck(cuCtxGetCurrent(&current))) {
+-    RTC_LOG(LS_ERROR) << "decode failed on cuCtxGetCurrent";
+-    return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+-  }
+-  if (current != cu_context_) {
+-    RTC_LOG(LS_ERROR)
+-        << "decode failed: current context does not match held context";
++  if (!decoder_ || cuCtxSetCurrent(cu_context_) != CUDA_SUCCESS) {
+     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+   }
+   if (decoded_complete_callback_ == nullptr) {
+     RTC_LOG(LS_ERROR) << "decode failed: decoded_complete_callback_ not set";
+     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+   }
+-  if (!input_image.data() || !input_image.size()) {
++  if (!input_image.data() || !input_image.size() || input_image.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+     RTC_LOG(LS_ERROR) << "decode failed: input image is null";
+     return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
+   }
+ 
+   int nFrameReturned = 0;
+-  do {
++  try {
++    // No output is normal while waiting for a keyframe; never resubmit in a busy loop.
+     nFrameReturned = decoder_->Decode(
+         input_image.data(), static_cast<int>(input_image.size()),
+         CUVID_PKT_TIMESTAMP, input_image.RtpTimestamp());
+-  } while (nFrameReturned == 0);
++  } catch (const std::exception& error) {
++    RTC_LOG(LS_WARNING) << "NVDEC decode failed: " << error.what();
++    return WEBRTC_VIDEO_CODEC_ERROR;
++  }
++  if (nFrameReturned == 0) return WEBRTC_VIDEO_CODEC_OK;
+ 
+   is_configured_decoder_ = true;
+ 
+@@ -139,7 +150,8 @@
+         i420_buffer->StrideV(), decoder_->GetWidth(), decoder_->GetHeight());
+ 
+     if (result) {
+-      RTC_LOG(LS_INFO) << "libyuv::NV12ToI420 failed. error:" << result;
++      RTC_LOG(LS_WARNING) << "libyuv::NV12ToI420 failed. error:" << result;
++      return WEBRTC_VIDEO_CODEC_ERROR;
+     }
+ 
+     VideoFrame decoded_frame = VideoFrame::Builder()
+@@ -150,7 +162,7 @@
+                                    .build();
+ 
+     std::optional<int32_t> decodetime;
+-    std::optional<int> qp;  // Not parsed for H265 currently
++    std::optional<int> qp;
+     decoded_complete_callback_->Decoded(decoded_frame, decodetime, qp);
+   }
+ 
+diff --git a/webrtc-sys/src/nvidia/h265_decoder_impl.h b/webrtc-sys/src/nvidia/h265_decoder_impl.h
+--- a/webrtc-sys/src/nvidia/h265_decoder_impl.h
++++ b/webrtc-sys/src/nvidia/h265_decoder_impl.h
+@@ -13,12 +13,12 @@
+ 
+ namespace webrtc {
+ 
+-class NvidiaH265DecoderImpl : public VideoDecoder {
++class NvidiaHardwareDecoderImpl : public VideoDecoder {
+  public:
+-  explicit NvidiaH265DecoderImpl(CUcontext context);
+-  NvidiaH265DecoderImpl(const NvidiaH265DecoderImpl&) = delete;
+-  NvidiaH265DecoderImpl& operator=(const NvidiaH265DecoderImpl&) = delete;
+-  ~NvidiaH265DecoderImpl() override;
++  NvidiaHardwareDecoderImpl(CUcontext context, VideoCodecType codec);
++  NvidiaHardwareDecoderImpl(const NvidiaHardwareDecoderImpl&) = delete;
++  NvidiaHardwareDecoderImpl& operator=(const NvidiaHardwareDecoderImpl&) = delete;
++  ~NvidiaHardwareDecoderImpl() override;
+ 
+   bool Configure(const Settings& settings) override;
+   int32_t Decode(const EncodedImage& input_image,
+@@ -31,6 +31,7 @@
+ 
+  private:
+   CUcontext cu_context_;
++  const VideoCodecType codec_;
+   std::unique_ptr<NvDecoder> decoder_;
+   bool is_configured_decoder_;
+ 
+diff --git a/webrtc-sys/src/nvidia/h265_encoder_impl.cpp b/webrtc-sys/src/nvidia/h265_encoder_impl.cpp
+--- a/webrtc-sys/src/nvidia/h265_encoder_impl.cpp
++++ b/webrtc-sys/src/nvidia/h265_encoder_impl.cpp
+@@ -1,3 +1,5 @@
++#include "nvidia_driver.h"
++
+ #include "h265_encoder_impl.h"
+ 
+ #include <algorithm>
+@@ -75,6 +77,14 @@
+     ReportError();
+     return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
+   }
++  // This NVENC backend emits one temporal layer. Reject requested SVC
++  // instead of reporting the requested mode while encoding a different one.
++  if (inst->numberOfSimulcastStreams > 1 ||
++      (inst->GetScalabilityMode().has_value() &&
++       *inst->GetScalabilityMode() != ScalabilityMode::kL1T1)) {
++    ReportError();
++    return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
++  }
+   if (inst->maxFramerate == 0) {
+     ReportError();
+     return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
+@@ -91,6 +101,7 @@
+   }
+ 
+   codec_ = *inst;
++  codec_.SetScalabilityMode(ScalabilityMode::kL1T1);
+ 
+   if (codec_.numberOfSimulcastStreams == 0) {
+     codec_.simulcastStream[0].width = codec_.width;
+@@ -139,9 +150,15 @@
+   GUID encodeGuid = NV_ENC_CODEC_HEVC_GUID;
+   GUID presetGuid = NV_ENC_PRESET_P4_GUID;
+ 
+-  encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
+-                                       presetGuid,
+-                                       NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
++  try {
++    encoder_->CreateDefaultEncoderParams(&nv_initialize_params_, encodeGuid,
++                                         presetGuid,
++                                         NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
++  } catch (const NVENCException& e) {
++    RTC_LOG(LS_ERROR) << "Failed to configure NvEncoder " << e.what();
++    ReportError();
++    return WEBRTC_VIDEO_CODEC_ERROR;
++  }
+ 
+   nv_initialize_params_.frameRateNum = std::max<uint32_t>(
+       1, static_cast<uint32_t>(std::round(configuration_.max_frame_rate)));
+@@ -233,7 +250,7 @@
+ 
+   bool send_key_frame =
+       is_keyframe_needed ||
+-      (frame_types && (*frame_types)[0] == VideoFrameType::kVideoFrameKey);
++      (frame_types && !frame_types->empty() && (*frame_types)[0] == VideoFrameType::kVideoFrameKey);
+   if (send_key_frame) {
+     is_keyframe_needed = true;
+     configuration_.key_frame_request = false;
+@@ -246,7 +263,7 @@
+     return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
+   }
+ 
+-  if (frame_types != nullptr) {
++  if (frame_types != nullptr && !frame_types->empty()) {
+     if ((*frame_types)[0] == VideoFrameType::kEmptyFrame) {
+       return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
+     }
+@@ -315,6 +332,8 @@
+ 
+   CodecSpecificInfo codecInfo;
+   codecInfo.codecType = kVideoCodecH265;
++  codecInfo.end_of_picture = true;
++  codecInfo.scalability_mode = ScalabilityMode::kL1T1;
+ 
+   const auto result =
+       encoded_image_callback_->OnEncodedImage(encoded_image_, &codecInfo);
+diff --git a/webrtc-sys/src/nvidia/i420_buffer_cuda.h b/webrtc-sys/src/nvidia/i420_buffer_cuda.h
+--- a/webrtc-sys/src/nvidia/i420_buffer_cuda.h
++++ b/webrtc-sys/src/nvidia/i420_buffer_cuda.h
+@@ -52,7 +52,7 @@
+                         buffer.StrideV(), buffer.ChromaWidth(),
+                         buffer.ChromaHeight());
+ 
+-  CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
++  CUDA_DRVAPI_CALL(cuCtxPopCurrent(nullptr));
+ }
+ 
+ }  // namespace webrtc
+diff --git a/webrtc-sys/src/nvidia/nvidia_decoder_factory.cpp b/webrtc-sys/src/nvidia/nvidia_decoder_factory.cpp
+--- a/webrtc-sys/src/nvidia/nvidia_decoder_factory.cpp
++++ b/webrtc-sys/src/nvidia/nvidia_decoder_factory.cpp
+@@ -1,9 +1,14 @@
++#include "nvidia_driver.h"
++
+ #include "nvidia_decoder_factory.h"
+ 
+ #include <modules/video_coding/codecs/h264/include/h264.h>
+ 
+ #include <cstdlib>
++#ifndef _WIN32
+ #include <dlfcn.h>
++#endif
++#include <map>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -34,74 +39,60 @@
+ 
+ constexpr char kSdpKeyNameCodecImpl[] = "implementation_name";
+ constexpr char kCodecName[] = "NvCodec";
++#ifdef _WIN32
++constexpr char kNvdecRuntimeLibrary[] = "nvcuvid.dll";
++#else
+ constexpr char kNvdecRuntimeLibrary[] = "libnvcuvid.so.1";
++#endif
+ 
+ namespace {
+ 
+ bool IsNvdecRuntimeAvailable() {
++#ifdef _WIN32
++  HMODULE hModule = livekit_ffi::NvidiaDriverLibrary(true);
++#else
+   void* hModule = dlopen(kNvdecRuntimeLibrary, RTLD_LAZY | RTLD_LOCAL);
++#endif
+   if (!hModule) {
+     RTC_LOG(LS_WARNING) << "NVDEC runtime library (" << kNvdecRuntimeLibrary
+                         << ") not found, hardware decoding unavailable.";
+     return false;
+   }
+ 
++#ifndef _WIN32
+   dlclose(hModule);
++#endif
+   return true;
+ }
+ 
+ }  // namespace
+ 
+-static int GetCudaDeviceCapabilityMajorVersion(CUcontext context) {
+-  cuCtxSetCurrent(context);
+-
+-  CUdevice device;
+-  cuCtxGetDevice(&device);
+-
+-  int major;
+-  cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+-                       device);
+-
+-  return major;
++static bool SupportsDecode(CUcontext context, cudaVideoCodec codec) {
++  if (!context || cuCtxSetCurrent(context) != CUDA_SUCCESS) return false;
++  CUVIDDECODECAPS caps = {};
++  caps.eCodecType = codec;
++  caps.eChromaFormat = cudaVideoChromaFormat_420;
++  caps.nBitDepthMinus8 = 0;
++  return cuvidGetDecoderCaps(&caps) == CUDA_SUCCESS && caps.bIsSupported
++      && caps.nMaxWidth > 0 && caps.nMaxHeight > 0
++      && (caps.nOutputFormatMask & (1 << cudaVideoSurfaceFormat_NV12));
+ }
+ 
+ std::vector<SdpVideoFormat> SupportedNvDecoderCodecs(CUcontext context) {
+-  std::vector<SdpVideoFormat> supportedFormats;
+-
+-  // HardwareGeneration Kepler is 3.x
+-  // https://docs.nvidia.com/deploy/cuda-compatibility/index.html#faq
+-  // Kepler support h264 profile Main, Highprofile up to Level4.1
+-  // https://docs.nvidia.com/video-technologies/video-codec-sdk/nvdec-video-decoder-api-prog-guide/index.html#video-decoder-capabilities__table_o3x_fms_3lb
+-  if (GetCudaDeviceCapabilityMajorVersion(context) <= 3) {
+-    supportedFormats = {
+-        CreateH264Format(webrtc::H264Profile::kProfileHigh,
+-                         webrtc::H264Level::kLevel4_1, "1"),
+-        CreateH264Format(webrtc::H264Profile::kProfileMain,
+-                         webrtc::H264Level::kLevel4_1, "1"),
+-    };
+-  } else {
+-    supportedFormats = {
+-        // Constrained Baseline Profile does not support NvDecoder, but WebRTC
+-        // uses this profile by default,
+-        // so it must be returned in this method.
+-        CreateH264Format(webrtc::H264Profile::kProfileConstrainedBaseline,
+-                         webrtc::H264Level::kLevel5_1, "1"),
+-        CreateH264Format(webrtc::H264Profile::kProfileBaseline,
+-                         webrtc::H264Level::kLevel5_1, "1"),
+-        CreateH264Format(webrtc::H264Profile::kProfileHigh,
+-                         webrtc::H264Level::kLevel5_1, "1"),
+-        CreateH264Format(webrtc::H264Profile::kProfileMain,
+-                         webrtc::H264Level::kLevel5_1, "1"),
+-        SdpVideoFormat("H265"),
+-        SdpVideoFormat("HEVC"),
++  std::vector<SdpVideoFormat> formats;
++  if (SupportsDecode(context, cudaVideoCodec_H264)) {
++    formats = {
++        CreateH264Format(H264Profile::kProfileConstrainedBaseline, H264Level::kLevel5_1, "1"),
++        CreateH264Format(H264Profile::kProfileBaseline, H264Level::kLevel5_1, "1"),
++        CreateH264Format(H264Profile::kProfileHigh, H264Level::kLevel5_1, "1"),
++        CreateH264Format(H264Profile::kProfileMain, H264Level::kLevel5_1, "1"),
+     };
+   }
+-
+-  for (auto& format : supportedFormats) {
+-    format.parameters.emplace(kSdpKeyNameCodecImpl, kCodecName);
+-  }
+-
+-  return supportedFormats;
++  // Compute capability is not codec support, particularly on mixed-generation GPUs.
++  if (SupportsDecode(context, cudaVideoCodec_HEVC)) formats.emplace_back("H265");
++  if (SupportsDecode(context, cudaVideoCodec_VP9)) formats.emplace_back("VP9", std::map<std::string, std::string>{{"profile-id", "0"}});
++  if (SupportsDecode(context, cudaVideoCodec_AV1)) formats.push_back(SdpVideoFormat::AV1Profile0());
++  return formats;
+ }
+ 
+ NvidiaVideoDecoderFactory::NvidiaVideoDecoderFactory()
+@@ -166,9 +157,13 @@
+         RTC_LOG(LS_INFO) << "Using NVIDIA HW decoder (NVDEC) for H264";
+         return std::make_unique<NvidiaH264DecoderImpl>(cu_context_->GetContext());
+       }
++      if (format.name == "VP9" || format.name == "AV1") {
++        return std::make_unique<NvidiaHardwareDecoderImpl>(cu_context_->GetContext(),
++            format.name == "VP9" ? kVideoCodecVP9 : kVideoCodecAV1);
++      }
+       if (format.name == "H265" || format.name == "HEVC") {
+         RTC_LOG(LS_INFO) << "Using NVIDIA HW decoder (NVDEC) for H265/HEVC";
+-        return std::make_unique<NvidiaH265DecoderImpl>(cu_context_->GetContext());
++        return std::make_unique<NvidiaHardwareDecoderImpl>(cu_context_->GetContext(), kVideoCodecH265);
+       }
+     }
+   }
+diff --git a/webrtc-sys/src/nvidia/nvidia_driver.h b/webrtc-sys/src/nvidia/nvidia_driver.h
+new file mode 100644
+--- /dev/null
++++ b/webrtc-sys/src/nvidia/nvidia_driver.h
+@@ -0,0 +1,143 @@
++// CUDA/NVDEC are optional driver APIs: missing DLLs or symbols fail the probe,
++// without preventing Kaede from starting on Intel/AMD-only Windows machines.
++#pragma once
++
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#include <cuda.h>
++#include "nvcuvid.h"
++#include <utility>
++
++namespace livekit_ffi {
++inline HMODULE NvidiaDriverLibrary(bool decoder) {
++  // Never search the working directory for an executable driver library.
++  static HMODULE cuda = LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++  static HMODULE nvdec = LoadLibraryExW(L"nvcuvid.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++  return decoder ? nvdec : cuda;
++}
++#define KAEDE_DRIVER_STRING_INNER(symbol) #symbol
++#define KAEDE_DRIVER_STRING(symbol) KAEDE_DRIVER_STRING_INNER(symbol)
++#define KAEDE_DRIVER_FUNCTION(symbol, decoder) \
++  using KaedeType_##symbol = decltype(&symbol); \
++  template<typename... Args> inline CUresult Kaede_##symbol(Args&&... args) { \
++    static const auto function = reinterpret_cast<KaedeType_##symbol>( \
++        NvidiaDriverLibrary(decoder) ? GetProcAddress(NvidiaDriverLibrary(decoder), KAEDE_DRIVER_STRING(symbol)) : nullptr); \
++    return function ? function(std::forward<Args>(args)...) : CUDA_ERROR_NOT_INITIALIZED; \
++  }
++KAEDE_DRIVER_FUNCTION(cuArrayDestroy, false)
++KAEDE_DRIVER_FUNCTION(cuCtxCreate, false)
++KAEDE_DRIVER_FUNCTION(cuCtxDestroy, false)
++KAEDE_DRIVER_FUNCTION(cuCtxGetCurrent, false)
++KAEDE_DRIVER_FUNCTION(cuCtxGetDevice, false)
++KAEDE_DRIVER_FUNCTION(cuCtxPopCurrent, false)
++KAEDE_DRIVER_FUNCTION(cuCtxPushCurrent, false)
++KAEDE_DRIVER_FUNCTION(cuCtxSetCurrent, false)
++KAEDE_DRIVER_FUNCTION(cuDeviceGet, false)
++KAEDE_DRIVER_FUNCTION(cuDeviceGetAttribute, false)
++KAEDE_DRIVER_FUNCTION(cuDeviceGetCount, false)
++KAEDE_DRIVER_FUNCTION(cuDeviceGetName, false)
++KAEDE_DRIVER_FUNCTION(cuDriverGetVersion, false)
++KAEDE_DRIVER_FUNCTION(cuGetErrorName, false)
++KAEDE_DRIVER_FUNCTION(cuInit, false)
++KAEDE_DRIVER_FUNCTION(cuMemAlloc, false)
++KAEDE_DRIVER_FUNCTION(cuMemAllocPitch, false)
++KAEDE_DRIVER_FUNCTION(cuMemFree, false)
++KAEDE_DRIVER_FUNCTION(cuMemcpy2D, false)
++KAEDE_DRIVER_FUNCTION(cuMemcpy2DAsync, false)
++KAEDE_DRIVER_FUNCTION(cuMemcpy2DUnaligned, false)
++KAEDE_DRIVER_FUNCTION(cuStreamCreate, false)
++KAEDE_DRIVER_FUNCTION(cuStreamSynchronize, false)
++KAEDE_DRIVER_FUNCTION(cuvidCreateDecoder, true)
++KAEDE_DRIVER_FUNCTION(cuvidCreateVideoParser, true)
++KAEDE_DRIVER_FUNCTION(cuvidCtxLockCreate, true)
++KAEDE_DRIVER_FUNCTION(cuvidCtxLockDestroy, true)
++KAEDE_DRIVER_FUNCTION(cuvidDecodePicture, true)
++KAEDE_DRIVER_FUNCTION(cuvidDestroyDecoder, true)
++KAEDE_DRIVER_FUNCTION(cuvidDestroyVideoParser, true)
++KAEDE_DRIVER_FUNCTION(cuvidGetDecodeStatus, true)
++KAEDE_DRIVER_FUNCTION(cuvidGetDecoderCaps, true)
++KAEDE_DRIVER_FUNCTION(cuvidMapVideoFrame, true)
++KAEDE_DRIVER_FUNCTION(cuvidParseVideoData, true)
++KAEDE_DRIVER_FUNCTION(cuvidReconfigureDecoder, true)
++KAEDE_DRIVER_FUNCTION(cuvidUnmapVideoFrame, true)
++#undef KAEDE_DRIVER_FUNCTION
++#undef KAEDE_DRIVER_STRING
++#undef KAEDE_DRIVER_STRING_INNER
++}  // namespace livekit_ffi
++
++#undef cuArrayDestroy
++#define cuArrayDestroy(...) ::livekit_ffi::Kaede_cuArrayDestroy(__VA_ARGS__)
++#undef cuCtxCreate
++#define cuCtxCreate(...) ::livekit_ffi::Kaede_cuCtxCreate(__VA_ARGS__)
++#undef cuCtxDestroy
++#define cuCtxDestroy(...) ::livekit_ffi::Kaede_cuCtxDestroy(__VA_ARGS__)
++#undef cuCtxGetCurrent
++#define cuCtxGetCurrent(...) ::livekit_ffi::Kaede_cuCtxGetCurrent(__VA_ARGS__)
++#undef cuCtxGetDevice
++#define cuCtxGetDevice(...) ::livekit_ffi::Kaede_cuCtxGetDevice(__VA_ARGS__)
++#undef cuCtxPopCurrent
++#define cuCtxPopCurrent(...) ::livekit_ffi::Kaede_cuCtxPopCurrent(__VA_ARGS__)
++#undef cuCtxPushCurrent
++#define cuCtxPushCurrent(...) ::livekit_ffi::Kaede_cuCtxPushCurrent(__VA_ARGS__)
++#undef cuCtxSetCurrent
++#define cuCtxSetCurrent(...) ::livekit_ffi::Kaede_cuCtxSetCurrent(__VA_ARGS__)
++#undef cuDeviceGet
++#define cuDeviceGet(...) ::livekit_ffi::Kaede_cuDeviceGet(__VA_ARGS__)
++#undef cuDeviceGetAttribute
++#define cuDeviceGetAttribute(...) ::livekit_ffi::Kaede_cuDeviceGetAttribute(__VA_ARGS__)
++#undef cuDeviceGetCount
++#define cuDeviceGetCount(...) ::livekit_ffi::Kaede_cuDeviceGetCount(__VA_ARGS__)
++#undef cuDeviceGetName
++#define cuDeviceGetName(...) ::livekit_ffi::Kaede_cuDeviceGetName(__VA_ARGS__)
++#undef cuDriverGetVersion
++#define cuDriverGetVersion(...) ::livekit_ffi::Kaede_cuDriverGetVersion(__VA_ARGS__)
++#undef cuGetErrorName
++#define cuGetErrorName(...) ::livekit_ffi::Kaede_cuGetErrorName(__VA_ARGS__)
++#undef cuInit
++#define cuInit(...) ::livekit_ffi::Kaede_cuInit(__VA_ARGS__)
++#undef cuMemAlloc
++#define cuMemAlloc(...) ::livekit_ffi::Kaede_cuMemAlloc(__VA_ARGS__)
++#undef cuMemAllocPitch
++#define cuMemAllocPitch(...) ::livekit_ffi::Kaede_cuMemAllocPitch(__VA_ARGS__)
++#undef cuMemFree
++#define cuMemFree(...) ::livekit_ffi::Kaede_cuMemFree(__VA_ARGS__)
++#undef cuMemcpy2D
++#define cuMemcpy2D(...) ::livekit_ffi::Kaede_cuMemcpy2D(__VA_ARGS__)
++#undef cuMemcpy2DAsync
++#define cuMemcpy2DAsync(...) ::livekit_ffi::Kaede_cuMemcpy2DAsync(__VA_ARGS__)
++#undef cuMemcpy2DUnaligned
++#define cuMemcpy2DUnaligned(...) ::livekit_ffi::Kaede_cuMemcpy2DUnaligned(__VA_ARGS__)
++#undef cuStreamCreate
++#define cuStreamCreate(...) ::livekit_ffi::Kaede_cuStreamCreate(__VA_ARGS__)
++#undef cuStreamSynchronize
++#define cuStreamSynchronize(...) ::livekit_ffi::Kaede_cuStreamSynchronize(__VA_ARGS__)
++#undef cuvidCreateDecoder
++#define cuvidCreateDecoder(...) ::livekit_ffi::Kaede_cuvidCreateDecoder(__VA_ARGS__)
++#undef cuvidCreateVideoParser
++#define cuvidCreateVideoParser(...) ::livekit_ffi::Kaede_cuvidCreateVideoParser(__VA_ARGS__)
++#undef cuvidCtxLockCreate
++#define cuvidCtxLockCreate(...) ::livekit_ffi::Kaede_cuvidCtxLockCreate(__VA_ARGS__)
++#undef cuvidCtxLockDestroy
++#define cuvidCtxLockDestroy(...) ::livekit_ffi::Kaede_cuvidCtxLockDestroy(__VA_ARGS__)
++#undef cuvidDecodePicture
++#define cuvidDecodePicture(...) ::livekit_ffi::Kaede_cuvidDecodePicture(__VA_ARGS__)
++#undef cuvidDestroyDecoder
++#define cuvidDestroyDecoder(...) ::livekit_ffi::Kaede_cuvidDestroyDecoder(__VA_ARGS__)
++#undef cuvidDestroyVideoParser
++#define cuvidDestroyVideoParser(...) ::livekit_ffi::Kaede_cuvidDestroyVideoParser(__VA_ARGS__)
++#undef cuvidGetDecodeStatus
++#define cuvidGetDecodeStatus(...) ::livekit_ffi::Kaede_cuvidGetDecodeStatus(__VA_ARGS__)
++#undef cuvidGetDecoderCaps
++#define cuvidGetDecoderCaps(...) ::livekit_ffi::Kaede_cuvidGetDecoderCaps(__VA_ARGS__)
++#undef cuvidMapVideoFrame
++#define cuvidMapVideoFrame(...) ::livekit_ffi::Kaede_cuvidMapVideoFrame(__VA_ARGS__)
++#undef cuvidParseVideoData
++#define cuvidParseVideoData(...) ::livekit_ffi::Kaede_cuvidParseVideoData(__VA_ARGS__)
++#undef cuvidReconfigureDecoder
++#define cuvidReconfigureDecoder(...) ::livekit_ffi::Kaede_cuvidReconfigureDecoder(__VA_ARGS__)
++#undef cuvidUnmapVideoFrame
++#define cuvidUnmapVideoFrame(...) ::livekit_ffi::Kaede_cuvidUnmapVideoFrame(__VA_ARGS__)
++#endif  // _WIN32
+diff --git a/webrtc-sys/src/nvidia/nvidia_encoder_factory.cpp b/webrtc-sys/src/nvidia/nvidia_encoder_factory.cpp
+--- a/webrtc-sys/src/nvidia/nvidia_encoder_factory.cpp
++++ b/webrtc-sys/src/nvidia/nvidia_encoder_factory.cpp
+@@ -1,3 +1,5 @@
++#include "nvidia_driver.h"
++
+ #include "nvidia_encoder_factory.h"
+ 
+ #include <algorithm>
+@@ -16,7 +18,9 @@
+ #include "nvEncodeAPI.h"
+ #include "rtc_base/logging.h"
+ 
++#ifndef _WIN32
+ #include <dlfcn.h>
++#endif
+ 
+ namespace webrtc {
+ 
+@@ -24,6 +28,8 @@
+ 
+ struct NvencProbeResult {
+   bool encoder_supported = false;
++  bool h264_supported = false;
++  bool h265_supported = false;
+   bool av1_supported = false;
+ };
+ 
+@@ -106,14 +112,14 @@
+   return true;
+ }
+ 
+-bool SupportsAv1Encoding(NV_ENCODE_API_FUNCTION_LIST& fnList,
+-                         void* hEncoder) {
+-  return SupportsEncodeGuid(fnList, hEncoder, NV_ENC_CODEC_AV1_GUID) &&
+-         SupportsInputFormat(fnList, hEncoder, NV_ENC_CODEC_AV1_GUID,
+-                             NV_ENC_BUFFER_FORMAT_IYUV) &&
+-         SupportsPositiveDimensionCaps(fnList, hEncoder,
+-                                       NV_ENC_CODEC_AV1_GUID);
+-}
++bool SupportsEncoding(NV_ENCODE_API_FUNCTION_LIST& fnList,
++                      void* hEncoder, const GUID& codec) {
++  return SupportsEncodeGuid(fnList, hEncoder, codec) &&
++         SupportsInputFormat(fnList, hEncoder, codec, NV_ENC_BUFFER_FORMAT_IYUV) &&
++         SupportsPositiveDimensionCaps(fnList, hEncoder, codec);
++}
++
++const NvencProbeResult& CachedNvencProbe();
+ 
+ NvencProbeResult ProbeNvencSupport() {
+   NvencProbeResult result;
+@@ -125,19 +131,26 @@
+   // CUDA being available does NOT imply NVENC is present. Compute-only GPUs
+   // (H100, A100, etc.) have full CUDA support but no encode hardware.
+   // Probe the NVENC library and try to open a session to be sure.
+-  void* hModule = dlopen("libnvidia-encode.so.1", RTLD_LAZY);
++#ifdef _WIN32
++  HMODULE hModule = LoadLibraryExW(L"nvEncodeAPI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++#else
++  void* hModule = dlopen("libnvidia-encode.so.1", RTLD_LAZY | RTLD_LOCAL);
++#endif
+   if (!hModule) {
+     RTC_LOG(LS_WARNING) << "NVENC library (libnvidia-encode.so.1) not found, "
+                            "hardware encoding unavailable.";
+     return result;
+   }
+ 
++#ifdef _WIN32
++  auto lookup = [hModule](const char* name) { return GetProcAddress(hModule, name); };
++#else
++  auto lookup = [hModule](const char* name) { return dlsym(hModule, name); };
++#endif
+   auto NvEncodeAPIGetMaxSupportedVersion =
+-      (NVENCSTATUS(NVENCAPI*)(uint32_t*))dlsym(
+-          hModule, "NvEncodeAPIGetMaxSupportedVersion");
++      (NVENCSTATUS(NVENCAPI*)(uint32_t*))lookup("NvEncodeAPIGetMaxSupportedVersion");
+   auto NvEncodeAPICreateInstance =
+-      (NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*))dlsym(
+-          hModule, "NvEncodeAPICreateInstance");
++      (NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*))lookup("NvEncodeAPICreateInstance");
+ 
+   NV_ENCODE_API_FUNCTION_LIST fnList = {NV_ENCODE_API_FUNCTION_LIST_VER};
+   CUcontext cuCtx = nullptr;
+@@ -208,8 +221,10 @@
+       break;
+     }
+ 
+-    result.encoder_supported = true;
+-    result.av1_supported = SupportsAv1Encoding(fnList, hEncoder);
++    result.h264_supported = SupportsEncoding(fnList, hEncoder, NV_ENC_CODEC_H264_GUID);
++    result.h265_supported = SupportsEncoding(fnList, hEncoder, NV_ENC_CODEC_HEVC_GUID);
++    result.av1_supported = SupportsEncoding(fnList, hEncoder, NV_ENC_CODEC_AV1_GUID);
++    result.encoder_supported = result.h264_supported || result.h265_supported || result.av1_supported;
+   } while (false);
+ 
+   if (hEncoder) {
+@@ -218,7 +233,11 @@
+   if (cuCtx) {
+     cuCtxDestroy(cuCtx);
+   }
++#ifdef _WIN32
++  FreeLibrary(hModule);
++#else
+   dlclose(hModule);
++#endif
+ 
+   return result;
+ }
+@@ -231,12 +250,13 @@
+       {"level-asymmetry-allowed", "1"},
+       {"packetization-mode", "1"},
+   };
+-  supported_formats_.push_back(SdpVideoFormat("H264", baselineParameters));
+-
+-  // Advertise HEVC/H265 with default parameters.
+-  supported_formats_.push_back(SdpVideoFormat("H265"));
+-  // Some stacks use 'HEVC' name.
+-  supported_formats_.push_back(SdpVideoFormat("HEVC"));
++  if (CachedNvencProbe().h264_supported) {
++    supported_formats_.push_back(SdpVideoFormat("H264", baselineParameters));
++  }
++
++  if (CachedNvencProbe().h265_supported) {
++    supported_formats_.push_back(SdpVideoFormat("H265", {}, {ScalabilityMode::kL1T1}));
++  }
+ 
+   if (IsAv1Supported()) {
+     absl::InlinedVector<ScalabilityMode, kScalabilityModeCount>
+diff --git a/webrtc-sys/src/objc_video_factory.mm b/webrtc-sys/src/objc_video_factory.mm
+--- a/webrtc-sys/src/objc_video_factory.mm
++++ b/webrtc-sys/src/objc_video_factory.mm
+@@ -19,20 +19,87 @@
+ #import <sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.h>
+ #import <sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.h>
+ #import <sdk/objc/components/video_codec/RTCVideoEncoderFactorySimulcast.h>
++#ifdef RTC_ENABLE_H265
++#import <VideoToolbox/VideoToolbox.h>
++#import <sdk/objc/base/RTCVideoCodecInfo.h>
++#endif
+ #include "sdk/objc/native/api/video_decoder_factory.h"
+ #include "sdk/objc/native/api/video_encoder_factory.h"
++
++#ifdef RTC_ENABLE_H265
++// The default ObjC encoder creates HEVC but omits it from supportedCodecs.
++// Expose it only when the OS identifies a hardware implementation; Kaede still
++// proves an actual session at the requested settings before publishing.
++@interface KaedeVideoEncoderFactory : RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory)
++@end
++@implementation KaedeVideoEncoderFactory
+++ (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
++  NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *codecs = [[super supportedCodecs] mutableCopy];
++  if (@available(macOS 10.13, iOS 11.0, *)) {
++    if (VTIsHardwareEncodeSupported(kCMVideoCodecType_HEVC)) {
++      BOOL present = NO;
++      for (RTC_OBJC_TYPE(RTCVideoCodecInfo) *codec in codecs) {
++        if ([codec.name caseInsensitiveCompare:@"H265"] == NSOrderedSame) present = YES;
++      }
++      if (!present) [codecs addObject:[[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithName:@"H265" parameters:nil scalabilityModes:@[@"L1T1"]]];
++    }
++  }
++  return codecs;
++}
++- (id<RTC_OBJC_TYPE(RTCVideoEncoder)>)createEncoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
++  if ([info.name caseInsensitiveCompare:@"H265"] == NSOrderedSame) {
++    if (@available(macOS 10.13, iOS 11.0, *)) {
++      if (!VTIsHardwareEncodeSupported(kCMVideoCodecType_HEVC)) return nil;
++    } else { return nil; }
++  }
++  return [super createEncoder:info];
++}
++@end
++
++@interface KaedeVideoDecoderFactory : RTC_OBJC_TYPE(RTCDefaultVideoDecoderFactory)
++@end
++@implementation KaedeVideoDecoderFactory
++- (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
++  NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *codecs = [[super supportedCodecs] mutableCopy];
++  BOOL hardware = NO;
++  if (@available(macOS 10.13, iOS 11.0, *)) hardware = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC);
++  if (!hardware) {
++    for (RTC_OBJC_TYPE(RTCVideoCodecInfo) *codec in [codecs copy]) {
++      if ([codec.name caseInsensitiveCompare:@"H265"] == NSOrderedSame) [codecs removeObject:codec];
++    }
++  }
++  return codecs;
++}
++- (id<RTC_OBJC_TYPE(RTCVideoDecoder)>)createDecoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
++  if ([info.name caseInsensitiveCompare:@"H265"] == NSOrderedSame) {
++    if (@available(macOS 10.13, iOS 11.0, *)) {
++      if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)) return nil;
++    } else { return nil; }
++  }
++  return [super createDecoder:info];
++}
++@end
++#endif
+ 
+ namespace livekit_ffi {
+ 
+ std::unique_ptr<webrtc::VideoEncoderFactory> CreateObjCVideoEncoderFactory() {
++  #ifdef RTC_ENABLE_H265
++  RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory)* encoderFactory = [[KaedeVideoEncoderFactory alloc] init];
++#else
+   RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory)* encoderFactory = [[RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory) alloc] init];
++#endif
+   RTC_OBJC_TYPE(RTCVideoEncoderFactorySimulcast)* simulcastFactory =
+       [[RTC_OBJC_TYPE(RTCVideoEncoderFactorySimulcast) alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
+   return webrtc::ObjCToNativeVideoEncoderFactory(simulcastFactory);
+ }
+ 
+ std::unique_ptr<webrtc::VideoDecoderFactory> CreateObjCVideoDecoderFactory() {
++#ifdef RTC_ENABLE_H265
++  return webrtc::ObjCToNativeVideoDecoderFactory([[KaedeVideoDecoderFactory alloc] init]);
++#else
+   return webrtc::ObjCToNativeVideoDecoderFactory([[RTC_OBJC_TYPE(RTCDefaultVideoDecoderFactory) alloc] init]);
++#endif
+ }
+ 
+ }  // namespace livekit_ffi

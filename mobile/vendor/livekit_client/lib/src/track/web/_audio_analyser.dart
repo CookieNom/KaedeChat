@@ -2,8 +2,7 @@ import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 import 'dart:math' as math;
 
-import 'package:dart_webrtc/dart_webrtc.dart' show MediaStreamTrackWeb;
-import 'package:dart_webrtc/dart_webrtc.dart' show MediaStreamWeb;
+import 'package:dart_webrtc/dart_webrtc.dart' show MediaStreamTrackWeb, MediaStreamWeb;
 import 'package:web/web.dart' as web;
 
 import '../../track/local/local.dart' show AudioTrack;
@@ -48,9 +47,11 @@ class AudioAnalyserOptions {
 
 web.AudioContext? getNewAudioContext() {
   if (web.window.hasProperty('AudioContext'.toJS).isDefinedAndNotNull) {
-    return web.AudioContext(web.AudioContextOptions(
-      latencyHint: 'interactive'.toJS,
-    ));
+    return web.AudioContext(
+      web.AudioContextOptions(
+        latencyHint: 'interactive'.toJS,
+      ),
+    );
   }
   return null;
 }
@@ -68,7 +69,8 @@ AudioAnalyser? createAudioAnalyser(
   }
   final streamTrack = opts.cloneTrack == true ? track.mediaStreamTrack.clone() : track.mediaStreamTrack;
   final mediaStreamSource = audioContext.createMediaStreamSource(
-      MediaStreamWeb(web.MediaStream([(streamTrack as MediaStreamTrackWeb).jsTrack].toJS), '').jsStream);
+    MediaStreamWeb(web.MediaStream([(streamTrack as MediaStreamTrackWeb).jsTrack].toJS), '').jsStream,
+  );
   final analyser = audioContext.createAnalyser();
   analyser.minDecibels = opts.minDecibels ?? -100;
   analyser.maxDecibels = opts.maxDecibels ?? -80;

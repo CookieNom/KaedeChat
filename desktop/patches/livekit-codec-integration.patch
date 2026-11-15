@@ -1,0 +1,896 @@
+diff --git a/libwebrtc/src/lib.rs b/libwebrtc/src/lib.rs
+index 9761197..5df5714 100644
+--- a/libwebrtc/src/lib.rs
++++ b/libwebrtc/src/lib.rs
+@@ -68,6 +68,7 @@ pub mod video_track;
+ 
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod native {
++    pub use webrtc_sys::peer_connection_factory::ffi::probe_hardware_hevc_decoder;
+     pub use webrtc_sys::webrtc::ffi::create_random_uuid;
+ 
+     pub use crate::imp::{
+diff --git a/libwebrtc/src/stats.rs b/libwebrtc/src/stats.rs
+index a6da734..05c6d1d 100644
+--- a/libwebrtc/src/stats.rs
++++ b/libwebrtc/src/stats.rs
+@@ -441,6 +441,7 @@ pub mod dictionaries {
+         pub encoder_implementation: String,
+         pub power_efficient_encoder: bool,
+         pub active: bool,
++        #[serde(rename = "scalabilityMode")]
+         pub scalibility_mode: String,
+     }
+ 
+diff --git a/webrtc-sys/build.rs b/webrtc-sys/build.rs
+index e313e19..d97bd85 100644
+--- a/webrtc-sys/build.rs
++++ b/webrtc-sys/build.rs
+@@ -90,6 +90,7 @@ fn main() {
+         "src/video_encoder_factory.cpp",
+         "src/passthrough_video_encoder.cpp",
+         "src/video_decoder_factory.cpp",
++        "src/hardware_video_probe.cpp",
+         "src/synthetic_audio_device.cpp",
+         "src/adm_proxy.cpp",
+         "src/audio_resampler.cpp",
+@@ -108,11 +109,27 @@ fn main() {
+         builder.file("src/desktop_capturer.cpp");
+     }
+ 
++    if is_desktop && env::var_os("LK_CUSTOM_WEBRTC").is_none() {
++        panic!("Kaede desktop requires its H.265-enabled WebRTC artifact. Run python desktop/tool/build_webrtc.py or restore the matching CI artifact and set LK_CUSTOM_WEBRTC.");
++    }
+     let webrtc_dir = webrtc_sys_build::webrtc_dir();
+     let webrtc_include = webrtc_dir.join("include");
+     let webrtc_lib = webrtc_dir.join("lib");
+ 
+-    if !webrtc_dir.exists() {
++    if is_desktop {
++        let args = std::fs::read_to_string(webrtc_dir.join("args.gn"))
++            .expect("Missing Kaede WebRTC artifact args.gn; restore the matching native artifact");
++        let hevc: Vec<_> = args
++            .lines()
++            .filter_map(|line| {
++                let line = line.split('#').next()?.trim();
++                let (key, value) = line.split_once('=')?;
++                (key.trim() == "rtc_use_h265").then_some(value.trim())
++            })
++            .collect();
++        assert_eq!(hevc, ["true"], "WebRTC artifact does not enable HEVC");
++        builder.define("RTC_ENABLE_H265", None);
++    } else if !webrtc_dir.exists() {
+         webrtc_sys_build::download_webrtc().unwrap();
+     }
+ 
+@@ -129,7 +146,10 @@ fn main() {
+     ]);
+     builder.define("WEBRTC_APM_DEBUG_DUMP", "0");
+ 
+-    println!("cargo:rustc-link-search=native={}", webrtc_lib.to_str().unwrap());
++    println!(
++        "cargo:rustc-link-search=native={}",
++        webrtc_lib.to_str().unwrap()
++    );
+ 
+     for (key, value) in webrtc_sys_build::webrtc_defines() {
+         let value = value.as_deref();
+@@ -154,6 +174,12 @@ fn main() {
+             println!("cargo:rustc-link-lib=dylib=dwmapi");
+             println!("cargo:rustc-link-lib=dylib=shcore");
+ 
++            for lib in ["mfplat", "mf", "mfuuid", "oleaut32"] {
++                println!("cargo:rustc-link-lib=dylib={lib}");
++            }
++            builder.file("src/media_foundation/media_foundation_video.cpp");
++            configure_nvidia(&mut builder);
++
+             //let path = env::current_dir().unwrap();
+             //println!("cargo:rustc-link-search=native={}/vaapi-windows/x64/lib", path.display());
+             //println!("cargo:rustc-link-lib=dylib=va");
+@@ -185,7 +211,10 @@ fn main() {
+ 
+             // Do not use pkg_config::probe_library, because we only require headers.
+             for lib_name in ["glib-2.0", "gobject-2.0", "gio-2.0"] {
+-                let lib = pkg_config::Config::new().cargo_metadata(false).probe(lib_name).unwrap();
++                let lib = pkg_config::Config::new()
++                    .cargo_metadata(false)
++                    .probe(lib_name)
++                    .unwrap();
+                 for path in lib.include_paths {
+                     builder.include(path);
+                 }
+@@ -194,9 +223,18 @@ fn main() {
+             add_lazy_load_so(
+                 &mut builder,
+                 "desktop_capturer",
+-                ["drm", "gbm", "X11", "Xfixes", "Xdamage", "Xrandr", "Xcomposite", "Xext"]
+-                    .map(String::from)
+-                    .to_vec(),
++                [
++                    "drm",
++                    "gbm",
++                    "X11",
++                    "Xfixes",
++                    "Xdamage",
++                    "Xrandr",
++                    "Xcomposite",
++                    "Xext",
++                ]
++                .map(String::from)
++                .to_vec(),
+             );
+ 
+             let x86 = target_arch == "x86_64" || target_arch == "i686";
+@@ -276,40 +314,12 @@ fn main() {
+             }
+ 
+             if x86 || arm {
+-                let cuda_home = PathBuf::from(match env::var("CUDA_HOME") {
+-                    Ok(p) => p,
+-                    Err(_) => "/usr/local/cuda".to_owned(),
+-                });
+-                let cuda_include_dir = cuda_home.join("include");
+-
+-                // libcuda and libnvcuvid are dlopened, so do not link them.
+-                if cuda_include_dir.join("cuda.h").exists() {
+-                    builder
+-                        .include(cuda_include_dir)
+-                        .flag("-Isrc/nvidia/NvCodec/include")
+-                        .flag("-Isrc/nvidia/NvCodec/NvCodec")
+-                        .file("src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp")
+-                        .file("src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp")
+-                        .file("src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp")
+-                        .file("src/nvidia/h264_encoder_impl.cpp")
+-                        .file("src/nvidia/h265_encoder_impl.cpp")
+-                        .file("src/nvidia/av1_encoder_impl.cpp")
+-                        .file("src/nvidia/h264_decoder_impl.cpp")
+-                        .file("src/nvidia/h265_decoder_impl.cpp")
+-                        .file("src/nvidia/nvidia_decoder_factory.cpp")
+-                        .file("src/nvidia/nvidia_encoder_factory.cpp")
+-                        .file("src/nvidia/cuda_context.cpp")
+-                        .flag("-Wno-deprecated-declarations")
+-                        .flag("-DUSE_NVIDIA_VIDEO_CODEC=1");
+-
+-                    add_lazy_load_so(
+-                        &mut builder,
+-                        "nvidia",
+-                        ["cuda", "nvcuvid"].map(String::from).to_vec(),
+-                    );
+-                } else {
+-                    println!("cargo:warning=cuda.h not found; building without hardware accelerated video codec support for NVidia GPUs");
+-                }
++                configure_nvidia(&mut builder);
++                add_lazy_load_so(
++                    &mut builder,
++                    "nvidia",
++                    ["cuda", "nvcuvid"].map(String::from).to_vec(),
++                );
+             }
+ 
+             builder
+@@ -417,6 +427,37 @@ fn main() {
+     }
+ }
+ 
++fn configure_nvidia(builder: &mut cc::Build) {
++    println!("cargo:rerun-if-env-changed=CUDA_HOME");
++    let cuda_include = PathBuf::from(env::var("CUDA_HOME")
++        .expect("CUDA_HOME must point to the pinned CUDA headers (python desktop/tool/prepare_codecs.py --cuda)"))
++        .join("include");
++    assert!(
++        cuda_include.join("cuda.h").is_file(),
++        "Missing CUDA headers"
++    );
++    // Driver DLLs are loaded only if present; CUDA runtime libraries are never linked or bundled.
++    builder
++        .include(cuda_include)
++        .include("src/nvidia")
++        .include("src/nvidia/NvCodec/include")
++        .include("src/nvidia/NvCodec/NvCodec")
++        .files([
++            "src/nvidia/NvCodec/NvCodec/NvDecoder/NvDecoder.cpp",
++            "src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoder.cpp",
++            "src/nvidia/NvCodec/NvCodec/NvEncoder/NvEncoderCuda.cpp",
++            "src/nvidia/h264_encoder_impl.cpp",
++            "src/nvidia/h265_encoder_impl.cpp",
++            "src/nvidia/av1_encoder_impl.cpp",
++            "src/nvidia/h264_decoder_impl.cpp",
++            "src/nvidia/h265_decoder_impl.cpp",
++            "src/nvidia/nvidia_decoder_factory.cpp",
++            "src/nvidia/nvidia_encoder_factory.cpp",
++            "src/nvidia/cuda_context.cpp",
++        ])
++        .define("USE_NVIDIA_VIDEO_CODEC", "1");
++}
++
+ fn copy_libwebrtc_jar(webrtc_dir: &PathBuf) {
+     let jar_path = webrtc_dir.join("libwebrtc.jar");
+     let output_path = get_output_path();
+@@ -431,8 +472,10 @@ fn get_output_path() -> PathBuf {
+     let manifest_dir_string = env::var("CARGO_MANIFEST_DIR").unwrap();
+     let build_type = env::var("PROFILE").unwrap();
+     let build_target = env::var("TARGET").unwrap();
+-    let path =
+-        Path::new(&manifest_dir_string).join("../target").join(build_target).join(build_type);
++    let path = Path::new(&manifest_dir_string)
++        .join("../target")
++        .join(build_target)
++        .join(build_type);
+     return PathBuf::from(path);
+ }
+ 
+@@ -456,12 +499,18 @@ fn configure_darwin_sysroot(builder: &mut cc::Build) {
+     println!("cargo:rustc-link-lib={}", clang_rt);
+     println!("cargo:rustc-link-arg=-ObjC");
+ 
+-    let sysroot = Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output().unwrap();
++    let sysroot = Command::new("xcrun")
++        .args(["--sdk", sdk, "--show-sdk-path"])
++        .output()
++        .unwrap();
+ 
+     let sysroot = String::from_utf8_lossy(&sysroot.stdout);
+     let sysroot = sysroot.trim();
+ 
+-    let search_dirs = Command::new("cc").arg("--print-search-dirs").output().unwrap();
++    let search_dirs = Command::new("cc")
++        .arg("--print-search-dirs")
++        .output()
++        .unwrap();
+ 
+     let search_dirs = String::from_utf8_lossy(&search_dirs.stdout);
+     for line in search_dirs.lines() {
+@@ -589,9 +638,12 @@ fn check_clang_version(builder: &cc::Build, libcxx: &path::Path) {
+         .output()
+         .unwrap_or_else(|e| panic!("failed to run {}: {e}", compiler.path().display()));
+ 
+-    let major = String::from_utf8_lossy(&defines.stdout).lines().find_map(|line| {
+-        line.strip_prefix("#define __clang_major__ ").and_then(|v| v.trim().parse::<u32>().ok())
+-    });
++    let major = String::from_utf8_lossy(&defines.stdout)
++        .lines()
++        .find_map(|line| {
++            line.strip_prefix("#define __clang_major__ ")
++                .and_then(|v| v.trim().parse::<u32>().ok())
++        });
+ 
+     match major {
+         Some(major) if major >= min => {}
+diff --git a/webrtc-sys/libwebrtc/build_linux.sh b/webrtc-sys/libwebrtc/build_linux.sh
+index 417c9b9..6d9603d 100755
+--- a/webrtc-sys/libwebrtc/build_linux.sh
++++ b/webrtc-sys/libwebrtc/build_linux.sh
+@@ -132,6 +132,7 @@ args="is_debug=$debug  \
+   rtc_build_examples=false \
+   rtc_libvpx_build_vp9=true \
+   enable_libaom=true \
++  rtc_include_dav1d_in_internal_decoder_factory=true \
+   is_component_build=false \
+   enable_stripping=true \
+   ffmpeg_branding=\"Chrome\" \
+diff --git a/webrtc-sys/libwebrtc/build_macos.sh b/webrtc-sys/libwebrtc/build_macos.sh
+index bd52f41..bb8768f 100755
+--- a/webrtc-sys/libwebrtc/build_macos.sh
++++ b/webrtc-sys/libwebrtc/build_macos.sh
+@@ -79,7 +79,7 @@ apply_patch_if_needed() {
+     echo "Patch already applied: $(basename "$patch")"
+   else
+     echo "Applying patch: $(basename "$patch")"
+-    git apply "$patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn || true
++    git apply "$patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
+   fi
+ }
+ 
+@@ -145,6 +145,7 @@ ninja -C "$OUTPUT_DIR" :default \
+ 
+ # make libwebrtc.a
+ # don't include nasm
++rm -f "$ARTIFACTS_DIR/lib/libwebrtc.a"
+ ar -rc "$ARTIFACTS_DIR/lib/libwebrtc.a" `find "$OUTPUT_DIR/obj" -name '*.o' -not -path "*/third_party/nasm/*"`
+ 
+ # License generation - may fail locally due to GN warnings breaking JSON parsing
+@@ -153,7 +154,7 @@ vpython3 "./src/tools_webrtc/libs/generate_licenses.py" \
+   --target :webrtc "$OUTPUT_DIR" "$OUTPUT_DIR" || echo "Warning: License generation failed"
+ 
+ cp "$OUTPUT_DIR/obj/webrtc.ninja" "$ARTIFACTS_DIR"
+-cp "$OUTPUT_DIR/obj/modules/desktop_capture/desktop_capture.ninja" "$ARTIFACTS_DIR" 2>/dev/null || true
++cp "$OUTPUT_DIR/obj/modules/desktop_capture/desktop_capture.ninja" "$ARTIFACTS_DIR"
+ cp "$OUTPUT_DIR/args.gn" "$ARTIFACTS_DIR"
+ 
+ cp "$OUTPUT_DIR/LICENSE.md" "$ARTIFACTS_DIR"
+diff --git a/webrtc-sys/libwebrtc/build_windows.cmd b/webrtc-sys/libwebrtc/build_windows.cmd
+index 9fcb8d1..81f3dee 100644
+--- a/webrtc-sys/libwebrtc/build_windows.cmd
++++ b/webrtc-sys/libwebrtc/build_windows.cmd
+@@ -43,7 +43,7 @@ set GYP_GENERATORS=ninja,msvs-ninja
+ set GYP_MSVS_VERSION=2022
+ set OUTPUT_DIR=src\out-!arch!-!profile!
+ set ARTIFACTS_DIR=%cd%\win-!arch!-!profile!
+-set vs2019_install=C:\Program Files\Microsoft Visual Studio\2022\Enterprise
++rem The CI runner or build_webrtc.py supplies the installed Visual Studio path.
+ 
+ if not exist src (
+   call gclient.bat sync -D --with_branch_heads --with_tags
+@@ -51,11 +51,16 @@ if not exist src (
+ 
+ cd src
+ call git apply "%COMMAND_DIR%/patches/add_licenses.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
++if errorlevel 1 exit /b 1
+ call git apply "%COMMAND_DIR%/patches/add_deps.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
++if errorlevel 1 exit /b 1
+ call git apply "%COMMAND_DIR%/patches/ssl_verify_callback_with_native_handle.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
++if errorlevel 1 exit /b 1
+ call git apply "%COMMAND_DIR%/patches/external_audio_source.patch" -v --ignore-space-change --ignore-whitespace --whitespace=nowarn
++if errorlevel 1 exit /b 1
+ 
+ copy ".vpython3" "..\"
++if errorlevel 1 exit /b 1
+ 
+ cd ..
+ 
+@@ -68,23 +73,33 @@ if "!profile!" == "debug" (
+ 
+ rem generate ninja for release
+ call gn.bat gen %OUTPUT_DIR% --root="src" ^
+-  --args="is_debug=!debug! is_clang=true target_cpu=\"!arch!\" use_custom_libcxx=false rtc_libvpx_build_vp9=true enable_libaom=true rtc_include_tests=false rtc_build_examples=false rtc_build_tools=false is_component_build=false rtc_enable_protobuf=false rtc_use_h264=true ffmpeg_branding=\"Chrome\" symbol_level=0 enable_iterator_debugging=false"
++  --args="is_debug=!debug! is_clang=true target_cpu=\"!arch!\" use_custom_libcxx=false rtc_libvpx_build_vp9=true enable_libaom=true rtc_include_tests=false rtc_build_examples=false rtc_build_tools=false is_component_build=false rtc_enable_protobuf=false rtc_use_h264=true rtc_use_h265=true rtc_include_dav1d_in_internal_decoder_factory=true use_rtti=true ffmpeg_branding=\"Chrome\" symbol_level=0 enable_iterator_debugging=false"
++if errorlevel 1 exit /b 1
+ 
+ rem build
+ ninja.exe -C %OUTPUT_DIR% :default
++if errorlevel 1 exit /b 1
+ 
+ rem copy static library for release build
+ copy "%OUTPUT_DIR%\obj\webrtc.lib" "%ARTIFACTS_DIR%\lib"
++if errorlevel 1 exit /b 1
+ 
+ rem generate license
+ call python3 "%cd%\src\tools_webrtc\libs\generate_licenses.py" ^
+   --target :default %OUTPUT_DIR% %OUTPUT_DIR%
++if errorlevel 1 exit /b 1
+ 
+ copy "%OUTPUT_DIR%\obj\webrtc.ninja" "%ARTIFACTS_DIR%"
++if errorlevel 1 exit /b 1
+ copy "%OUTPUT_DIR%\obj\modules\desktop_capture\desktop_capture.ninja" "%ARTIFACTS_DIR%"
++if errorlevel 1 exit /b 1
+ copy "%OUTPUT_DIR%\args.gn" "%ARTIFACTS_DIR%"
++if errorlevel 1 exit /b 1
+ copy "%OUTPUT_DIR%\LICENSE.md" "%ARTIFACTS_DIR%"
++if errorlevel 1 exit /b 1
+ 
+ rem copy header
+ xcopy src\*.h "%ARTIFACTS_DIR%\include" /C /S /I /F /H
++if errorlevel 1 exit /b 1
+ xcopy src\*.inc "%ARTIFACTS_DIR%\include" /C /S /I /F /H
++if errorlevel 1 exit /b 1
+diff --git a/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc b/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc
+index 116809a..6498d52 100644
+--- a/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc
++++ b/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc
+@@ -1,3 +1,4 @@
++#include "h26x_frame.h"
+ // Windows and Apple WebRTC archives export unprefixed BoringSSL symbols.
+ #if !defined(_WIN32) && !defined(__APPLE__)
+ #define BORINGSSL_PREFIX LK
+@@ -29,6 +30,7 @@
+ #include <openssl/pem.h>
+ #include <openssl/rand.h>
+ 
++#include <algorithm>
+ #include <iomanip>
+ #include <iostream>
+ #include <sstream>
+@@ -122,28 +124,6 @@ inline bool FrameIsH265(webrtc::TransformableFrameInterface* frame,
+   }
+ }
+ 
+-#ifdef RTC_ENABLE_H265
+-inline bool IsH265SliceNalu(webrtc::H265::NaluType nalu_type) {
+-  // VCL NALUs (Video Coding Layer) - slice segments
+-  return nalu_type == webrtc::H265::NaluType::kTrailN ||
+-         nalu_type == webrtc::H265::NaluType::kTrailR ||
+-         nalu_type == webrtc::H265::NaluType::kTsaN ||
+-         nalu_type == webrtc::H265::NaluType::kTsaR ||
+-         nalu_type == webrtc::H265::NaluType::kStsaN ||
+-         nalu_type == webrtc::H265::NaluType::kStsaR ||
+-         nalu_type == webrtc::H265::NaluType::kRadlN ||
+-         nalu_type == webrtc::H265::NaluType::kRadlR ||
+-         nalu_type == webrtc::H265::NaluType::kRaslN ||
+-         nalu_type == webrtc::H265::NaluType::kRaslR ||
+-         nalu_type == webrtc::H265::NaluType::kBlaWLp ||
+-         nalu_type == webrtc::H265::NaluType::kBlaWRadl ||
+-         nalu_type == webrtc::H265::NaluType::kBlaNLp ||
+-         nalu_type == webrtc::H265::NaluType::kIdrWRadl ||
+-         nalu_type == webrtc::H265::NaluType::kIdrNLp ||
+-         nalu_type == webrtc::H265::NaluType::kCra;
+-}
+-#endif // RTC_ENABLE_H265
+-
+ inline bool NeedsRbspUnescaping(std::span<const uint8_t> frame) {
+   // Note: `i + 3 < size()` avoids the unsigned underflow that `i < size() - 3`
+   // would hit when the frame is shorter than 3 bytes.
+@@ -154,16 +134,6 @@ inline bool NeedsRbspUnescaping(std::span<const uint8_t> frame) {
+   return false;
+ }
+ 
+-std::string to_uint8_list(std::span<const uint8_t> data) {
+-  std::stringstream ss;
+-  ss << "[";
+-  for (uint8_t b : data) {
+-    ss << static_cast<unsigned>(b) << ",";
+-  }
+-  ss << "]";
+-  return ss.str();
+-}
+-
+ std::string to_hex(std::span<const uint8_t> data) {
+   std::stringstream ss;
+   ss << std::uppercase << std::hex << std::setfill('0');
+@@ -173,82 +143,17 @@ std::string to_hex(std::span<const uint8_t> data) {
+   return ss.str();
+ }
+ 
+-uint8_t get_unencrypted_bytes(webrtc::TransformableFrameInterface* frame,
+-                              webrtc::FrameCryptorTransformer::MediaType type) {
+-  uint8_t unencrypted_bytes = 0;
+-  switch (type) {
+-    case webrtc::FrameCryptorTransformer::MediaType::kAudioFrame:
+-      unencrypted_bytes = 1;
+-      break;
+-    case webrtc::FrameCryptorTransformer::MediaType::kVideoFrame: {
+-      auto videoFrame =
+-          static_cast<webrtc::TransformableVideoFrameInterface*>(frame);
+-      if (videoFrame->header().codec ==
+-          webrtc::VideoCodecType::kVideoCodecAV1) {
+-        unencrypted_bytes = 0;
+-      } else if (videoFrame->header().codec ==
+-                 webrtc::VideoCodecType::kVideoCodecVP8) {
+-        unencrypted_bytes = videoFrame->IsKeyFrame() ? 10 : 3;
+-      } else if (videoFrame->header().codec ==
+-                 webrtc::VideoCodecType::kVideoCodecH264) {
+-        std::span<const uint8_t> data_in = frame->GetData();
+-        std::vector<webrtc::H264::NaluIndex> nalu_indices =
+-            webrtc::H264::FindNaluIndices(data_in);
+-
+-        int idx = 0;
+-        for (const auto& index : nalu_indices) {
+-          std::span<const uint8_t> slice =
+-              data_in.subspan(index.payload_start_offset);
+-          webrtc::H264::NaluType nalu_type =
+-              webrtc::H264::ParseNaluType(slice[0]);
+-          switch (nalu_type) {
+-            case webrtc::H264::NaluType::kIdr:
+-            case webrtc::H264::NaluType::kSlice:
+-              unencrypted_bytes = index.payload_start_offset + 2;
+-              RTC_LOG(LS_INFO)
+-                  << "NonParameterSetNalu::payload_size: " << index.payload_size
+-                  << ", nalu_type " << nalu_type << ", NaluIndex [" << idx++
+-                  << "] offset: " << index.payload_start_offset;
+-              return unencrypted_bytes;
+-            default:
+-              break;
+-          }
+-        }
+-#ifdef RTC_ENABLE_H265
+-      } else if (videoFrame->header().codec ==
+-                 webrtc::VideoCodecType::kVideoCodecH265) {
+-        std::span<const uint8_t> data_in = frame->GetData();
+-        std::vector<webrtc::H265::NaluIndex> nalu_indices =
+-            webrtc::H265::FindNaluIndices(data_in);
+-
+-        int idx = 0;
+-        for (const auto& index : nalu_indices) {
+-          std::span<const uint8_t> slice =
+-              data_in.subspan(index.payload_start_offset);
+-          webrtc::H265::NaluType nalu_type =
+-              webrtc::H265::ParseNaluType(slice[0]);
+-          if (IsH265SliceNalu(nalu_type)) {
+-            // H.265 has a 2-byte NALU header, so unencrypted bytes = offset +
+-            // header size
+-            unencrypted_bytes =
+-                index.payload_start_offset + webrtc::H265::kNaluHeaderSize;
+-            RTC_LOG(LS_INFO)
+-                << "H265 NonParameterSetNalu::payload_size: "
+-                << index.payload_size << ", nalu_type "
+-                << static_cast<int>(nalu_type) << ", NaluIndex [" << idx++
+-                << "] offset: " << index.payload_start_offset
+-                << ", unencrypted_bytes: " << unencrypted_bytes;
+-            return unencrypted_bytes;
+-          }
+-        }
+-#endif // RTC_ENABLE_H265
+-      }
+-      break;
+-    }
+-    default:
+-      break;
+-  }
+-  return unencrypted_bytes;
++size_t get_unencrypted_bytes(webrtc::TransformableFrameInterface* frame,
++                             webrtc::FrameCryptorTransformer::MediaType type) {
++  if (type == webrtc::FrameCryptorTransformer::MediaType::kAudioFrame) return 1;
++  if (type != webrtc::FrameCryptorTransformer::MediaType::kVideoFrame) return 0;
++  const auto* video = static_cast<webrtc::TransformableVideoFrameInterface*>(frame);
++  if (video->header().codec == webrtc::kVideoCodecVP8) return video->IsKeyFrame() ? 10 : 3;
++  if (FrameIsH264(frame, type) || FrameIsH265(frame, type)) {
++    const auto data = frame->GetData();
++    return kaede_h26x::ClearPrefix(data, FrameIsH265(frame, type)).value_or(data.size() + 1);
++  }
++  return 0;
+ }
+ 
+ int DeriveHkdfSha256FromSecret(const std::vector<uint8_t>& secret,
+@@ -266,12 +171,7 @@ int DeriveHkdfSha256FromSecret(const std::vector<uint8_t>& secret,
+     return ErrorUnexpected;
+   }
+ 
+-  RTC_LOG(LS_INFO) << "secret " << to_uint8_list(secret)
+-                   << " len " << secret.size() << " slat << "
+-                   << to_uint8_list(salt) << " len "
+-                   << salt.size() << "\n derived_key "
+-                   << to_uint8_list(derived_key)
+-                   << " len " << derived_key.size();
++
+ 
+   return Success;
+ }
+@@ -290,13 +190,7 @@ int DerivePBKDF2KeyFromRawKey(const std::vector<uint8_t> raw_key,
+     return ErrorUnexpected;
+   }
+ 
+-  RTC_LOG(LS_INFO) << "raw_key "
+-                   << to_uint8_list(raw_key) << " len "
+-                   << raw_key.size() << " slat << "
+-                   << to_uint8_list(salt) << " len "
+-                   << salt.size() << "\n derived_key "
+-                   << to_uint8_list(derived_key)
+-                   << " len " << derived_key.size();
++
+ 
+   return Success;
+ }
+@@ -522,6 +416,12 @@ void FrameCryptorTransformer::encryptFrame(
+     frame_header[i] = data_in[i];
+   }
+ 
++  if (FrameIsH264(frame.get(), type_) || FrameIsH265(frame.get(), type_)) {
++    // RTP reconstructs four-byte start codes before the receiver authenticates the header.
++    const auto normalized = kaede_h26x::NormalizeHeader(std::span(data_in).first(unencrypted_bytes));
++    frame_header.SetData(normalized.data(), normalized.size());
++  }
++
+   webrtc::Buffer frame_trailer = webrtc::Buffer::CreateUninitializedWithSize(2);
+   frame_trailer[0] = getIvSize();
+   frame_trailer[1] = key_index_;
+@@ -538,9 +438,21 @@ void FrameCryptorTransformer::encryptFrame(
+     payload.SetData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
+   }
+   std::vector<uint8_t> buffer;
+-  if (AesEncryptDecrypt(EncryptOrDecrypt::kEncrypt, algorithm_,
+-                        key_set->encryption_key, iv, frame_header, payload,
+-                        &buffer) == Success) {
++  const auto pps_id = FrameIsH264(frame.get(), type_) && unencrypted_bytes >= 2
++      ? kaede_h26x::H264PpsId(data_in.subspan(unencrypted_bytes - 2)) : std::nullopt;
++  int encryption_result = ErrorUnexpected;
++  for (int attempt = 0; attempt < 16; ++attempt) {
++    buffer.clear();
++    encryption_result = AesEncryptDecrypt(EncryptOrDecrypt::kEncrypt, algorithm_,
++        key_set->encryption_key, iv, frame_header, payload, &buffer);
++    if (encryption_result != Success || !pps_id || attempt == 15) break;
++    webrtc::Buffer sent_slice(data_in.subspan(unencrypted_bytes - 2, 2));
++    H264::WriteRbsp(buffer.data(), std::min(buffer.size(), size_t{16}), &sent_slice);
++    if (kaede_h26x::H264PpsId(sent_slice) == pps_id) break;
++    // Match upstream browser cryptors: retry with a fresh IV, never alter authenticated plaintext.
++    iv = makeIv(frame->GetSsrc(), frame->GetTimestamp());
++  }
++  if (encryption_result == Success) {
+     webrtc::Buffer encrypted_payload(buffer.data(), buffer.size());
+     webrtc::Buffer tag(std::span<const uint8_t>(encrypted_payload).last(16));
+     webrtc::Buffer data_without_header;
+@@ -672,6 +584,16 @@ void FrameCryptorTransformer::decryptFrame(
+   size_t unencrypted_bytes = av1 ? av1_layout.aad.size() : get_unencrypted_bytes(frame.get(), type_);
+   if (unencrypted_bytes > data_in.size() || data_in.size() - unencrypted_bytes < 30) return;
+ 
++  webrtc::Buffer unescaped_wire;
++  if ((FrameIsH264(frame.get(), type_) || FrameIsH265(frame.get(), type_)) &&
++      NeedsRbspUnescaping(data_in.subspan(unencrypted_bytes))) {
++    unescaped_wire.AppendData(data_in.subspan(0, unencrypted_bytes));
++    const auto clear = H264::ParseRbsp(data_in.data() + unencrypted_bytes, data_in.size() - unencrypted_bytes);
++    unescaped_wire.AppendData(clear.data(), clear.size());
++    data_in = unescaped_wire;
++    if (data_in.size() - unencrypted_bytes < 30) return;
++  }
++
+   webrtc::Buffer frame_header =
+       webrtc::Buffer::CreateUninitializedWithSize(unencrypted_bytes);
+   for (size_t i = 0; i < unencrypted_bytes; i++) {
+@@ -731,18 +653,6 @@ void FrameCryptorTransformer::decryptFrame(
+     encrypted_buffer[i - unencrypted_bytes] = data_in[i];
+   }
+ 
+-  if (FrameIsH264(frame.get(), type_) &&
+-      NeedsRbspUnescaping(encrypted_buffer)) {
+-    encrypted_buffer.SetData(
+-        H264::ParseRbsp(encrypted_buffer.data(), encrypted_buffer.size()));
+-#ifdef RTC_ENABLE_H265
+-  } else if (FrameIsH265(frame.get(), type_) &&
+-             NeedsRbspUnescaping(encrypted_buffer)) {
+-    encrypted_buffer.SetData(
+-        H265::ParseRbsp(encrypted_buffer.data(), encrypted_buffer.size()));
+-#endif // RTC_ENABLE_H265
+-  }
+-
+   if (encrypted_buffer.size() < size_t(ivLength) + 2 + 16) return;
+   webrtc::Buffer encrypted_payload =
+       webrtc::Buffer::CreateUninitializedWithSize(encrypted_buffer.size() - ivLength - 2);
+diff --git a/webrtc-sys/src/av1_e2ee/h26x_frame.h b/webrtc-sys/src/av1_e2ee/h26x_frame.h
+new file mode 100644
+index 0000000..99312dd
+--- /dev/null
++++ b/webrtc-sys/src/av1_e2ee/h26x_frame.h
+@@ -0,0 +1,79 @@
++// Copyright 2026 Kaede Chat contributors. SPDX-License-Identifier: Apache-2.0
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++#include <span>
++#include <vector>
++
++namespace kaede_h26x {
++inline size_t StartCode(std::span<const uint8_t> data, size_t offset) {
++  if (offset + 3 <= data.size() && data[offset] == 0 && data[offset + 1] == 0) {
++    if (data[offset + 2] == 1) return 3;
++    if (offset + 4 <= data.size() && data[offset + 2] == 0 && data[offset + 3] == 1) return 4;
++  }
++  return 0;
++}
++
++inline std::optional<size_t> ClearPrefix(std::span<const uint8_t> data, bool hevc) {
++  if (!StartCode(data, 0)) return std::nullopt;
++  for (size_t offset = 0; offset < data.size(); ++offset) {
++    const size_t start = StartCode(data, offset);
++    if (!start) continue;
++    offset += start;
++    if (offset + 2 > data.size()) return std::nullopt;
++    const uint8_t type = hevc ? (data[offset] >> 1) & 0x3f : data[offset] & 0x1f;
++    const bool slice = hevc ? (type <= 9 || (type >= 16 && type <= 21)) : (type == 1 || type == 5);
++    if (slice) return offset + 2;
++  }
++  return std::nullopt;
++}
++
++inline std::vector<uint8_t> NormalizeHeader(std::span<const uint8_t> header) {
++  std::vector<uint8_t> result;
++  result.reserve(header.size());
++  for (size_t offset = 0; offset < header.size();) {
++    const size_t start = StartCode(header, offset);
++    if (start) {
++      result.insert(result.end(), {0, 0, 0, 1});
++      offset += start;
++    } else {
++      result.push_back(header[offset++]);
++    }
++  }
++  return result;
++}
++// Keep the legacy two-byte wire prefix while hardware H.264 receivers inspect PPS ids.
++inline std::optional<uint32_t> H264PpsId(std::span<const uint8_t> nalu) {
++  if (nalu.empty() || (nalu[0] & 0x1f) != 5) return std::nullopt;
++  std::vector<uint8_t> rbsp;
++  for (size_t i = 1; i < nalu.size() && i < 17; ++i) {
++    if (i >= 3 && nalu[i] == 3 && nalu[i - 1] == 0 && nalu[i - 2] == 0) continue;
++    rbsp.push_back(nalu[i]);
++  }
++  size_t bit = 0;
++  auto read = [&]() -> std::optional<uint32_t> {
++    if (bit >= rbsp.size() * 8) return std::nullopt;
++    const size_t current = bit++;
++    return (rbsp[current / 8] >> (7 - (current % 8))) & 1;
++  };
++  uint32_t value = 0;
++  for (int field = 0; field < 3; ++field) {
++    size_t zeros = 0;
++    while (true) {
++      const auto next = read();
++      if (!next || zeros >= 31) return std::nullopt;
++      if (*next) break;
++      ++zeros;
++    }
++    value = 1;
++    for (size_t i = 0; i < zeros; ++i) {
++      const auto next = read();
++      if (!next) return std::nullopt;
++      value = (value << 1) | *next;
++    }
++    --value;
++  }
++  return value;
++}
++}  // namespace kaede_h26x
+diff --git a/webrtc-sys/src/av1_e2ee/h26x_frame_test.cpp b/webrtc-sys/src/av1_e2ee/h26x_frame_test.cpp
+new file mode 100644
+index 0000000..f8f5488
+--- /dev/null
++++ b/webrtc-sys/src/av1_e2ee/h26x_frame_test.cpp
+@@ -0,0 +1,35 @@
++// Copyright 2026 Kaede Chat contributors. SPDX-License-Identifier: Apache-2.0
++#include "h26x_frame.h"
++#include <cassert>
++
++int main() {
++  for (bool hevc : {false, true}) {
++    for (size_t length : {3, 4}) {
++      std::vector<uint8_t> frame(length - 1, 0);
++      frame.push_back(1);
++      frame.push_back(hevc ? 0x40 : 0x67);
++      frame.push_back(1);
++      frame.insert(frame.end(), 300, 0x55);
++      frame.insert(frame.end(), length - 1, 0);
++      frame.push_back(1);
++      frame.push_back(hevc ? 0x26 : 0x65);
++      frame.push_back(1);
++      const size_t prefix = frame.size();
++      frame.insert(frame.end(), {0x80, 11, 22, 33, 44});
++      assert(kaede_h26x::ClearPrefix(frame, hevc) == prefix);
++      const auto header = kaede_h26x::NormalizeHeader(std::span(frame).first(prefix));
++      assert(header.size() == prefix + 2 * (4 - length));
++      assert(kaede_h26x::ClearPrefix(header, hevc) == header.size());
++      assert(kaede_h26x::NormalizeHeader(header) == header);
++      assert(!kaede_h26x::ClearPrefix(std::span(frame).first(prefix - 1), hevc));
++    }
++  }
++  assert(!kaede_h26x::ClearPrefix({}, true));
++  const uint8_t invalid[] = {0, 0, 1};
++  assert(!kaede_h26x::ClearPrefix(invalid, true));
++  const uint8_t intel[] = {0x65, 0x88, 0x80, 0x40, 0x87, 0x0a};
++  const uint8_t changed[] = {0x65, 0x88, 0x5f, 0xff};
++  assert(kaede_h26x::H264PpsId(intel) == 0);
++  assert(kaede_h26x::H264PpsId(changed) == 1);
++  assert(!kaede_h26x::H264PpsId(std::span(intel).first(2)));
++}
+diff --git a/webrtc-sys/src/peer_connection_factory.rs b/webrtc-sys/src/peer_connection_factory.rs
+index 552a395..cd3404c 100644
+--- a/webrtc-sys/src/peer_connection_factory.rs
++++ b/webrtc-sys/src/peer_connection_factory.rs
+@@ -83,6 +83,9 @@ pub mod ffi {
+ 
+     unsafe extern "C++" {
+         include!("livekit/peer_connection_factory.h");
++        include!("livekit/hardware_video_probe.h");
++
++        fn probe_hardware_hevc_decoder() -> bool;
+ 
+         type PeerConnection = crate::peer_connection::ffi::PeerConnection;
+         type PeerConnectionFactory;
+diff --git a/webrtc-sys/src/video_decoder_factory.cpp b/webrtc-sys/src/video_decoder_factory.cpp
+index d22ae70..5804ba9 100644
+--- a/webrtc-sys/src/video_decoder_factory.cpp
++++ b/webrtc-sys/src/video_decoder_factory.cpp
+@@ -39,6 +39,10 @@
+ #include "nvidia/nvidia_decoder_factory.h"
+ #endif
+ 
++#ifdef WEBRTC_WIN
++#include "media_foundation/media_foundation_video.h"
++#endif
++
+ namespace livekit_ffi {
+ 
+ namespace {
+@@ -85,6 +89,10 @@ VideoDecoderFactory::VideoDecoderFactory()
+   }
+ #endif
+ 
++#ifdef WEBRTC_WIN
++  factories_.push_back(CreateMediaFoundationVideoDecoderFactory());
++#endif
++
+   if (!internal_h264_decoder_works_) {
+     RTC_LOG(LS_WARNING) << "Internal H264 decoder is unavailable, "
+                            "not advertising its formats";
+@@ -129,6 +137,10 @@ VideoDecoderFactory::CodecSupport VideoDecoderFactory::QueryCodecSupport(
+     }
+   }
+ 
++  for (const auto& factory : factories_) {
++    const auto support = factory->QueryCodecSupport(format, reference_scaling);
++    if (support.is_supported && support.is_power_efficient) return support;
++  }
+   CodecSupport codec_support;
+   codec_support.is_supported = format.IsCodecInList(GetSupportedFormats());
+   return codec_support;
+@@ -138,8 +150,9 @@ std::unique_ptr<webrtc::VideoDecoder> VideoDecoderFactory::Create(
+     const webrtc::Environment& env, const webrtc::SdpVideoFormat& format) {
+   for (const auto& factory : factories_) {
+     for (const auto& supported_format : factory->GetSupportedFormats()) {
+-      if (supported_format.IsSameCodec(format))
+-        return factory->Create(env, format);
++      if (supported_format.IsSameCodec(format)) {
++        if (auto decoder = factory->Create(env, format)) return decoder;
++      }
+     }
+   }
+ 
+diff --git a/webrtc-sys/src/video_encoder_factory.cpp b/webrtc-sys/src/video_encoder_factory.cpp
+index d8b7fd4..8d47cdc 100644
+--- a/webrtc-sys/src/video_encoder_factory.cpp
++++ b/webrtc-sys/src/video_encoder_factory.cpp
+@@ -59,6 +59,10 @@
+ #include "jetson/jetson_encoder_factory.h"
+ #endif
+ 
++#ifdef WEBRTC_WIN
++#include "media_foundation/media_foundation_video.h"
++#endif
++
+ namespace livekit_ffi {
+ 
+ namespace {
+@@ -335,6 +339,10 @@ rust::Vec<VideoEncoderBackend> video_encoder_backend_list() {
+   }
+ #endif
+ 
++#ifdef WEBRTC_WIN
++  has_hardware_backend |= !CreateMediaFoundationVideoEncoderFactory()->GetSupportedFormats().empty();
++#endif
++
+   if (has_hardware_backend && !hardware_backend_listed) {
+     backends.push_back(VideoEncoderBackend::Hardware);
+   }
+@@ -373,6 +381,9 @@ VideoEncoderFactory::InternalFactory::InternalFactory() {
+     AddNvencFactory(factories_, preferred_hw_encoder.explicitly_set);
+     AddVaapiFactory(factories_, false);
+   }
++#ifdef WEBRTC_WIN
++  AddBackendFactory(factories_, VideoEncoderBackend::Hardware, CreateMediaFoundationVideoEncoderFactory());
++#endif
+ }
+ 
+ std::vector<webrtc::SdpVideoFormat>
+diff --git a/livekit/src/room/track/local_video_track.rs b/livekit/src/room/track/local_video_track.rs
+--- a/livekit/src/room/track/local_video_track.rs
++++ b/livekit/src/room/track/local_video_track.rs
+@@ -351,6 +351,11 @@
+         self.inner.events.lock().unmuted.replace(Box::new(f));
+     }
+ 
++    /// Returns the sender for a published track, for updating RTP encoding limits.
++    pub fn sender(&self) -> Option<RtpSender> {
++        self.transceiver().map(|transceiver| transceiver.sender())
++    }
++
+     pub(crate) fn transceiver(&self) -> Option<RtpTransceiver> {
+         self.inner.info.read().transceiver.clone()
+     }
+diff --git a/livekit/src/room/participant/local_participant.rs b/livekit/src/room/participant/local_participant.rs
+--- a/livekit/src/room/participant/local_participant.rs
++++ b/livekit/src/room/participant/local_participant.rs
+@@ -440,7 +440,8 @@
+         self.publish_track_with_video_send_encodings(track, options, Some(Vec::new())).await
+     }
+ 
+-    async fn publish_track_with_video_send_encodings(
++    /// Publishes with explicit initial video encodings, including aggregate bitrate limits.
++    pub async fn publish_track_with_video_send_encodings(
+         &self,
+         track: LocalTrack,
+         options: TrackPublishOptions,
+diff --git a/livekit-net/Cargo.toml b/livekit-net/Cargo.toml
+--- a/livekit-net/Cargo.toml
++++ b/livekit-net/Cargo.toml
+@@ -50,11 +50,8 @@
+ [dependencies]
+ async-trait = "0.1"
+ 
+-# Direct path dep (not workspace inheritance) so default-features = false is
+-# honored: cargo ignores a member's default-features override on an inherited dep,
+-# which would drag in livekit-runtime's default `tokio` and trip its one-runtime
+-# guard when a non-tokio flavor is selected.
+-livekit-runtime = { path = "../livekit-runtime", version = "0.4.0", optional = true, default-features = false }
++# The workspace disables defaults and keeps one runtime source across SDK crates.
++livekit-runtime = { workspace = true, optional = true, default-features = false }
+ url = "2.3"
+ http = "1.1"
+ log = { workspace = true }

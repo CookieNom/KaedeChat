@@ -18,9 +18,6 @@ import android.hardware.display.DisplayManager;
 import android.util.DisplayMetrics;
 import android.hardware.display.VirtualDisplay;
 import android.media.projection.MediaProjectionManager;
-import android.os.Looper;
-import android.os.Handler;
-import android.os.Build;
 import android.view.Display;
 
 /**
@@ -36,14 +33,16 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     private final MediaProjection.Callback mediaProjectionCallback;
     private int width;
     private int height;
-    private int oldWidth;
-    private int oldHeight;
+    private volatile int oldWidth;
+    private volatile int oldHeight;
     private VirtualDisplay virtualDisplay;
+    private Surface virtualDisplaySurface;
     private SurfaceTextureHelper surfaceTextureHelper;
     private CapturerObserver capturerObserver;
     private long numCapturedFrames = 0;
     private MediaProjection mediaProjection;
-    private boolean isDisposed = false;
+    private volatile boolean isDisposed = false;
+    private volatile boolean isStopped = false;
     private MediaProjectionManager mediaProjectionManager;
     private WindowManager windowManager;
     private boolean isPortrait;
@@ -64,14 +63,18 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     }
 
     public void onFrame(VideoFrame frame) {
-        checkNotDisposed();
+        // Silently drop in-flight frames that arrive after stop/dispose.
+        // stopCapture() no longer holds the monitor (synchronized removed), so guard explicitly here.
+        if (isDisposed || isStopped) return;
         this.isPortrait = isDeviceOrientationPortrait();
         final int max = Math.max(this.height, this.width);
         final int min = Math.min(this.height, this.width);
-        if (this.isPortrait) {
-            changeCaptureFormat(min, max, 15);
-        } else {
-            changeCaptureFormat(max, min, 15);
+        final int newW = this.isPortrait ? min : max;
+        final int newH = this.isPortrait ? max : min;
+        // Avoid ANR: only enter changeCaptureFormat() (synchronized) when the dimensions actually change.
+        // Previously every frame took the lock, which widened the race window against stopCapture().
+        if (newW != this.oldWidth || newH != this.oldHeight) {
+            changeCaptureFormat(newW, newH, 15);
         }
         capturerObserver.onFrameCaptured(frame);
     }
@@ -80,7 +83,7 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
         final Display display = windowManager.getDefaultDisplay();
         final DisplayMetrics metrics = new DisplayMetrics();
         display.getRealMetrics(metrics);
-        
+
         return metrics.heightPixels > metrics.widthPixels;
     }
 
@@ -122,6 +125,8 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             this.height = width;
             this.width = height;
         }
+        this.oldWidth = this.width;
+        this.oldHeight = this.height;
 
         mediaProjection = mediaProjectionManager.getMediaProjection(
                 Activity.RESULT_OK, mediaProjectionPermissionResultData);
@@ -135,8 +140,13 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     }
 
     @Override
-    public synchronized void stopCapture() {
-        checkNotDisposed();
+    public void stopCapture() {
+        // synchronized removed: stopCapture() used to hold the capturer monitor while
+        // waiting on the SurfaceTextureHelper thread via invokeAtFrontUninterruptibly, while
+        // that same thread's onFrame() -> changeCaptureFormat() (synchronized) tried to
+        // re-enter the same monitor, causing a deadlock (ANR).
+        if (isDisposed || isStopped) return;
+        isStopped = true;
         ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
             @Override
             public void run() {
@@ -146,6 +156,7 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
                     virtualDisplay.release();
                     virtualDisplay = null;
                 }
+                releaseVirtualDisplaySurface();
                 if (mediaProjection != null) {
                     // Unregister the callback before stopping, otherwise the callback recursively
                     // calls this method.
@@ -175,49 +186,58 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             final int width, final int height, final int ignoredFramerate) {
         checkNotDisposed();
         if (this.oldWidth != width || this.oldHeight != height) {
+            this.width = width;
+            this.height = height;
             this.oldWidth = width;
             this.oldHeight = height;
 
-            if (oldHeight > oldWidth) {
-                ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
-                    @Override
-                    public void run() {
-                        if (virtualDisplay != null && surfaceTextureHelper != null) {
-                            virtualDisplay.setSurface(new Surface(surfaceTextureHelper.getSurfaceTexture()));
-                            surfaceTextureHelper.setTextureSize(oldWidth, oldHeight);
-                            virtualDisplay.resize(oldWidth, oldHeight, VIRTUAL_DISPLAY_DPI);
-                        }
+            ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
+                @Override
+                public void run() {
+                    if (surfaceTextureHelper == null || mediaProjection == null) {
+                        return;
                     }
-                });
-            }
 
-            if (oldWidth > oldHeight) {
-                surfaceTextureHelper.setTextureSize(oldWidth, oldHeight);
-                virtualDisplay.setSurface(new Surface(surfaceTextureHelper.getSurfaceTexture()));
-                final Handler handler = new Handler(Looper.getMainLooper());
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
-                            @Override
-                            public void run() {
-                                if (virtualDisplay != null && surfaceTextureHelper != null) {
-                                    virtualDisplay.resize(oldWidth, oldHeight, VIRTUAL_DISPLAY_DPI);
-                                }
-                            }
-                        });
+                    if (virtualDisplay != null) {
+                        resizeVirtualDisplay();
+                    } else {
+                        createVirtualDisplay();
                     }
-                }, 700);
-            }
+                }
+            });
         }
     }
 
     private void createVirtualDisplay() {
+        updateSurfaceTextureSize();
+        releaseVirtualDisplaySurface();
+        virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
+        virtualDisplay = mediaProjection.createVirtualDisplay("WebRTC_ScreenCapture", width, height,
+                VIRTUAL_DISPLAY_DPI, DISPLAY_FLAGS, virtualDisplaySurface,
+                null /* callback */, null /* callback handler */);
+    }
+
+    private void resizeVirtualDisplay() {
+        updateSurfaceTextureSize();
+        virtualDisplay.resize(width, height, VIRTUAL_DISPLAY_DPI);
+        final Surface oldSurface = virtualDisplaySurface;
+        virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
+        virtualDisplay.setSurface(virtualDisplaySurface);
+        if (oldSurface != null) {
+            oldSurface.release();
+        }
+    }
+
+    private void updateSurfaceTextureSize() {
         surfaceTextureHelper.setTextureSize(width, height);
         surfaceTextureHelper.getSurfaceTexture().setDefaultBufferSize(width, height);
-        virtualDisplay = mediaProjection.createVirtualDisplay("WebRTC_ScreenCapture", width, height,
-                VIRTUAL_DISPLAY_DPI, DISPLAY_FLAGS, new Surface(surfaceTextureHelper.getSurfaceTexture()),
-                null /* callback */, null /* callback handler */);
+    }
+
+    private void releaseVirtualDisplaySurface() {
+        if (virtualDisplaySurface != null) {
+            virtualDisplaySurface.release();
+            virtualDisplaySurface = null;
+        }
     }
 
     @Override

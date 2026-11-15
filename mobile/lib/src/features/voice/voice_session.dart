@@ -281,14 +281,23 @@ bool voiceDisconnectIsRecoverable(DisconnectReason? reason) => switch (reason) {
       DisconnectReason.serverShutdown ||
       DisconnectReason.disconnected ||
       DisconnectReason.signalingConnectionFailure ||
-      DisconnectReason.reconnectAttemptsExceeded =>
+      DisconnectReason.reconnectAttemptsExceeded ||
+      DisconnectReason.migration ||
+      DisconnectReason.signalClose ||
+      DisconnectReason.connectionTimeout ||
+      DisconnectReason.mediaFailure =>
         true,
       DisconnectReason.clientInitiated ||
       DisconnectReason.duplicateIdentity ||
       DisconnectReason.participantRemoved ||
       DisconnectReason.roomDeleted ||
       DisconnectReason.stateMismatch ||
-      DisconnectReason.joinFailure =>
+      DisconnectReason.joinFailure ||
+      DisconnectReason.roomClosed ||
+      DisconnectReason.userUnavailable ||
+      DisconnectReason.userRejected ||
+      DisconnectReason.sipTrunkFailure ||
+      DisconnectReason.agentError =>
         false,
     };
 
@@ -1263,7 +1272,8 @@ final class VoiceSession extends ChangeNotifier {
     for (final encoding in encodings) {
       encoding.maxBitrate = _mediaQuality
           .audioPublishOptionsForChannel(_voiceMediaPolicy.bitrate)
-          .audioBitrate;
+          .encoding!
+          .maxBitrate;
     }
     final applied = await sender.setParameters(parameters);
     if (!applied) {
@@ -1282,7 +1292,7 @@ final class VoiceSession extends ChangeNotifier {
 
   Future<void> toggleSpeaker() async {
     final next = !_speaker;
-    await Hardware.instance.setSpeakerphoneOn(next);
+    await AudioManager.instance.setSpeakerOutputPreferred(next);
     _speaker = next;
     _audioRoute = next ? VoiceAudioRoute.speaker : VoiceAudioRoute.phone;
     notifyListeners();
@@ -1320,18 +1330,18 @@ final class VoiceSession extends ChangeNotifier {
   Future<void> selectAudioRoute(VoiceAudioRoute route) async {
     switch (route) {
       case VoiceAudioRoute.phone:
-        await Hardware.instance.setSpeakerphoneOn(false);
+        await AudioManager.instance.setSpeakerOutputPreferred(false);
         _speaker = false;
         break;
       case VoiceAudioRoute.speaker:
-        await Hardware.instance
-            .setSpeakerphoneOn(true, forceSpeakerOutput: true);
+        await AudioManager.instance
+            .setSpeakerOutputPreferred(true, force: true);
         _speaker = true;
         break;
       case VoiceAudioRoute.bluetooth:
         if (!(await _ensureBluetoothPermission())) {
-          await Hardware.instance
-              .setSpeakerphoneOn(true, forceSpeakerOutput: true);
+          await AudioManager.instance
+              .setSpeakerOutputPreferred(true, force: true);
           _speaker = true;
           _audioRoute = VoiceAudioRoute.speaker;
           notifyListeners();

@@ -22,6 +22,15 @@
                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+- (NSMutableArray*)eventQueue {
+  return objc_getAssociatedObject(self, _cmd);
+}
+
+- (void)setEventQueue:(NSMutableArray*)eventQueue {
+  objc_setAssociatedObject(self, @selector(eventQueue), eventQueue,
+                           OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 #pragma mark - FlutterStreamHandler methods
 
 - (FlutterError* _Nullable)onCancelWithArguments:(id _Nullable)arguments {
@@ -32,6 +41,16 @@
 - (FlutterError* _Nullable)onListenWithArguments:(id _Nullable)arguments
                                        eventSink:(nonnull FlutterEventSink)sink {
   self.eventSink = sink;
+  // Flush any state-change events that fired before the Dart listener attached
+  // (e.g. an immediate decryptionFailed), matching the Android eventQueue.
+  NSArray* queued;
+  @synchronized(self) {
+    queued = [self.eventQueue copy];
+    [self.eventQueue removeAllObjects];
+  }
+  for (id event in queued) {
+    postEvent(sink, event);
+  }
   return nil;
 }
 @end
@@ -85,6 +104,17 @@
       return RTCCryptorAlgorithmAesGcm;
     default:
       return RTCCryptorAlgorithmAesGcm;
+  }
+}
+
+- (RTCKeyDerivationAlgorithm)getKeyDerivationAlgorithm:(NSNumber*)algorithm {
+  switch ([algorithm intValue]) {
+    case 0:
+      return RTCKeyDerivationAlgorithmPBKDF2;
+    case 1:
+      return RTCKeyDerivationAlgorithmHKDF;
+    default:
+      return RTCKeyDerivationAlgorithmPBKDF2;
   }
 }
 
@@ -158,6 +188,7 @@
                                                         frameCryptorId]
              binaryMessenger:self.messenger];
 
+    frameCryptor.eventQueue = [NSMutableArray array];
     frameCryptor.eventChannel = eventChannel;
     [eventChannel setStreamHandler:frameCryptor];
     frameCryptor.delegate = self;
@@ -184,6 +215,7 @@
                                                         frameCryptorId]
              binaryMessenger:self.messenger];
 
+    frameCryptor.eventQueue = [NSMutableArray array];
     frameCryptor.eventChannel = eventChannel;
     [eventChannel setStreamHandler:frameCryptor];
     frameCryptor.delegate = self;
@@ -307,6 +339,17 @@
   }
   [self.frameCryptors removeObjectForKey:frameCryptorId];
   frameCryptor.enabled = NO;
+  // Tear down so the native cryptor stops delivering state events to a disposed
+  // object and the eventChannel<->frameCryptor retain cycle is broken (the
+  // channel retains its stream handler, the handler retains the channel via the
+  // associated object). Mirrors Android's frameCryptor.dispose().
+  frameCryptor.delegate = nil;
+  [frameCryptor.eventChannel setStreamHandler:nil];
+  frameCryptor.eventChannel = nil;
+  frameCryptor.eventSink = nil;
+  @synchronized(frameCryptor) {
+    [frameCryptor.eventQueue removeAllObjects];
+  }
   result(@{@"result" : @"success"});
 }
 
@@ -353,8 +396,9 @@
   NSNumber* keyRingSize = keyProviderOptions[@"keyRingSize"];
 
   NSNumber* discardFrameWhenCryptorNotReady = keyProviderOptions[@"discardFrameWhenCryptorNotReady"];
-  
+
   NSNumber* keyDerivationAlgorithm = keyProviderOptions[@"keyDerivationAlgorithm"];
+
   RTCFrameCryptorKeyProvider* keyProvider =
       [[RTCFrameCryptorKeyProvider alloc] initWithRatchetSalt:ratchetSalt.data
                                            ratchetWindowSize:[ratchetWindowSize intValue]
@@ -363,7 +407,7 @@
                                             failureTolerance:failureTolerance != nil ? [failureTolerance intValue] : -1
                                                  keyRingSize:keyRingSize != nil ? [keyRingSize intValue] : 0
                              discardFrameWhenCryptorNotReady:discardFrameWhenCryptorNotReady != nil ? [discardFrameWhenCryptorNotReady boolValue] : NO
-                                      keyDerivationAlgorithm:(RTCKeyDerivationAlgorithm)[keyDerivationAlgorithm intValue]];
+                                       keyDerivationAlgorithm:[self getKeyDerivationAlgorithm:keyDerivationAlgorithm]];
   self.keyProviders[keyProviderId] = keyProvider;
   result(@{@"keyProviderId" : keyProviderId});
 }
@@ -391,7 +435,7 @@
   if(keyProvider == nil) {
     return;
   }
- 
+
   NSNumber* keyIndex = constraints[@"keyIndex"];
   if (keyIndex == nil) {
     result([FlutterError errorWithCode:@"keyProviderSetKeyFailed"
@@ -595,12 +639,22 @@
 - (void)frameCryptor:(RTC_OBJC_TYPE(RTCFrameCryptor) *)frameCryptor
     didStateChangeWithParticipantId:(NSString*)participantId
                           withState:(RTCFrameCryptorState)stateChanged {
+  // participantId may be an empty/absent value coming from the native layer;
+  // never insert nil into the dictionary literal (that raises
+  // NSInvalidArgumentException and crashes the process).
+  NSDictionary* event = @{
+    @"event" : @"frameCryptionStateChanged",
+    @"participantId" : participantId ?: @"",
+    @"state" : [self stringFromState:stateChanged]
+  };
   if (frameCryptor.eventSink) {
-    postEvent(frameCryptor.eventSink, @{
-      @"event" : @"frameCryptionStateChanged",
-      @"participantId" : participantId,
-      @"state" : [self stringFromState:stateChanged]
-    });
+    postEvent(frameCryptor.eventSink, event);
+  } else {
+    // No Dart listener yet: buffer so a state such as decryptionFailed that
+    // fires right after creation is delivered once -onListen attaches.
+    @synchronized(frameCryptor) {
+      [frameCryptor.eventQueue addObject:event];
+    }
   }
 }
 

@@ -1,14 +1,14 @@
+// This is a generated file - do not edit.
 //
-//  Generated code. Do not modify.
-//  source: livekit_models.proto
-//
+// Generated from livekit_models.proto.
+
 // @dart = 3.3
 
 // ignore_for_file: annotate_overrides, camel_case_types, comment_references
 // ignore_for_file: constant_identifier_names
 // ignore_for_file: curly_braces_in_flow_control_structures
 // ignore_for_file: deprecated_member_use_from_same_package, library_prefixes
-// ignore_for_file: non_constant_identifier_names
+// ignore_for_file: non_constant_identifier_names, prefer_relative_imports
 
 import 'dart:core' as $core;
 
@@ -131,6 +131,23 @@ class TrackSource extends $pb.ProtobufEnum {
   const TrackSource._(super.value, super.name);
 }
 
+class DataTrackExtensionID extends $pb.ProtobufEnum {
+  static const DataTrackExtensionID DTEI_INVALID = DataTrackExtensionID._(0, _omitEnumNames ? '' : 'DTEI_INVALID');
+  static const DataTrackExtensionID DTEI_PARTICIPANT_SID =
+      DataTrackExtensionID._(1, _omitEnumNames ? '' : 'DTEI_PARTICIPANT_SID');
+
+  static const $core.List<DataTrackExtensionID> values = <DataTrackExtensionID>[
+    DTEI_INVALID,
+    DTEI_PARTICIPANT_SID,
+  ];
+
+  static final $core.List<DataTrackExtensionID?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 1);
+  static DataTrackExtensionID? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DataTrackExtensionID._(super.value, super.name);
+}
+
 class VideoQuality extends $pb.ProtobufEnum {
   static const VideoQuality LOW = VideoQuality._(0, _omitEnumNames ? '' : 'LOW');
   static const VideoQuality MEDIUM = VideoQuality._(1, _omitEnumNames ? '' : 'MEDIUM');
@@ -236,6 +253,9 @@ class DisconnectReason extends $pb.ProtobufEnum {
   /// media stream failure or media timeout
   static const DisconnectReason MEDIA_FAILURE = DisconnectReason._(15, _omitEnumNames ? '' : 'MEDIA_FAILURE');
 
+  /// agent encountered an error
+  static const DisconnectReason AGENT_ERROR = DisconnectReason._(16, _omitEnumNames ? '' : 'AGENT_ERROR');
+
   static const $core.List<DisconnectReason> values = <DisconnectReason>[
     UNKNOWN_REASON,
     CLIENT_INITIATED,
@@ -253,12 +273,48 @@ class DisconnectReason extends $pb.ProtobufEnum {
     SIP_TRUNK_FAILURE,
     CONNECTION_TIMEOUT,
     MEDIA_FAILURE,
+    AGENT_ERROR,
   ];
 
-  static final $core.List<DisconnectReason?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 15);
+  static final $core.List<DisconnectReason?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 16);
   static DisconnectReason? valueOf($core.int value) => value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const DisconnectReason._(super.value, super.name);
+}
+
+/// why a room ended, reported on room-ended telemetry
+class RoomEndReason extends $pb.ProtobufEnum {
+  static const RoomEndReason ROOM_END_UNKNOWN = RoomEndReason._(0, _omitEnumNames ? '' : 'ROOM_END_UNKNOWN');
+
+  /// RoomService.DeleteRoom was called
+  static const RoomEndReason ROOM_END_API_DELETE = RoomEndReason._(1, _omitEnumNames ? '' : 'ROOM_END_API_DELETE');
+
+  /// the room sat empty past its empty or departure timeout
+  static const RoomEndReason ROOM_END_IDLE_TIMEOUT = RoomEndReason._(2, _omitEnumNames ? '' : 'ROOM_END_IDLE_TIMEOUT');
+
+  /// the server instance is shutting down
+  static const RoomEndReason ROOM_END_SERVER_SHUTDOWN =
+      RoomEndReason._(3, _omitEnumNames ? '' : 'ROOM_END_SERVER_SHUTDOWN');
+
+  /// the room was restarted or replaced elsewhere
+  static const RoomEndReason ROOM_END_SUPERSEDED = RoomEndReason._(4, _omitEnumNames ? '' : 'ROOM_END_SUPERSEDED');
+
+  /// the room failed to finish opening
+  static const RoomEndReason ROOM_END_OPEN_FAILED = RoomEndReason._(5, _omitEnumNames ? '' : 'ROOM_END_OPEN_FAILED');
+
+  static const $core.List<RoomEndReason> values = <RoomEndReason>[
+    ROOM_END_UNKNOWN,
+    ROOM_END_API_DELETE,
+    ROOM_END_IDLE_TIMEOUT,
+    ROOM_END_SERVER_SHUTDOWN,
+    ROOM_END_SUPERSEDED,
+    ROOM_END_OPEN_FAILED,
+  ];
+
+  static final $core.List<RoomEndReason?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static RoomEndReason? valueOf($core.int value) => value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const RoomEndReason._(super.value, super.name);
 }
 
 class ReconnectReason extends $pb.ProtobufEnum {
@@ -332,6 +388,25 @@ class AudioTrackFeature extends $pb.ProtobufEnum {
   const AudioTrackFeature._(super.value, super.name);
 }
 
+class PacketTrailerFeature extends $pb.ProtobufEnum {
+  static const PacketTrailerFeature PTF_USER_TIMESTAMP =
+      PacketTrailerFeature._(0, _omitEnumNames ? '' : 'PTF_USER_TIMESTAMP');
+  static const PacketTrailerFeature PTF_FRAME_ID = PacketTrailerFeature._(1, _omitEnumNames ? '' : 'PTF_FRAME_ID');
+  static const PacketTrailerFeature PTF_USER_DATA = PacketTrailerFeature._(2, _omitEnumNames ? '' : 'PTF_USER_DATA');
+
+  static const $core.List<PacketTrailerFeature> values = <PacketTrailerFeature>[
+    PTF_USER_TIMESTAMP,
+    PTF_FRAME_ID,
+    PTF_USER_DATA,
+  ];
+
+  static final $core.List<PacketTrailerFeature?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static PacketTrailerFeature? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const PacketTrailerFeature._(super.value, super.name);
+}
+
 class ParticipantInfo_State extends $pb.ProtobufEnum {
   /// websocket' connected, but not offered yet
   static const ParticipantInfo_State JOINING = ParticipantInfo_State._(0, _omitEnumNames ? '' : 'JOINING');
@@ -375,15 +450,23 @@ class ParticipantInfo_Kind extends $pb.ProtobufEnum {
   /// LiveKit agents
   static const ParticipantInfo_Kind AGENT = ParticipantInfo_Kind._(4, _omitEnumNames ? '' : 'AGENT');
 
+  /// Connectors participants
+  static const ParticipantInfo_Kind CONNECTOR = ParticipantInfo_Kind._(7, _omitEnumNames ? '' : 'CONNECTOR');
+
+  /// Bridge participants
+  static const ParticipantInfo_Kind BRIDGE = ParticipantInfo_Kind._(8, _omitEnumNames ? '' : 'BRIDGE');
+
   static const $core.List<ParticipantInfo_Kind> values = <ParticipantInfo_Kind>[
     STANDARD,
     INGRESS,
     EGRESS,
     SIP,
     AGENT,
+    CONNECTOR,
+    BRIDGE,
   ];
 
-  static final $core.List<ParticipantInfo_Kind?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static final $core.List<ParticipantInfo_Kind?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 8);
   static ParticipantInfo_Kind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -395,13 +478,25 @@ class ParticipantInfo_KindDetail extends $pb.ProtobufEnum {
       ParticipantInfo_KindDetail._(0, _omitEnumNames ? '' : 'CLOUD_AGENT');
   static const ParticipantInfo_KindDetail FORWARDED =
       ParticipantInfo_KindDetail._(1, _omitEnumNames ? '' : 'FORWARDED');
+  static const ParticipantInfo_KindDetail CONNECTOR_WHATSAPP =
+      ParticipantInfo_KindDetail._(2, _omitEnumNames ? '' : 'CONNECTOR_WHATSAPP');
+  static const ParticipantInfo_KindDetail CONNECTOR_TWILIO =
+      ParticipantInfo_KindDetail._(3, _omitEnumNames ? '' : 'CONNECTOR_TWILIO');
+  static const ParticipantInfo_KindDetail BRIDGE_RTSP =
+      ParticipantInfo_KindDetail._(4, _omitEnumNames ? '' : 'BRIDGE_RTSP');
+  static const ParticipantInfo_KindDetail SIMULATION =
+      ParticipantInfo_KindDetail._(5, _omitEnumNames ? '' : 'SIMULATION');
 
   static const $core.List<ParticipantInfo_KindDetail> values = <ParticipantInfo_KindDetail>[
     CLOUD_AGENT,
     FORWARDED,
+    CONNECTOR_WHATSAPP,
+    CONNECTOR_TWILIO,
+    BRIDGE_RTSP,
+    SIMULATION,
   ];
 
-  static final $core.List<ParticipantInfo_KindDetail?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 1);
+  static final $core.List<ParticipantInfo_KindDetail?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 5);
   static ParticipantInfo_KindDetail? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -423,6 +518,121 @@ class Encryption_Type extends $pb.ProtobufEnum {
   static Encryption_Type? valueOf($core.int value) => value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const Encryption_Type._(super.value, super.name);
+}
+
+/// Well-known encoding for frame payloads.
+///
+/// Mirrors the well-known message encodings from the MCAP spec:
+/// https://mcap.dev/spec/registry#message-encodings
+class DataTrackFrameEncoding_WellKnownFrameEncoding extends $pb.ProtobufEnum {
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_UNSPECIFIED =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(0, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_UNSPECIFIED');
+
+  /// ROS 1: must be described by `ROS1_MSG` schema encoding.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_ROS1 =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(1, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_ROS1');
+
+  /// CDR: must be described by `ROS2_MSG`, `ROS2_IDL`, or `OMG_IDL` schema encoding.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_CDR =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(2, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_CDR');
+
+  /// Protocol Buffer: must be described by `PROTOBUF` schema encoding.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_PROTOBUF =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(3, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_PROTOBUF');
+
+  /// FlatBuffer: must be described by `FLATBUFFER` schema encoding.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_FLATBUFFER =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(4, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_FLATBUFFER');
+
+  /// CBOR: self-describing.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_CBOR =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(5, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_CBOR');
+
+  /// MessagePack: self-describing.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_MSGPACK =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(6, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_MSGPACK');
+
+  /// JSON: self-describing or described by `JSON_SCHEMA` schema encoding.
+  static const DataTrackFrameEncoding_WellKnownFrameEncoding WELL_KNOWN_FRAME_ENCODING_JSON =
+      DataTrackFrameEncoding_WellKnownFrameEncoding._(7, _omitEnumNames ? '' : 'WELL_KNOWN_FRAME_ENCODING_JSON');
+
+  static const $core.List<DataTrackFrameEncoding_WellKnownFrameEncoding> values =
+      <DataTrackFrameEncoding_WellKnownFrameEncoding>[
+    WELL_KNOWN_FRAME_ENCODING_UNSPECIFIED,
+    WELL_KNOWN_FRAME_ENCODING_ROS1,
+    WELL_KNOWN_FRAME_ENCODING_CDR,
+    WELL_KNOWN_FRAME_ENCODING_PROTOBUF,
+    WELL_KNOWN_FRAME_ENCODING_FLATBUFFER,
+    WELL_KNOWN_FRAME_ENCODING_CBOR,
+    WELL_KNOWN_FRAME_ENCODING_MSGPACK,
+    WELL_KNOWN_FRAME_ENCODING_JSON,
+  ];
+
+  static final $core.List<DataTrackFrameEncoding_WellKnownFrameEncoding?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static DataTrackFrameEncoding_WellKnownFrameEncoding? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DataTrackFrameEncoding_WellKnownFrameEncoding._(super.value, super.name);
+}
+
+/// Well-known encoding for schema definition.
+///
+/// Mirrors the well-known schema encodings from the MCAP spec:
+/// https://mcap.dev/spec/registry#schema-encodings
+class DataTrackSchemaEncoding_WellKnownSchemaEncoding extends $pb.ProtobufEnum {
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_UNSPECIFIED =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(
+          0, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_UNSPECIFIED');
+
+  /// Protocol Buffer IDL: describes `PROTOBUF` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_PROTOBUF =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(1, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_PROTOBUF');
+
+  /// FlatBuffer IDL: describes `FLATBUFFER` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_FLATBUFFER =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(
+          2, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_FLATBUFFER');
+
+  /// ROS 1 Message: describes `ROS1` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_ROS1_MSG =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(3, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_ROS1_MSG');
+
+  /// ROS 2 Message: describes `CDR` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_ROS2_MSG =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(4, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_ROS2_MSG');
+
+  /// ROS 2 IDL: describes `CDR` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_ROS2_IDL =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(5, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_ROS2_IDL');
+
+  /// OMG IDL: describes `CDR` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_OMG_IDL =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(6, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_OMG_IDL');
+
+  /// JSON Schema: describes `JSON` frame encoding.
+  static const DataTrackSchemaEncoding_WellKnownSchemaEncoding WELL_KNOWN_SCHEMA_ENCODING_JSON_SCHEMA =
+      DataTrackSchemaEncoding_WellKnownSchemaEncoding._(
+          7, _omitEnumNames ? '' : 'WELL_KNOWN_SCHEMA_ENCODING_JSON_SCHEMA');
+
+  static const $core.List<DataTrackSchemaEncoding_WellKnownSchemaEncoding> values =
+      <DataTrackSchemaEncoding_WellKnownSchemaEncoding>[
+    WELL_KNOWN_SCHEMA_ENCODING_UNSPECIFIED,
+    WELL_KNOWN_SCHEMA_ENCODING_PROTOBUF,
+    WELL_KNOWN_SCHEMA_ENCODING_FLATBUFFER,
+    WELL_KNOWN_SCHEMA_ENCODING_ROS1_MSG,
+    WELL_KNOWN_SCHEMA_ENCODING_ROS2_MSG,
+    WELL_KNOWN_SCHEMA_ENCODING_ROS2_IDL,
+    WELL_KNOWN_SCHEMA_ENCODING_OMG_IDL,
+    WELL_KNOWN_SCHEMA_ENCODING_JSON_SCHEMA,
+  ];
+
+  static final $core.List<DataTrackSchemaEncoding_WellKnownSchemaEncoding?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static DataTrackSchemaEncoding_WellKnownSchemaEncoding? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DataTrackSchemaEncoding_WellKnownSchemaEncoding._(super.value, super.name);
 }
 
 class VideoLayer_Mode extends $pb.ProtobufEnum {
@@ -518,6 +728,30 @@ class ClientInfo_SDK extends $pb.ProtobufEnum {
   const ClientInfo_SDK._(super.value, super.name);
 }
 
+/// Optional capabilities advertised by the client at connect time. The SFU
+/// uses these flags to decide whether to enable features that require
+/// client-side support (e.g. passing RTP packet trailers through to the
+/// subscriber instead of stripping them).
+class ClientInfo_Capability extends $pb.ProtobufEnum {
+  static const ClientInfo_Capability CAP_UNUSED = ClientInfo_Capability._(0, _omitEnumNames ? '' : 'CAP_UNUSED');
+  static const ClientInfo_Capability CAP_PACKET_TRAILER =
+      ClientInfo_Capability._(1, _omitEnumNames ? '' : 'CAP_PACKET_TRAILER');
+  static const ClientInfo_Capability CAP_COMPRESSION_DEFLATE_RAW =
+      ClientInfo_Capability._(2, _omitEnumNames ? '' : 'CAP_COMPRESSION_DEFLATE_RAW');
+
+  static const $core.List<ClientInfo_Capability> values = <ClientInfo_Capability>[
+    CAP_UNUSED,
+    CAP_PACKET_TRAILER,
+    CAP_COMPRESSION_DEFLATE_RAW,
+  ];
+
+  static final $core.List<ClientInfo_Capability?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static ClientInfo_Capability? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ClientInfo_Capability._(super.value, super.name);
+}
+
 /// enum for operation types (specific to TextHeader)
 class DataStream_OperationType extends $pb.ProtobufEnum {
   static const DataStream_OperationType CREATE = DataStream_OperationType._(0, _omitEnumNames ? '' : 'CREATE');
@@ -537,6 +771,27 @@ class DataStream_OperationType extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const DataStream_OperationType._(super.value, super.name);
+}
+
+/// The compression type of the whole data stream
+///
+/// This will only get populated when send to participants with a
+/// client protocol >= 2 which advertise a client capability of CAP_COMPRESSION_DEFLATE_RAW
+class DataStream_CompressionType extends $pb.ProtobufEnum {
+  static const DataStream_CompressionType NONE = DataStream_CompressionType._(0, _omitEnumNames ? '' : 'NONE');
+  static const DataStream_CompressionType DEFLATE_RAW =
+      DataStream_CompressionType._(1, _omitEnumNames ? '' : 'DEFLATE_RAW');
+
+  static const $core.List<DataStream_CompressionType> values = <DataStream_CompressionType>[
+    NONE,
+    DEFLATE_RAW,
+  ];
+
+  static final $core.List<DataStream_CompressionType?> _byValue = $pb.ProtobufEnum.$_initByValueList(values, 1);
+  static DataStream_CompressionType? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DataStream_CompressionType._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames = $core.bool.fromEnvironment('protobuf.omit_enum_names');

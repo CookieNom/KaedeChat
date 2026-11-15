@@ -3,28 +3,94 @@
 #include "flutter_data_channel.h"
 #include "flutter_peerconnection.h"
 
+#include <algorithm>
+#include <vector>
+
 #include "helper.h"
+#include "rtc_field_trials.h"
 
 namespace flutter_webrtc_plugin {
 
 const char* kEventChannelName = "FlutterWebRTC.Event";
 
+// `WebRTC-ForcePlayoutDelay` renders every frame as soon as it is decoded
+// instead of holding it back for the jitter buffer target delay. Opted into
+// through the `zeroPlayoutDelay` initialize() option, and read at the same
+// moment as `WebRTC-IceHandshakeDtls` below.
+const char kFieldTrialForcePlayoutDelayKey[] = "WebRTC-ForcePlayoutDelay";
+
+// `WebRTC-ForcePlayoutDelay` is parametrized rather than a plain "Enabled"
+// flag: pin both ends of the playout delay to 0 ms.
+const char kFieldTrialZeroPlayoutDelayValue[] = "min_ms:0,max_ms:0";
+
+// Builds a "Key/Value/" field trial entry.
+static std::string FieldTrial(const std::string& key,
+                              const std::string& value) {
+  return key + "/" + value + "/";
+}
+
+// Builds a "Key/Enabled/" field trial entry.
+static std::string EnabledFieldTrial(const std::string& key) {
+  return FieldTrial(key, kRTCFieldTrialEnabledValue);
+}
+
 FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
                                      TextureRegistrar* textures,
                                      TaskRunner *task_runner)
     : messenger_(messenger), task_runner_(task_runner), textures_(textures) {
-  LibWebRTC::Initialize();
+  event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
+}
+
+FlutterWebRTCBase::~FlutterWebRTCBase() {
+  if (webrtc_initialized_) {
+    LibWebRTC::Terminate();
+  }
+}
+
+void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
+                                                bool zero_playout_delay) {
+  if (webrtc_initialized_) {
+    return;
+  }
+  webrtc_initialized_ = true;
+  warp_enabled_ = enable_warp;
+
+  // WARP (WebRTC Abridged Roundtrip Protocol, draft-uberti-tsvwg-warp) is
+  // opted into through the `enableWARP` initialize() option. The part of it
+  // that libwebrtc implements is `WebRTC-IceHandshakeDtls`, the DTLS handshake
+  // piggybacked on the ICE STUN binding exchange. Field trials are process
+  // global and are read when the peer connection factory builds its
+  // environment, which is why the factory is created here instead of in the
+  // constructor: the options only arrive with the initialize() call.
+  std::vector<libwebrtc::string> field_trials;
+  if (enable_warp) {
+    field_trials.push_back(
+        EnabledFieldTrial(kRTCFieldTrialIceHandshakeDtlsKey));
+  }
+  if (zero_playout_delay) {
+    field_trials.push_back(FieldTrial(kFieldTrialForcePlayoutDelayKey,
+                                      kFieldTrialZeroPlayoutDelayValue));
+  }
+
+  if (field_trials.empty()) {
+    LibWebRTC::Initialize();
+  } else {
+    LibWebRTC::InitializeWithFieldTrials(
+        libwebrtc::vector<libwebrtc::string>(field_trials));
+  }
+
   factory_ = LibWebRTC::CreateRTCPeerConnectionFactory();
   factory_->Initialize();
   audio_device_ = factory_->GetAudioDevice();
   video_device_ = factory_->GetVideoDevice();
   desktop_device_ = factory_->GetDesktopDevice();
   audio_processing_ = factory_->GetAudioProcessing();
-  event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
-}
 
-FlutterWebRTCBase::~FlutterWebRTCBase() {
-  LibWebRTC::Terminate();
+  audio_device_->OnDeviceChange([&] {
+    EncodableMap info;
+    info[EncodableValue("event")] = "onDeviceChange";
+    event_channel()->Success(EncodableValue(info), false);
+  });
 }
 
 EventChannelProxy* FlutterWebRTCBase::event_channel() {
@@ -71,6 +137,47 @@ void FlutterWebRTCBase::RemoveMediaTrackForId(const std::string& id) {
   auto it = local_tracks_.find(id);
   if (it != local_tracks_.end())
     local_tracks_.erase(it);
+  RemoveVideoSourceForId(id);
+}
+
+bool FlutterWebRTCBase::AddVideoProcessor(const std::string& track_id,
+                                          RTCVideoProcessor* processor) {
+  auto it = video_sources_.find(track_id);
+  if (it == video_sources_.end() || !processor)
+    return false;
+  auto& processors = it->second.processors;
+  if (std::find(processors.begin(), processors.end(), processor) ==
+      processors.end()) {
+    processors.push_back(processor);
+    it->second.source->AddProcessor(processor);
+  }
+  return true;
+}
+
+bool FlutterWebRTCBase::RemoveVideoProcessor(const std::string& track_id,
+                                             RTCVideoProcessor* processor) {
+  auto it = video_sources_.find(track_id);
+  if (it == video_sources_.end())
+    return false;
+  auto& processors = it->second.processors;
+  auto found = std::find(processors.begin(), processors.end(), processor);
+  if (found == processors.end())
+    return false;
+  processors.erase(found);
+  it->second.source->RemoveProcessor(processor);
+  return true;
+}
+
+void FlutterWebRTCBase::RemoveVideoSourceForId(const std::string& track_id) {
+  auto it = video_sources_.find(track_id);
+  if (it == video_sources_.end())
+    return;
+  // The source can outlive this entry through a peer connection sender, so
+  // detach the processors here or the source would keep calling them after
+  // their owner frees them.
+  for (auto processor : it->second.processors)
+    it->second.source->RemoveProcessor(processor);
+  video_sources_.erase(it);
 }
 
 FlutterPeerConnectionObserver* FlutterWebRTCBase::PeerConnectionObserversForId(
@@ -149,7 +256,7 @@ void FlutterWebRTCBase::ParseConstraints(
       value = GetValue<bool>(v) ? RTCMediaConstraints::kValueTrue
                                 : RTCMediaConstraints::kValueFalse;
     } else {
-      value = std::to_string(GetValue<int>(v));
+      continue;
     }
     if (type == kMandatory) {
       mediaConstraints->AddMandatoryConstraint(key.c_str(), value.c_str());
@@ -244,6 +351,12 @@ bool FlutterWebRTCBase::CreateIceServers(const EncodableList& iceServersArray,
 
 bool FlutterWebRTCBase::ParseRTCConfiguration(const EncodableMap& map,
                                               RTCConfiguration& conf) {
+  // Enable SNAP (SCTP INIT in SDP), part of WARP.
+  // see https://www.ietf.org/archive/id/draft-hancke-tsvwg-snap-00.html
+  if (warp_enabled_) {
+    conf.enable_sctp_snap = true;
+  }
+
   auto it = map.find(EncodableValue("iceServers"));
   if (it != map.end()) {
     const EncodableList iceServersArray = GetValue<EncodableList>(it->second);
@@ -305,6 +418,11 @@ bool FlutterWebRTCBase::ParseRTCConfiguration(const EncodableMap& map,
     conf.sdp_semantics = SdpSemantics::kUnifiedPlan;
   }
 
+  it = map.find(EncodableValue("enableDscp"));
+  if (it != map.end() && TypeIs<bool>(it->second)) {
+    conf.enable_dscp = GetValue<bool>(it->second);
+  }
+
   // maxIPv6Networks
   it = map.find(EncodableValue("maxIPv6Networks"));
   if (it != map.end()) {
@@ -335,6 +453,7 @@ void FlutterWebRTCBase::RemoveTracksForId(const std::string& id) {
   auto it = local_tracks_.find(id);
   if (it != local_tracks_.end())
     local_tracks_.erase(it);
+  RemoveVideoSourceForId(id);
 }
 
 libwebrtc::scoped_refptr<libwebrtc::RTCRtpSender>
@@ -362,6 +481,15 @@ FlutterWebRTCBase::GetRtpReceiverById(RTCPeerConnection* pc,
     }
   }
   return result;
+}
+
+libwebrtc::scoped_refptr<libwebrtc::KeyProvider> FlutterWebRTCBase::GetKeyProviderForId(
+      const std::string& keyProviderId) {
+  auto it = key_providers_.find(keyProviderId);
+  if (it != key_providers_.end()) {
+    return it->second;
+  }
+  return nullptr;
 }
 
 }  // namespace flutter_webrtc_plugin

@@ -25,7 +25,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.webrtc.AudioTrack;
 import org.webrtc.CandidatePairChangeEvent;
@@ -35,6 +37,7 @@ import org.webrtc.IceCandidate;
 import org.webrtc.MediaStream;
 import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
+import org.webrtc.Priority;
 import org.webrtc.RTCStats;
 import org.webrtc.RTCStatsReport;
 import org.webrtc.RtpCapabilities;
@@ -46,16 +49,22 @@ import org.webrtc.VideoTrack;
 
 class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.StreamHandler {
   private final static String TAG = FlutterWebRTCPlugin.TAG;
-  // WebRTC's native priority enum uses this order.
-  private static final List<String> NETWORK_PRIORITIES =
-      Arrays.asList("very-low", "low", "medium", "high");
-  private final Map<String, DataChannel> dataChannels = new HashMap<>();
+  // onDataChannel writes from the signaling thread while the method handlers
+  // read, write and iterate from the platform thread.
+  private final Map<String, DataChannel> dataChannels = new ConcurrentHashMap<>();
+  private final Map<String, DataChannelObserver> dataChannelObservers = new ConcurrentHashMap<>();
   private final BinaryMessenger messenger;
   private final String id;
   private PeerConnection peerConnection;
   private final PeerConnection.RTCConfiguration configuration;
   final Map<String, MediaStream> remoteStreams = new HashMap<>();
-  final Map<String, MediaStreamTrack> remoteTracks = new HashMap<>();
+  private final RemoteTrackRegistry<MediaStreamTrack> remoteTracks =
+      new RemoteTrackRegistry<>();
+  // Unified Plan: the track registered for each receiver id by onAddTrack, so
+  // onRemoveTrack (which gets another wrapper of the same receiver) removes
+  // that exact object.
+  private final Map<String, MediaStreamTrack> remoteTracksByReceiver =
+      new ConcurrentHashMap<>();
   final Map<String, RtpTransceiver> transceivers = new HashMap<>();
   private final StateProvider stateProvider;
   private final EventChannel eventChannel;
@@ -103,11 +112,19 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     peerConnection.close();
     remoteStreams.clear();
     remoteTracks.clear();
-    dataChannels.clear();
+    remoteTracksByReceiver.clear();
+    // The data channels stay registered until dispose() so that their event
+    // channel handlers can be released there. Closing the peer connection
+    // already closes them.
   }
 
   void dispose() {
     this.close();
+    // Data channels go before the peer connection because unregistering an
+    // observer needs a live connection.
+    for (String dataChannelId : new ArrayList<>(dataChannels.keySet())) {
+      disposeDataChannel(dataChannelId);
+    }
     peerConnection.dispose();
     eventChannel.setStreamHandler(null);
   }
@@ -155,9 +172,29 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     DataChannel dataChannel = dataChannels.get(dataChannelId);
     if (dataChannel != null) {
       dataChannel.close();
-      dataChannels.remove(dataChannelId);
+      // The Dart side cancels its event subscription before it calls this, so
+      // nothing is left that needs the event channel handler.
+      disposeDataChannel(dataChannelId);
     } else {
       Log.d(TAG, "dataChannelClose() dataChannel is null");
+    }
+  }
+
+  /**
+   * Releases the observer and the Java wrapper for a data channel and forgets
+   * about it. The wrapper owns a reference to the native channel that
+   * PeerConnection.dispose() does not release, so it is disposed here. The
+   * observer goes first because unregistering it needs a wrapper that has not
+   * been disposed yet.
+   */
+  private void disposeDataChannel(String dataChannelId) {
+    DataChannelObserver observer = dataChannelObservers.remove(dataChannelId);
+    if (observer != null) {
+      observer.dispose();
+    }
+    DataChannel dataChannel = dataChannels.remove(dataChannelId);
+    if (dataChannel != null) {
+      dataChannel.dispose();
     }
   }
 
@@ -418,6 +455,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       String trackId = track.id();
 
       remoteTracks.put(trackId, track);
+      stateProvider.onRemoteTrackAdded(id, streamId, track);
 
       ConstraintsMap trackInfo = new ConstraintsMap();
       trackInfo.putString("id", trackId);
@@ -433,6 +471,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       String trackId = track.id();
 
       remoteTracks.put(trackId, track);
+      stateProvider.onRemoteTrackAdded(id, streamId, track);
 
       ConstraintsMap trackInfo = new ConstraintsMap();
       trackInfo.putString("id", trackId);
@@ -461,10 +500,10 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     String streamId = mediaStream.getId();
 
     for (VideoTrack track : mediaStream.videoTracks) {
-      this.remoteTracks.remove(track.id());
+      this.remoteTracks.remove(track.id(), track);
     }
     for (AudioTrack track : mediaStream.audioTracks) {
-      this.remoteTracks.remove(track.id());
+      this.remoteTracks.remove(track.id(), track);
     }
 
     ConstraintsMap params = new ConstraintsMap();
@@ -520,6 +559,22 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     params.putMap("receiver", rtpReceiverToMap(receiver));
 
     if (this.configuration.sdpSemantics == PeerConnection.SdpSemantics.UNIFIED_PLAN) {
+      // Register the track object of this callback's receiver, as
+      // onAddStream does for Plan B. Without it a renderer resolves the
+      // track through peerConnection.getTransceivers(), whose next call (from
+      // here, or any getTransceivers/getReceivers from Dart) disposes the
+      // RtpTransceivers of the previous one, their receivers' tracks and,
+      // with them, every sink attached to those tracks: the renderer stops
+      // receiving frames while the track keeps decoding. The receiver of this
+      // callback is not part of those lists, so its track object stays valid.
+      MediaStreamTrack receiverTrack = receiver.track();
+      if (receiverTrack != null) {
+        String streamId = mediaStreams.length > 0 ? mediaStreams[0].getId() : "";
+        remoteTracks.put(receiverTrack.id(), receiverTrack);
+        remoteTracksByReceiver.put(receiver.id(), receiverTrack);
+        stateProvider.onRemoteTrackAdded(id, streamId, receiverTrack);
+      }
+
       List<RtpTransceiver> transceivers = peerConnection.getTransceivers();
       for (RtpTransceiver transceiver : transceivers) {
         if (transceiver.getReceiver() != null && receiver.id().equals(transceiver.getReceiver().id())) {
@@ -541,6 +596,10 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
     MediaStreamTrack track = rtpReceiver.track();
     String trackId = track.id();
+    MediaStreamTrack registered = remoteTracksByReceiver.remove(rtpReceiver.id());
+    if (registered != null) {
+      remoteTracks.remove(trackId, registered);
+    }
     ConstraintsMap trackInfo = new ConstraintsMap();
     trackInfo.putString("id", trackId);
     trackInfo.putString("label", track.kind());
@@ -571,11 +630,11 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   }
 
   private void registerDataChannelObserver(String dcId, DataChannel dataChannel) {
-    // DataChannel.registerObserver implementation does not allow to
-    // unregister, so the observer is registered here and is never
-    // unregistered
-    dataChannel.registerObserver(
-        new DataChannelObserver(messenger, id, dcId, dataChannel));
+    // Keep the observer around so that its event channel handler and the
+    // native observer can be released when the channel goes away.
+    DataChannelObserver observer = new DataChannelObserver(messenger, id, dcId, dataChannel);
+    dataChannelObservers.put(dcId, observer);
+    dataChannel.registerObserver(observer);
   }
 
   @Override
@@ -644,6 +703,64 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     return type;
   }
 
+  private int stringToPriority(String priority) {
+    if (priority == null) return Priority.LOW;
+    switch (priority) {
+      case "very-low":
+        return Priority.VERY_LOW;
+      case "low":
+        return Priority.LOW;
+      case "medium":
+        return Priority.MEDIUM;
+      case "high":
+        return Priority.HIGH;
+      default:
+        return Priority.LOW;
+    }
+  }
+
+  private String priorityToString(int priority) {
+    switch (priority) {
+      case Priority.VERY_LOW:
+        return "very-low";
+      case Priority.LOW:
+        return "low";
+      case Priority.MEDIUM:
+        return "medium";
+      case Priority.HIGH:
+        return "high";
+      default:
+        return "low";
+    }
+  }
+
+  private double stringToBitratePriority(String priority) {
+    if (priority == null) return 1.0;
+    switch (priority) {
+      case "very-low":
+        return 0.5;
+      case "low":
+        return 1.0;
+      case "medium":
+        return 2.0;
+      case "high":
+        return 4.0;
+      default:
+        return 1.0;
+    }
+  }
+
+  private String bitratePriorityToString(double bitratePriority) {
+    if (bitratePriority <= 0.5) {
+      return "very-low";
+    } else if (bitratePriority <= 1.0) {
+      return "low";
+    } else if (bitratePriority <= 2.0) {
+      return "medium";
+    }
+    return "high";
+  }
+
   private RtpParameters.Encoding mapToEncoding(Map<String, Object> parameters) {
     RtpParameters.Encoding encoding = new RtpParameters.Encoding((String) parameters.get("rid"), true, 1.0);
 
@@ -679,8 +796,13 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       encoding.scalabilityMode = (String) parameters.get("scalabilityMode");
     }
 
-    int networkPriority = NETWORK_PRIORITIES.indexOf(parameters.get("networkPriority"));
-    if (networkPriority >= 0) encoding.networkPriority = networkPriority;
+    if (parameters.get("priority") != null) {
+      encoding.bitratePriority = stringToBitratePriority((String) parameters.get("priority"));
+    }
+
+    if (parameters.get("networkPriority") != null) {
+      encoding.networkPriority = stringToPriority((String) parameters.get("networkPriority"));
+    }
 
     return encoding;
   }
@@ -720,7 +842,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
     String degradationPreference = (String) newParameters.get("degradationPreference");
     if (degradationPreference != null) {
-      parameters.degradationPreference = RtpParameters.DegradationPreference.valueOf(degradationPreference.toUpperCase().replace("-", "_"));
+      parameters.degradationPreference = RtpParameters.DegradationPreference.valueOf(degradationPreference.toUpperCase(Locale.US).replace("-", "_"));
     }
 
     for (Map<String, Object> encoding : encodings) {
@@ -746,8 +868,6 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       }
 
       if (currentParams != null) {
-        int networkPriority = NETWORK_PRIORITIES.indexOf(encoding.get("networkPriority"));
-        if (networkPriority >= 0) currentParams.networkPriority = networkPriority;
         Boolean active = (Boolean) encoding.get("active");
         if (active != null) currentParams.active = active;
         Integer maxBitrate = (Integer) encoding.get("maxBitrate");
@@ -761,6 +881,15 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
         Double scaleResolutionDownBy = (Double) encoding.get("scaleResolutionDownBy");
         if (scaleResolutionDownBy != null)
           currentParams.scaleResolutionDownBy = scaleResolutionDownBy;
+        String scalabilityMode = (String) encoding.get("scalabilityMode");
+        if (scalabilityMode != null)
+          currentParams.scalabilityMode = scalabilityMode;
+        String priority = (String) encoding.get("priority");
+        if (priority != null)
+          currentParams.bitratePriority = stringToBitratePriority(priority);
+        String networkPriority = (String) encoding.get("networkPriority");
+        if (networkPriority != null)
+          currentParams.networkPriority = stringToPriority(networkPriority);
       }
     }
 
@@ -792,7 +921,6 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     for (RtpParameters.Encoding encoding : rtpParameters.encodings) {
       ConstraintsMap map = new ConstraintsMap();
       map.putBoolean("active", encoding.active);
-      map.putString("networkPriority", NETWORK_PRIORITIES.get(encoding.networkPriority));
       if (encoding.rid != null) {
         map.putString("rid", encoding.rid);
       }
@@ -814,6 +942,11 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       if (encoding.ssrc != null) {
         map.putLong("ssrc", encoding.ssrc);
       }
+      if (encoding.scalabilityMode != null) {
+        map.putString("scalabilityMode", encoding.scalabilityMode);
+      }
+      map.putString("priority", bitratePriorityToString(encoding.bitratePriority));
+      map.putString("networkPriority", priorityToString(encoding.networkPriority));
       encodings.pushMap(map);
     }
     info.putArray("encodings", encodings.toArrayList());
@@ -1146,13 +1279,18 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     for (RtpTransceiver transceiver : transceivers) {
       RtpReceiver receiver = transceiver.getReceiver();
       if (receiver != null) {
-        if (receiver.track() != null && receiver.track().id().equals(trackId)) {
-          track = receiver.track();
+        MediaStreamTrack receiverTrack = receiver.track();
+        if (receiverTrack != null && receiverTrack.id().equals(trackId)) {
+          track = receiverTrack;
           break;
         }
       }
     }
     return track;
+  }
+
+  MediaStreamTrack getRemoteTrack(String trackId) {
+    return remoteTracks.get(trackId);
   }
 
   public String getNextDataChannelUUID() {

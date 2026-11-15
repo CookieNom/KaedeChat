@@ -16,7 +16,8 @@ FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
       FlutterPeerConnection::FlutterPeerConnection(this),
       FlutterScreenCapture::FlutterScreenCapture(this),
       FlutterDataChannel::FlutterDataChannel(this),
-      FlutterFrameCryptor::FlutterFrameCryptor(this) {}
+      FlutterFrameCryptor::FlutterFrameCryptor(this),
+      FlutterDataPacketCryptor::FlutterDataPacketCryptor(this) {}
 
 FlutterWebRTC::~FlutterWebRTC() {}
 
@@ -32,8 +33,20 @@ void FlutterWebRTC::HandleMethodCall(
       RTCLoggingSeverity severity = str2LogSeverity(severityStr);
       initLoggerCallback(severity);
     }
+    // The field trials `enableWARP` and `zeroPlayoutDelay` turn on are read
+    // when the peer connection factory is created, so the factory is built
+    // here rather than in the constructor.
+    EnsureWebRTCInitialized(findBoolean(options, "enableWARP"),
+                            findBoolean(options, "zeroPlayoutDelay"));
     result->Success();
-  } else if (method_call.method_name().compare("createPeerConnection") == 0) {
+    return;
+  }
+
+  // Everything below needs the factory. If the Dart side never called
+  // initialize() with options, fall back to the default field trials.
+  EnsureWebRTCInitialized();
+
+  if (method_call.method_name().compare("createPeerConnection") == 0) {
     if (!method_call.arguments()) {
       result->Error("Bad Arguments", "Null arguments received");
       return;
@@ -1289,6 +1302,9 @@ void FlutterWebRTC::HandleMethodCall(
   } else {
     if (HandleFrameCryptorMethodCall(method_call, std::move(result), &result)) {
       return;
+    } else if (HandleDataPacketCryptorMethodCall(method_call, std::move(result),
+                                                 &result)) {
+      return;
     } else {
       result->NotImplemented();
     }
@@ -1296,11 +1312,11 @@ void FlutterWebRTC::HandleMethodCall(
 }
 
 void FlutterWebRTC::initLoggerCallback(RTCLoggingSeverity severity) {
-  if(eventChannelProxy == nullptr) {
+  if (eventChannelProxy == nullptr) {
     eventChannelProxy = event_channel();
   }
 
-  libwebrtc::LibWebRTCLogging::setLogSink(severity, [](const string& message){
+  libwebrtc::LibWebRTCLogging::setLogSink(severity, [](const string& message) {
     EncodableMap info;
     info[EncodableValue("event")] = "onLogData";
     info[EncodableValue("data")] = message.c_string();
@@ -1309,15 +1325,15 @@ void FlutterWebRTC::initLoggerCallback(RTCLoggingSeverity severity) {
 }
 
 RTCLoggingSeverity FlutterWebRTC::str2LogSeverity(std::string str) {
-  if(str == "verbose")
+  if (str == "verbose")
     return Verbose;
-  else if(str == "info")
+  else if (str == "info")
     return Info;
-  else if(str == "warning")
+  else if (str == "warning")
     return Warning;
-  else if(str == "error")
+  else if (str == "error")
     return Error;
-  else if(str == "none")
+  else if (str == "none")
     return None;
 
   return None;

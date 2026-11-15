@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the pinned AV1 cryptor used by Flutter; requires Linux/Android or macOS/iOS."""
+"""Build the pinned AV1/HEVC cryptor used by Flutter; requires Linux/Android or macOS/iOS."""
 
 import argparse
 import hashlib
@@ -11,9 +11,9 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-BUILD_REV = "06e3410d8f67d08202e26f55225705596b60778e"
-WEBRTC_REV = "a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd"
-VERSION = "137.7151.04-kaede-av1.1"
+BUILD_REV = "d6a665312ccdf663e5cbcba2a6837168793d9946"
+WEBRTC_REV = "83af826464a3212bf452fcb3a8d0619e7d77a368"
+VERSION = "150.7871.06-kaede-video.1"
 PATCH = ROOT / "docs/av1-e2ee/webrtc-build.patch"
 OUTPUT = ROOT / "mobile/native/webrtc"
 
@@ -48,7 +48,7 @@ def main():
         run("git", "apply", "--check", str(PATCH), cwd=checkout)
         run("git", "apply", str(PATCH), cwd=checkout)
     build = checkout / "build"
-    gn_args = "enable_libaom=true rtc_include_dav1d_in_internal_decoder_factory=true rtc_include_tests=false"
+    gn_args = "enable_libaom=true rtc_libvpx_build_vp9=true rtc_use_h265=true rtc_include_dav1d_in_internal_decoder_factory=true rtc_include_tests=false"
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.platform == "android":
         run(sys.executable, "run.py", "build", "android", "--webrtc-fetch", "--commit", WEBRTC_REV,
@@ -65,7 +65,7 @@ def main():
         shutil.copy2(notice, OUTPUT / "android/NOTICE")
     else:
         # The apple target fetches and patches sources without building unrelated
-        # macOS, tvOS or visionOS slices. Use M137's own iOS XCFramework builder.
+        # macOS, tvOS or visionOS slices. Use the pinned WebRTC iOS XCFramework builder.
         run(sys.executable, "run.py", "build", "apple", "--webrtc-fetch", "--commit", WEBRTC_REV, cwd=build)
         source = build / "_source/apple/webrtc/src"
         os.environ["PATH"] = str(build / "_source/apple/depot_tools") + os.pathsep + os.environ["PATH"]
@@ -79,6 +79,12 @@ def main():
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(work / "ios/WebRTC.xcframework", destination, symlinks=True)
+    source = build / f"_source/{'apple' if args.platform == 'ios' else 'android'}/webrtc/src"
+    # Run the shared Annex-B regression vectors with the host compiler in CI.
+    cryptor_test = work / "h26x-frame-test"
+    run("c++", "-std=c++20", str(source / "api/crypto/h26x_frame_test.cpp"),
+        "-o", str(cryptor_test), cwd=source)
+    run(str(cryptor_test), cwd=source)
     (OUTPUT / f"{args.platform}-build.json").write_text(json.dumps({
         "build_revision": BUILD_REV, "webrtc_revision": WEBRTC_REV,
         "patch_sha256": hashlib.sha256(PATCH.read_bytes()).hexdigest(),

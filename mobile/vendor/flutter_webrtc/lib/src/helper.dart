@@ -8,6 +8,23 @@ import '../flutter_webrtc.dart';
 import 'native_logs_listener.dart';
 
 class Helper {
+  /// Whether the sharer's OS mouse cursor is composited into desktop screen
+  /// capture (native getDisplayMedia on Windows/Linux).
+  ///
+  /// Read when a capture starts, so it applies to the NEXT screen share rather
+  /// than one already running. Defaults to `true` — the existing behaviour —
+  /// so nothing changes unless an app opts out. Set it to `false` to avoid the
+  /// "double cursor" viewers see when the sharer's pointer is drawn on top of
+  /// their own. Web is unaffected: the browser owns cursor handling there.
+  static bool screenCaptureShowCursor = true;
+
+  /// Show/hide the broadcaster's mouse cursor in desktop screen capture.
+  /// Applies to the NEXT screen share started via getDisplayMedia; an already
+  /// running capture is unaffected.
+  static void setScreenCaptureCursor(bool show) {
+    screenCaptureShowCursor = show;
+  }
+
   /// Set Logger object for webrtc;
   ///
   /// Params:
@@ -158,6 +175,43 @@ class Helper {
   static Future<void> setMicrophoneMute(bool mute, MediaStreamTrack track) =>
       NativeAudioManagement.setMicrophoneMute(mute, track);
 
+  /// Get how the audio device module mutes microphone input.
+  ///
+  /// iOS/macOS only. On all other platforms this returns
+  /// [MicrophoneMuteMode.unknown] without calling into native code, so it is
+  /// always safe to call from cross-platform code.
+  static Future<MicrophoneMuteMode> getMicrophoneMuteMode() =>
+      NativeAudioManagement.getMicrophoneMuteMode();
+
+  /// Set how the audio device module mutes microphone input.
+  ///
+  /// [MicrophoneMuteMode.voiceProcessing] (the default) plays the platform
+  /// mute sound effect on mute/unmute; use [MicrophoneMuteMode.inputMixer] or
+  /// [MicrophoneMuteMode.restartEngine] for silent muting.
+  ///
+  /// iOS/macOS only. On all other platforms this is a no-op that completes
+  /// normally (including for [MicrophoneMuteMode.unknown]), so it is always
+  /// safe to call from cross-platform code.
+  static Future<void> setMicrophoneMuteMode(MicrophoneMuteMode mode) =>
+      NativeAudioManagement.setMicrophoneMuteMode(mode);
+
+  /// Get whether microphone input is muted at the audio device module level.
+  /// Unrelated to `MediaStreamTrack.enabled`.
+  ///
+  /// Supported on iOS/macOS and Android; on all other platforms this returns
+  /// `false` without calling into native code.
+  static Future<bool> isMicrophoneMuted() =>
+      NativeAudioManagement.isMicrophoneMuted();
+
+  /// Mute or unmute microphone input at the audio device module level,
+  /// honoring the mode set via [setMicrophoneMuteMode] on iOS/macOS.
+  /// Unrelated to `MediaStreamTrack.enabled`.
+  ///
+  /// Supported on iOS/macOS and Android; on all other platforms this is a
+  /// no-op that completes normally.
+  static Future<void> setMicrophoneMuted(bool muted) =>
+      NativeAudioManagement.setMicrophoneMuted(muted);
+
   /// Set the audio configuration to for Android.
   /// Must be set before initiating a WebRTC session and cannot be changed
   /// mid session.
@@ -183,12 +237,24 @@ class Helper {
           AppleNativeAudioManagement.getAppleAudioConfigurationForMode(mode,
               preferSpeakerOutput: preferSpeakerOutput));
 
-  /// Request capture permission for Android
-  static Future<bool> requestCapturePermission() async {
-    if (WebRTC.platformIsAndroid) {
-      return await WebRTC.invokeMethod('requestCapturePermission');
+  /// Request capture permission for Android/macOS.
+  ///
+  /// When [fullScreenOnly] is true and running on Android 14+ (API 34), the
+  /// MediaProjection consent dialog only offers entire-screen capture and the
+  /// single-app option is removed (via
+  /// `MediaProjectionConfig.createConfigForDefaultDisplay()`). Has no effect on
+  /// older Android versions or on macOS. Defaults to false, which keeps the
+  /// platform's default user-choice dialog.
+  static Future<bool> requestCapturePermission(
+      {bool fullScreenOnly = false}) async {
+    if (WebRTC.platformIsAndroid || WebRTC.platformIsMacOS) {
+      return await WebRTC.invokeMethod(
+        'requestCapturePermission',
+        <String, dynamic>{'fullScreenOnly': fullScreenOnly},
+      );
     } else {
-      throw Exception('requestCapturePermission only support for Android');
+      throw Exception(
+          'requestCapturePermission only support for Android/macOS');
     }
   }
 }

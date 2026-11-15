@@ -10,7 +10,7 @@ allprojects {
     configurations.configureEach {
         resolutionStrategy.dependencySubstitution {
             substitute(module("io.github.webrtc-sdk:android"))
-                .using(module("chat.kaede:webrtc:137.7151.04-kaede-av1.1"))
+                .using(module("chat.kaede:webrtc:150.7871.06-kaede-video.1"))
                 .because("Encrypted AV1 requires Kaede's patched native cryptor")
         }
     }

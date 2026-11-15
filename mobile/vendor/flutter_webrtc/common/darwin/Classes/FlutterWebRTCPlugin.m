@@ -11,6 +11,8 @@
 #import "FlutterRTCFrameCryptor.h"
 #if TARGET_OS_IPHONE
 #import "FlutterRTCMediaRecorder.h"
+#endif
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
 #import "FlutterRTCVideoPlatformViewFactory.h"
 #import "FlutterRTCVideoPlatformViewController.h"
 #endif
@@ -25,6 +27,10 @@
 
 #import <WebRTC/RTCLogging.h>
 #import <WebRTC/RTCCallbackLogger.h>
+
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+#import <CoreGraphics/CoreGraphics.h>
+#endif
 
 #import "LocalTrack.h"
 #import "LocalAudioTrack.h"
@@ -152,8 +158,19 @@ static void KaedeProbeFrame(void* context, void* frameContext, OSStatus status,
 // output; a MIME advertisement or an OS encoder list is not enough.
 static NSDictionary* KaedeHardwareVideoSettings(NSDictionary* args) {
   NSDictionary* unknown = @{@"hardware": @NO, @"implementation": @"unknown"};
+  // The required-session and using-hardware keys are weak-linked before iOS
+  // 17.4. A factory name alone is insufficient hardware evidence there.
+  if (@available(iOS 17.4, tvOS 17.4, macCatalyst 17.4, visionOS 1.1, *)) {
+  } else { return unknown; }
   if (![args[@"codec"] isKindOfClass:[NSString class]] ||
-      ![args[@"codec"] isEqualToString:@"h264"]) return unknown;
+      ![args[@"scalabilityMode"] isEqual:@"L1T1"]) return unknown;
+  NSString* codec = [args[@"codec"] lowercaseString];
+  NSDictionary* codecTypes = @{@"h264": @(kCMVideoCodecType_H264),
+                               @"h265": @(kCMVideoCodecType_HEVC)};
+  NSNumber* codecType = codecTypes[codec];
+  // The shipped factory's AV1 encoder is libaom. Do not substitute an H.264
+  // probe (or an unrelated OS encoder) for a codec that factory cannot send.
+  if (!codecType) return unknown;
   for (NSString* key in @[@"width", @"height", @"fps", @"bitrate"])
     if (![args[key] isKindOfClass:[NSNumber class]]) return unknown;
   int width = [args[@"width"] intValue], height = [args[@"height"] intValue];
@@ -162,13 +179,16 @@ static NSDictionary* KaedeHardwareVideoSettings(NSDictionary* args) {
       fps <= 0 || fps > 120 || bitrate <= 0 || bitrate > 100000000) return unknown;
   VideoEncoderFactory* factory = [[VideoEncoderFactory alloc] init];
   BOOL selectedVideoToolbox = NO;
-  CFStringRef profile = kVTProfileLevel_H264_Baseline_AutoLevel;
+  CFStringRef profile = [codec isEqualToString:@"h265"]
+      ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_Baseline_AutoLevel;
   for (RTCVideoCodecInfo* info in factory.supportedCodecs) {
-    if (![info.name isEqualToString:kRTCVideoCodecH264Name]) continue;
-    NSString* profileId = [info.parameters[@"profile-level-id"] lowercaseString];
-    if ([profileId hasPrefix:@"64"]) profile = kVTProfileLevel_H264_High_AutoLevel;
-    else if ([profileId hasPrefix:@"4d"]) profile = kVTProfileLevel_H264_Main_AutoLevel;
-    else if (![profileId hasPrefix:@"42"]) return unknown;
+    if (![[info.name lowercaseString] isEqualToString:codec]) continue;
+    if ([codec isEqualToString:@"h264"]) {
+      NSString* profileId = [info.parameters[@"profile-level-id"] lowercaseString];
+      if ([profileId hasPrefix:@"64"]) profile = kVTProfileLevel_H264_High_AutoLevel;
+      else if ([profileId hasPrefix:@"4d"]) profile = kVTProfileLevel_H264_Main_AutoLevel;
+      else if (![profileId hasPrefix:@"42"]) return unknown;
+    }
     id<RTCVideoEncoder> encoder = [factory createEncoder:info];
     selectedVideoToolbox = [[encoder implementationName] isEqualToString:@"VideoToolbox"];
     [encoder releaseEncoder];
@@ -184,7 +204,7 @@ static NSDictionary* KaedeHardwareVideoSettings(NSDictionary* args) {
   output.width = width; output.height = height;
   NSDictionary* specification = @{(__bridge NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES};
   OSStatus status = VTCompressionSessionCreate(kCFAllocatorDefault, width, height,
-      kCMVideoCodecType_H264, (__bridge CFDictionaryRef)specification, NULL, NULL,
+      [codecType unsignedIntValue], (__bridge CFDictionaryRef)specification, NULL, NULL,
       KaedeProbeFrame, &output, &session);
   if (status != noErr || !session) return unknown;
   NSDictionary* properties = @{
@@ -222,10 +242,15 @@ static NSDictionary* KaedeHardwareVideoSettings(NSDictionary* args) {
   CFRelease(session);
   if (pixels) CVPixelBufferRelease(pixels);
   if (hardware) CFRelease(hardware);
-  return @{@"hardware": @(confirmed), @"implementation": confirmed ? @"VideoToolbox" : @"unknown"};
+  return @{@"hardware": @(confirmed), @"implementation": confirmed ? @"VideoToolbox" : @"unknown",
+           @"scalabilityMode": @"L1T1"};
 }
 
-void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
+void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
+    if (sink == nil) {
+        NSLog(@"postEvent: sink is nil, skipping event dispatch");
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
       sink(event);
     });
@@ -243,14 +268,71 @@ void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event) {
   BOOL _speakerOnButPreferBluetooth;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
-#if TARGET_OS_IPHONE
-  FLutterRTCVideoPlatformViewFactory *_platformViewFactory;
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
+  FlutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
 }
 
+// Each Flutter engine registers its own plugin instance. The first one keeps
+// this slot, and the instance that creates the peer connection factory takes
+// it over, so native callers never end up on an instance without a factory.
+// A detached instance hands it on to another live one.
+// Guarded by @synchronized on the class.
 static FlutterWebRTCPlugin *sharedSingleton;
+
+// Weak on both sides so the map never keeps a messenger or an instance alive.
+// Guarded by @synchronized on the class.
+static NSMapTable<NSObject<FlutterBinaryMessenger>*, FlutterWebRTCPlugin*>* instancesByMessenger;
+
+// Process-global so it can be set from native code (e.g. another plugin) before
+// this plugin is even registered. Defaults to enabled. See
+// +setAudioSessionManagementEnabled:.
+static BOOL gAudioSessionManagementEnabled = YES;
+
+// Process-global RTCAudioDeviceModuleDelegate, set by an embedding plugin
+// (e.g. livekit_client) before the factory is created so it can own the audio
+// device module's engine-lifecycle callbacks. Held weakly — the embedder
+// retains it. See +setAudioDeviceModuleObserver:.
+static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
+
+// WARP (WebRTC Abridged Roundtrip Protocol, draft-uberti-tsvwg-warp) is opted
+// into through the `enableWARP` initialize() option. The part of it that
+// libwebrtc implements is `WebRTC-IceHandshakeDtls`, the DTLS handshake
+// piggybacked on the ICE STUN binding exchange. The trials end up in the
+// environment the peer connection factory is built with, so the base set is kept
+// in one place and re-applied with the extra trial from -initialize:, which runs
+// before the factory and any peer connection exist.
+static BOOL gWarpEnabled = NO;
+
+// `WebRTC-ForcePlayoutDelay` renders every frame as soon as it is decoded instead
+// of holding it back for the jitter buffer target delay. Opted into through the
+// `zeroPlayoutDelay` initialize() option, and read at the same moment as the
+// trials above.
+static NSString* const kFlutterWebRTCFieldTrialForcePlayoutDelay = @"WebRTC-ForcePlayoutDelay";
+static NSString* const kFlutterWebRTCFieldTrialZeroPlayoutDelayValue = @"min_ms:0,max_ms:0";
+
+static BOOL gZeroPlayoutDelayEnabled = NO;
+
+static void FlutterWebRTCApplyFieldTrials(void) {
+  // "Key/Value/" pairs. +configureFieldTrials: replaces the whole string and is
+  // read when the factory creates its environment, so every trial has to be in
+  // here, and this has to run before the factory is created.
+  NSMutableString* fieldTrials = [NSMutableString
+      stringWithFormat:@"%@/%@/", kRTCFieldTrialUseNWPathMonitor, kRTCFieldTrialEnabledValue];
+  if (gWarpEnabled) {
+    [fieldTrials
+        appendFormat:@"%@/%@/", kRTCFieldTrialIceHandshakeDtlsKey, kRTCFieldTrialEnabledValue];
+  }
+  if (gZeroPlayoutDelayEnabled) {
+    [fieldTrials appendFormat:@"%@/%@/", kFlutterWebRTCFieldTrialForcePlayoutDelay,
+                              kFlutterWebRTCFieldTrialZeroPlayoutDelayValue];
+  }
+  // Replaces the deprecated RTCInitFieldTrialDictionary(), which set a
+  // process-global instead (bugs.webrtc.org/42220378).
+  [RTCPeerConnectionFactory configureFieldTrials:fieldTrials];
+}
 
 + (FlutterWebRTCPlugin *)sharedSingleton
 {
@@ -258,6 +340,48 @@ static FlutterWebRTCPlugin *sharedSingleton;
   {
     return sharedSingleton;
   }
+}
+
++ (FlutterWebRTCPlugin*)instanceForMessenger:(NSObject<FlutterBinaryMessenger>*)messenger {
+  @synchronized([FlutterWebRTCPlugin class]) {
+    return [instancesByMessenger objectForKey:messenger];
+  }
+}
+
++ (void)setAudioSessionManagementEnabled:(BOOL)enabled {
+  gAudioSessionManagementEnabled = enabled;
+}
+
++ (NSString*)stringForMuteMode:(RTCAudioEngineMuteMode)mode {
+  switch (mode) {
+    case RTCAudioEngineMuteModeVoiceProcessing:
+      return @"voiceProcessing";
+    case RTCAudioEngineMuteModeRestartEngine:
+      return @"restartEngine";
+    case RTCAudioEngineMuteModeInputMixer:
+      return @"inputMixer";
+    case RTCAudioEngineMuteModeUnknown:
+      return @"unknown";
+  }
+}
+
++ (RTCAudioEngineMuteMode)muteModeForString:(NSString*)mode {
+  if ([mode isEqualToString:@"voiceProcessing"]) {
+    return RTCAudioEngineMuteModeVoiceProcessing;
+  } else if ([mode isEqualToString:@"restartEngine"]) {
+    return RTCAudioEngineMuteModeRestartEngine;
+  } else if ([mode isEqualToString:@"inputMixer"]) {
+    return RTCAudioEngineMuteModeInputMixer;
+  }
+  return RTCAudioEngineMuteModeUnknown;
+}
+
++ (void)setAudioDeviceModuleObserver:(id<RTCAudioDeviceModuleDelegate>)observer {
+  gAudioDeviceModuleObserver = observer;
+}
+
+- (BOOL)audioSessionManagementEnabled {
+  return gAudioSessionManagementEnabled;
 }
 
 @synthesize messenger = _messenger;
@@ -281,6 +405,8 @@ static FlutterWebRTCPlugin *sharedSingleton;
 #endif
                                       withTextures:[registrar textures]];
   [registrar addMethodCallDelegate:instance channel:channel];
+  // The iOS engine only calls -detachFromEngineForRegistrar: on published instances.
+  [registrar publish:instance];
 }
 
 - (instancetype)initWithChannel:(FlutterMethodChannel*)channel
@@ -292,7 +418,20 @@ static FlutterWebRTCPlugin *sharedSingleton;
                    withTextures:(NSObject<FlutterTextureRegistry>*)textures {
 
   self = [super init];
-  sharedSingleton = self;
+  @synchronized([FlutterWebRTCPlugin class]) {
+    // First wins. See the sharedSingleton declaration.
+    if (sharedSingleton == nil) {
+      sharedSingleton = self;
+    }
+    if (instancesByMessenger == nil) {
+      instancesByMessenger =
+          [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsWeakMemory |
+                                                 NSPointerFunctionsObjectPointerPersonality
+                                    valueOptions:NSPointerFunctionsWeakMemory
+                                        capacity:0];
+    }
+    [instancesByMessenger setObject:self forKey:messenger];
+  }
 
   FlutterEventChannel* eventChannel =
       [FlutterEventChannel eventChannelWithName:@"FlutterWebRTC.Event" binaryMessenger:messenger];
@@ -311,13 +450,14 @@ static FlutterWebRTCPlugin *sharedSingleton;
 #if TARGET_OS_IPHONE
     _preferredInput = AVAudioSessionPortHeadphones;
     self.viewController = viewController;
-    _platformViewFactory  = [[FLutterRTCVideoPlatformViewFactory alloc] initWithMessenger:messenger];
-    [registrar registerViewFactory:_platformViewFactory withId:FLutterRTCVideoPlatformViewFactoryID];
+#endif
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
+    _platformViewFactory  = [[FlutterRTCVideoPlatformViewFactory alloc] initWithMessenger:messenger];
+    [registrar registerViewFactory:_platformViewFactory withId:FlutterRTCVideoPlatformViewFactoryID];
 #endif
   }
 
-  NSDictionary* fieldTrials = @{kRTCFieldTrialUseNWPathMonitor : kRTCFieldTrialEnabledValue};
-  RTCInitFieldTrialDictionary(fieldTrials);
+  FlutterWebRTCApplyFieldTrials();
 
   self.peerConnections = [NSMutableDictionary new];
   self.localStreams = [NSMutableDictionary new];
@@ -352,6 +492,20 @@ static FlutterWebRTCPlugin *sharedSingleton;
     peerConnection.eventSink = nil;
   }
   _eventSink = nil;
+
+  @synchronized([FlutterWebRTCPlugin class]) {
+    [instancesByMessenger removeObjectForKey:_messenger];
+    if (sharedSingleton == self) {
+      // Hand the slot on, preferring an instance that owns a factory.
+      sharedSingleton = nil;
+      for (id messenger in instancesByMessenger) {
+        FlutterWebRTCPlugin* instance = [instancesByMessenger objectForKey:messenger];
+        if (instance != nil && sharedSingleton.peerConnectionFactory == nil) {
+          sharedSingleton = instance;
+        }
+      }
+    }
+  }
 }
 
 #pragma mark - FlutterStreamHandler methods
@@ -387,8 +541,11 @@ static FlutterWebRTCPlugin *sharedSingleton;
 -(void) initLoggerCallback:(RTCLoggingSeverity)severity {
   if(loggerCallback == nil) {
     loggerCallback = [RTC_OBJC_TYPE(RTCCallbackLogger) new];
+    // The logger is an ivar and keeps this block, so a strong self would be a
+    // retain cycle that keeps the plugin alive after its engine is gone.
+    __weak FlutterWebRTCPlugin* weakSelf = self;
     [loggerCallback start:^(NSString *logMessage) {
-      postEvent(self.eventSink, @{
+      postEvent(weakSelf.eventSink, @{
         @"event" : @"onLogData",
         @"data" : logMessage
       });
@@ -416,23 +573,84 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
 - (void)initialize:(NSArray*)networkIgnoreMask
     bypassVoiceProcessing:(BOOL)bypassVoiceProcessing
-                 severity:(RTCLoggingSeverity)severity {
+                 severity:(RTCLoggingSeverity)severity
+              enableWARP:(BOOL)enableWARP
+        zeroPlayoutDelay:(BOOL)zeroPlayoutDelay {
     // RTCSetMinDebugLogLevel(severity);
     [self initLoggerCallback:severity];
 
     if (!_peerConnectionFactory) {
+        // Field trials have to be in place before the factory builds its transports,
+        // so a later initialize: call cannot change them any more.
+        if (enableWARP != gWarpEnabled || zeroPlayoutDelay != gZeroPlayoutDelayEnabled) {
+          gWarpEnabled = enableWARP;
+          gZeroPlayoutDelayEnabled = zeroPlayoutDelay;
+          FlutterWebRTCApplyFieldTrials();
+        }
+
         VideoDecoderFactory* decoderFactory = [[VideoDecoderFactory alloc] init];
         VideoEncoderFactory* encoderFactory = [[VideoEncoderFactory alloc] init];
 
         VideoEncoderFactorySimulcast* simulcastFactory =
             [[VideoEncoderFactorySimulcast alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
 
+        // Use the AVAudioEngine audio device module on iOS devices and macOS.
+        //
+        // macOS previously used the CoreAudio ADM (value 0) to avoid an
+        // AVAudioIONodeImpl::SetOutputFormat sample-rate assertion when the
+        // microphone toggled during screen share (#1986, #1990). That crash
+        // predates the audio engine stability fixes shipped in WebRTC-SDK
+        // 144.7559.04+ (webrtc-sdk/webrtc#228: guarded connect:to:format:,
+        // state-based voice-processing checks, engine recreate ordering).
+        // The AudioEngine ADM enables platform voice processing (Apple
+        // AEC/NS/AGC) and the audio processing options API on macOS.
+        // iOS devices also require the AudioEngine ADM because the CoreAudio ADM
+        // crashes when NSMicrophoneUsageDescription is absent (#2007, #2009).
+        RTCAudioDeviceModuleType audioDeviceModuleType = RTCAudioDeviceModuleTypeAudioEngine;
+#if TARGET_OS_IOS && TARGET_OS_SIMULATOR
+        // The AudioEngine ADM can expose a zero-rate input on the iOS Simulator.
+        audioDeviceModuleType = RTCAudioDeviceModuleTypePlatformDefault;
+#endif
         _peerConnectionFactory =
-            [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:RTCAudioDeviceModuleTypeAudioEngine
+            [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:audioDeviceModuleType
                                                       bypassVoiceProcessing:bypassVoiceProcessing
                                                              encoderFactory:simulcastFactory
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
+
+        // Take the sharedSingleton slot over from an instance that never
+        // created a factory.
+        @synchronized([FlutterWebRTCPlugin class]) {
+          if (sharedSingleton.peerConnectionFactory == nil) {
+            sharedSingleton = self;
+          }
+        }
+
+        // Allow an embedding plugin (e.g. livekit_client) to own the audio
+        // device module's engine-lifecycle delegate. Only override the observer
+        // when one is registered, leaving default behavior unchanged otherwise.
+        if (gAudioDeviceModuleObserver != nil) {
+            _peerConnectionFactory.audioDeviceModule.observer = gAudioDeviceModuleObserver;
+        }
+
+#if TARGET_OS_OSX
+        // CoreAudio ADM requires explicit device initialization on macOS
+        RTCAudioDeviceModule* audioDeviceModule = [_peerConnectionFactory audioDeviceModule];
+        if (audioDeviceModule) {
+            NSArray* inputDevices = [audioDeviceModule inputDevices];
+            if (inputDevices.count > 0) {
+                RTCIODevice* defaultInput = inputDevices[0];
+                [audioDeviceModule setInputDevice:defaultInput];
+                NSLog(@"CoreAudio ADM: Selected input device: %@", defaultInput.name);
+            }
+            NSArray* outputDevices = [audioDeviceModule outputDevices];
+            if (outputDevices.count > 0) {
+                RTCIODevice* defaultOutput = outputDevices[0];
+                [audioDeviceModule setOutputDevice:defaultOutput];
+                NSLog(@"CoreAudio ADM: Selected output device: %@", defaultOutput.name);
+            }
+        }
+#endif
 
         RTCPeerConnectionFactoryOptions *options = [[RTCPeerConnectionFactoryOptions alloc] init];
         for (NSString* adapter in networkIgnoreMask)
@@ -478,8 +696,26 @@ static FlutterWebRTCPlugin *sharedSingleton;
       severity = [self str2LogSeverity:severityStr];
     }
 
+    // WARP (draft-uberti-tsvwg-warp): shortens the connection setup by running the
+    // DTLS handshake inside the ICE STUN binding exchange. Has to be known here,
+    // the field trial is read before any peer connection is built.
+    BOOL enableWARP = NO;
+    if (options[@"enableWARP"] != nil && [options[@"enableWARP"] isKindOfClass:[NSNumber class]]) {
+      enableWARP = ((NSNumber*)options[@"enableWARP"]).boolValue;
+    }
+
+    // Render frames as soon as they are decoded, trading jitter buffer smoothing
+    // for latency. Same timing constraint as WARP: it is a field trial.
+    BOOL zeroPlayoutDelay = NO;
+    if (options[@"zeroPlayoutDelay"] != nil &&
+        [options[@"zeroPlayoutDelay"] isKindOfClass:[NSNumber class]]) {
+      zeroPlayoutDelay = ((NSNumber*)options[@"zeroPlayoutDelay"]).boolValue;
+    }
+
     [self initialize:networkIgnoreMask bypassVoiceProcessing:enableBypassVoiceProcessing
-                     severity:severity];
+                     severity:severity
+                     enableWARP:enableWARP
+                     zeroPlayoutDelay:zeroPlayoutDelay];
     result(@"");
   } else if ([@"createPeerConnection" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
@@ -515,6 +751,25 @@ static FlutterWebRTCPlugin *sharedSingleton;
     NSDictionary* argsMap = call.arguments;
     NSDictionary* constraints = argsMap[@"constraints"];
     [self getDisplayMedia:constraints result:result];
+  } else if ([@"requestCapturePermission" isEqualToString:call.method]) {
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+    if (@available(macOS 10.15, macCatalyst 13.1, *)) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (CGPreflightScreenCaptureAccess()) {
+          result(@(YES));
+          return;
+        }
+        BOOL granted = CGRequestScreenCaptureAccess();
+        result(@(granted));
+      });
+    } else {
+      result(@(YES));
+    }
+#else
+    result([FlutterError errorWithCode:@"ERROR"
+                               message:@"Not supported on iOS"
+                               details:nil]);
+#endif
   } else if ([@"createLocalMediaStream" isEqualToString:call.method]) {
     [self createLocalMediaStream:result];
   } else if ([@"getSources" isEqualToString:call.method]) {
@@ -848,6 +1103,27 @@ static FlutterWebRTCPlugin *sharedSingleton;
       NSDictionary* capability = KaedeHardwareVideoSettings(args);
       dispatch_async(dispatch_get_main_queue(), ^{ result(capability); });
     });
+  } else if ([@"kaedeVideoDeviceState" isEqualToString:call.method]) {
+    // Kaede: inputs for the adaptive video policy. WebRTC's Apple decoder
+    // factory decodes AV1 with dav1d (software) even where VideoToolbox could.
+    NSMutableDictionary* state = [NSMutableDictionary dictionary];
+    state[@"av1HardwareDecode"] = @NO;
+    BOOL hevc = NO;
+    if (@available(iOS 17.0, tvOS 17.0, macCatalyst 17.0, visionOS 1.0, *)) {
+      for (RTCVideoCodecInfo* info in [[[VideoDecoderFactory alloc] init] supportedCodecs]) {
+        if ([[info.name lowercaseString] isEqualToString:@"h265"]) {
+          // Kaede's HEVC decoder requires hardware for every VT session.
+          hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC);
+          break;
+        }
+      }
+    }
+    state[@"hevcHardwareDecode"] = @(hevc);
+    state[@"thermal"] = @((NSInteger)[NSProcessInfo processInfo].thermalState);
+#if TARGET_OS_IPHONE
+    state[@"lowPower"] = @([NSProcessInfo processInfo].isLowPowerModeEnabled);
+#endif
+    result(state);
   } else if ([@"mediaStreamTrackSetEnable" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* trackId = argsMap[@"trackId"];
@@ -958,24 +1234,39 @@ static FlutterWebRTCPlugin *sharedSingleton;
              [@"peerConnectionDispose" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* peerConnectionId = argsMap[@"peerConnectionId"];
+    BOOL isDispose = [@"peerConnectionDispose" isEqualToString:call.method];
 
     RTCPeerConnection* peerConnection = self.peerConnections[peerConnectionId];
     if (peerConnection) {
+      // Closing twice is harmless, the native peer connection ignores the second call.
       [peerConnection close];
-      [self.peerConnections removeObjectForKey:peerConnectionId];
+      peerConnection.closedByPlugin = YES;
 
       // Clean up peerConnection's streams and tracks
       [peerConnection.remoteStreams removeAllObjects];
       [peerConnection.remoteTracks removeAllObjects];
 
-      // Clean up peerConnection's dataChannels.
+      // Stop delivering data channel events. There is no need to close the
+      // RTCDataChannel because it is owned by the RTCPeerConnection and the
+      // latter will close the former.
       NSMutableDictionary<NSString*, RTCDataChannel*>* dataChannels = peerConnection.dataChannels;
       for (NSString* dataChannelId in dataChannels) {
         dataChannels[dataChannelId].delegate = nil;
-        // There is no need to close the RTCDataChannel because it is owned by the
-        // RTCPeerConnection and the latter will close the former.
       }
-      [dataChannels removeAllObjects];
+
+      if (isDispose) {
+        // Dart cancels its event subscriptions before it calls dispose, so this
+        // is the first point where the stream handlers can go without leaving a
+        // pending cancel unanswered. Releasing them on close would do exactly that.
+        for (NSString* dataChannelId in dataChannels) {
+          [dataChannels[dataChannelId].eventChannel setStreamHandler:nil];
+          dataChannels[dataChannelId].eventChannel = nil;
+        }
+        [dataChannels removeAllObjects];
+        [peerConnection.eventChannel setStreamHandler:nil];
+        peerConnection.eventChannel = nil;
+        [self.peerConnections removeObjectForKey:peerConnectionId];
+      }
     }
     [self deactiveRtcAudioSession];
     result(nil);
@@ -1030,7 +1321,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
     [self rendererSetSrcObject:render stream:videoTrack];
     result(nil);
   }
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE || TARGET_OS_OSX
   else if ([@"videoPlatformViewRendererSetSrcObject" isEqualToString:call.method]) {
       NSDictionary* argsMap = call.arguments;
       NSNumber* viewId = argsMap[@"viewId"];
@@ -1071,7 +1362,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
       NSNumber* viewId = argsMap[@"viewId"];
       FlutterRTCVideoPlatformViewController* render = _platformViewFactory.renders[viewId];
       if(render != nil) {
-        render.videoTrack = nil;
+        [render dispose];
         [_platformViewFactory.renders removeObjectForKey:viewId];
       }
       result(nil);
@@ -1249,8 +1540,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
     NSNumber* enable = argsMap[@"enable"];
     _speakerOn = enable.boolValue;
     _speakerOnButPreferBluetooth = NO;
-    [AudioUtils setSpeakerphoneOn:_speakerOn];
-    postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+    if (self.audioSessionManagementEnabled) {
+      [AudioUtils setSpeakerphoneOn:_speakerOn];
+      postEvent(self.eventSink, @{@"event" : @"onDeviceChange"});
+    }
     result(nil);
   }
   else if ([@"ensureAudioSession" isEqualToString:call.method]) {
@@ -1260,13 +1553,17 @@ static FlutterWebRTCPlugin *sharedSingleton;
   else if ([@"enableSpeakerphoneButPreferBluetooth" isEqualToString:call.method]) {
     _speakerOn = YES;
     _speakerOnButPreferBluetooth = YES;
-    [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+    if (self.audioSessionManagementEnabled) {
+      [AudioUtils setSpeakerphoneOnButPreferBluetooth];
+    }
     result(nil);
   }
   else if([@"setAppleAudioConfiguration" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* configuration = argsMap[@"configuration"];
-    [AudioUtils setAppleAudioConfiguration:configuration];
+    if (self.audioSessionManagementEnabled) {
+      [AudioUtils setAppleAudioConfiguration:configuration];
+    }
     result(nil);
   }
 #endif
@@ -1811,7 +2108,7 @@ static FlutterWebRTCPlugin *sharedSingleton;
       });
     } else if ([@"isVoiceProcessingEnabled" isEqualToString:call.method]) {
       RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
-      NSNumber* admResult = [NSNumber numberWithBool:adm.isVoiceProcessingEnabled];
+      NSNumber* admResult = [NSNumber numberWithBool:adm.isPlatformVoiceProcessingAllowed];
       result(admResult);
     } else if ([@"isVoiceProcessingBypassed" isEqualToString:call.method]) {
       RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
@@ -1822,6 +2119,63 @@ static FlutterWebRTCPlugin *sharedSingleton;
       NSNumber* value = call.arguments[@"value"];
       adm.voiceProcessingBypassed = value.boolValue;
       result(nil);
+    } else if ([@"getMicrophoneMuteMode" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      result([FlutterWebRTCPlugin stringForMuteMode:adm.muteMode]);
+    } else if ([@"setMicrophoneMuteMode" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      NSString* modeString = call.arguments[@"mode"];
+      RTCAudioEngineMuteMode mode = [FlutterWebRTCPlugin muteModeForString:modeString];
+      if (mode == RTCAudioEngineMuteModeUnknown) {
+        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                                   message:[NSString stringWithFormat:@"Error: invalid mute mode: %@", modeString]
+                                   details:nil]);
+        return;
+      }
+      // With mode restartEngine a mute-state transition rebuilds the audio
+      // engine, so keep this off the platform thread like the recording APIs.
+      dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSInteger admResult = [adm setMuteMode:mode];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (admResult == 0) {
+            result(nil);
+          } else {
+            result([FlutterError
+                errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                      message:[NSString stringWithFormat:@"Error: adm api failed with code: %ld",
+                                                         (long)admResult]
+                      details:nil]);
+          }
+        });
+      });
+    } else if ([@"isMicrophoneMuted" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      result([NSNumber numberWithBool:adm.isMicrophoneMuted]);
+    } else if ([@"setMicrophoneMuted" isEqualToString:call.method]) {
+      RTCAudioDeviceModule* adm = _peerConnectionFactory.audioDeviceModule;
+      NSNumber* muted = call.arguments[@"muted"];
+      if (![muted isKindOfClass:[NSNumber class]]) {
+        result([FlutterError errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                                   message:@"Error: muted is required"
+                                   details:nil]);
+        return;
+      }
+      // With mode restartEngine muting rebuilds the audio engine, so keep
+      // this off the platform thread like the recording APIs.
+      dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+        NSInteger admResult = [adm setMicrophoneMuted:muted.boolValue];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (admResult == 0) {
+            result(nil);
+          } else {
+            result([FlutterError
+                errorWithCode:[NSString stringWithFormat:@"%@ failed", call.method]
+                      message:[NSString stringWithFormat:@"Error: adm api failed with code: %ld",
+                                                         (long)admResult]
+                      details:nil]);
+          }
+        });
+      });
     } else {
       if([self handleFrameCryptorMethodCall:call result:result]) {
           return;
@@ -1858,13 +2212,31 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
 - (void)ensureAudioSession {
 #if TARGET_OS_IPHONE
+  if (!self.audioSessionManagementEnabled) {
+    return;
+  }
   [AudioUtils ensureAudioSessionWithRecording:[self hasLocalAudioTrack]];
 #endif
 }
 
+- (BOOL)hasOpenPeerConnection {
+  // Closed connections stay registered until dispose but must not keep the
+  // audio session alive. The flag avoids a blocking signalingState read per
+  // connection on the platform thread.
+  for (RTCPeerConnection* peerConnection in self.peerConnections.allValues) {
+    if (!peerConnection.closedByPlugin) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
 - (void)deactiveRtcAudioSession {
 #if TARGET_OS_IPHONE
-  if (![self hasLocalAudioTrack] && self.peerConnections.count == 0) {
+  if (!self.audioSessionManagementEnabled) {
+    return;
+  }
+  if (![self hasLocalAudioTrack] && ![self hasOpenPeerConnection]) {
     [AudioUtils deactiveRtcAudioSession];
   }
 #endif
@@ -2048,6 +2420,12 @@ static FlutterWebRTCPlugin *sharedSingleton;
   config.enableDscp = YES;
 #endif
 
+  // Enable SNAP (SCTP INIT in SDP), part of WARP.
+  // see https://www.ietf.org/archive/id/draft-hancke-tsvwg-snap-00.html
+  if (gWarpEnabled) {
+    config.enableSctpSnap = YES;
+  }
+
   if (!json) {
     return config;
   }
@@ -2060,6 +2438,11 @@ static FlutterWebRTCPlugin *sharedSingleton;
   if (json[@"audioJitterBufferMaxPackets"] != nil &&
       [json[@"audioJitterBufferMaxPackets"] isKindOfClass:[NSNumber class]]) {
     config.audioJitterBufferMaxPackets = [json[@"audioJitterBufferMaxPackets"] intValue];
+  }
+
+  if (json[@"enableSctpSnap"] != nil &&
+      [json[@"enableSctpSnap"] isKindOfClass:[NSNumber class]]) {
+    config.enableSctpSnap = [json[@"enableSctpSnap"] boolValue];
   }
 
   if (json[@"bundlePolicy"] != nil && [json[@"bundlePolicy"] isKindOfClass:[NSString class]]) {
@@ -2107,6 +2490,11 @@ static FlutterWebRTCPlugin *sharedSingleton;
     } else if ([iceTransportPolicy isEqualToString:@"relay"]) {
       config.iceTransportPolicy = RTCIceTransportPolicyRelay;
     }
+  }
+
+  if (json[@"enableDscp"] != nil && [json[@"enableDscp"] isKindOfClass:[NSNumber class]]) {
+    NSNumber* enableDscp = json[@"enableDscp"];
+    config.enableDscp = [enableDscp boolValue];
   }
 
   if (json[@"rtcpMuxPolicy"] != nil && [json[@"rtcpMuxPolicy"] isKindOfClass:[NSString class]]) {
@@ -2224,6 +2612,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
     BOOL sframeRequireFrameEncryption = NO;
     BOOL srtpEnableEncryptedRtpHeaderExtensions = NO;
     BOOL srtpEnableAes128Sha1_32CryptoCipher = NO;
+    // Defaults from webrtc::CryptoOptions::Srtp: GCM is offered last unless
+    // preferred, and AES128_CM_SHA1_80 (the mandatory-to-implement cipher) is on.
+    BOOL srtpPreferGcmCryptoSuites = NO;
+    BOOL srtpEnableAes128Sha1_80CryptoCipher = YES;
 
     if (options[@"enableGcmCryptoSuites"] != nil &&
         [options[@"enableGcmCryptoSuites"] isKindOfClass:[NSNumber class]]) {
@@ -2249,11 +2641,25 @@ static FlutterWebRTCPlugin *sharedSingleton;
       srtpEnableAes128Sha1_32CryptoCipher = [value boolValue];
     }
 
+    if (options[@"preferGcmCryptoSuites"] != nil &&
+        [options[@"preferGcmCryptoSuites"] isKindOfClass:[NSNumber class]]) {
+      NSNumber* value = options[@"preferGcmCryptoSuites"];
+      srtpPreferGcmCryptoSuites = [value boolValue];
+    }
+
+    if (options[@"enableAes128Sha1_80CryptoCipher"] != nil &&
+        [options[@"enableAes128Sha1_80CryptoCipher"] isKindOfClass:[NSNumber class]]) {
+      NSNumber* value = options[@"enableAes128Sha1_80CryptoCipher"];
+      srtpEnableAes128Sha1_80CryptoCipher = [value boolValue];
+    }
+
     config.cryptoOptions = [[RTCCryptoOptions alloc]
              initWithSrtpEnableGcmCryptoSuites:srtpEnableGcmCryptoSuites
+                     srtpPreferGcmCryptoSuites:srtpPreferGcmCryptoSuites
            srtpEnableAes128Sha1_32CryptoCipher:srtpEnableAes128Sha1_32CryptoCipher
+           srtpEnableAes128Sha1_80CryptoCipher:srtpEnableAes128Sha1_80CryptoCipher
         srtpEnableEncryptedRtpHeaderExtensions:srtpEnableEncryptedRtpHeaderExtensions
-                  sframeRequireFrameEncryption:(BOOL)sframeRequireFrameEncryption];
+                  sframeRequireFrameEncryption:sframeRequireFrameEncryption];
   }
 
   return config;
@@ -2319,10 +2725,6 @@ static FlutterWebRTCPlugin *sharedSingleton;
   for (RTCRtpEncodingParameters* encoding in parameters.encodings) {
     // non-nil values
     NSMutableDictionary* obj = [@{@"active" : @(encoding.isActive)} mutableCopy];
-#if TARGET_OS_IPHONE
-    NSArray* priorities = @[@"very-low", @"low", @"medium", @"high"];
-    obj[@"networkPriority"] = priorities[encoding.networkPriority];
-#endif
     // optional values
     if (encoding.rid != nil)
       [obj setObject:encoding.rid forKey:@"rid"];
@@ -2338,6 +2740,10 @@ static FlutterWebRTCPlugin *sharedSingleton;
       [obj setObject:encoding.scaleResolutionDownBy forKey:@"scaleResolutionDownBy"];
     if (encoding.ssrc != nil)
       [obj setObject:encoding.ssrc forKey:@"ssrc"];
+    if (encoding.scalabilityMode != nil)
+      [obj setObject:encoding.scalabilityMode forKey:@"scalabilityMode"];
+    [obj setObject:[self bitratePriorityToString:encoding.bitratePriority] forKey:@"priority"];
+    [obj setObject:[self rtcPriorityToString:encoding.networkPriority] forKey:@"networkPriority"];
 
     [encodings addObject:obj];
   }
@@ -2362,8 +2768,8 @@ static FlutterWebRTCPlugin *sharedSingleton;
        degradationPreference = @"maintain-resolution";
     } else if ([parameters.degradationPreference intValue] == RTCDegradationPreferenceBalanced) {
        degradationPreference = @"balanced";
-    } else if ([parameters.degradationPreference intValue] == RTCDegradationPreferenceDisabled) {
-       degradationPreference = @"disabled";
+    } else if ([parameters.degradationPreference intValue] == RTCDegradationPreferenceMaintainFramerateAndResolution) {
+       degradationPreference = @"maintain-framerate-and-resolution";
     }
   }
 
@@ -2477,12 +2883,8 @@ static FlutterWebRTCPlugin *sharedSingleton;
   encoding.isActive = YES;
   encoding.scaleResolutionDownBy = [NSNumber numberWithDouble:1.0];
   encoding.numTemporalLayers = [NSNumber numberWithInt:1];
-#if TARGET_OS_IPHONE
-  NSArray* priorities = @[@"very-low", @"low", @"medium", @"high"];
-  NSUInteger priority = [priorities indexOfObject:map[@"networkPriority"] ?: @"low"];
-  encoding.networkPriority = priority == NSNotFound ? RTCPriorityLow : (RTCPriority)priority;
+  encoding.networkPriority = RTCPriorityLow;
   encoding.bitratePriority = 1.0;
-#endif
   [encoding setRid:map[@"rid"]];
 
   if (map[@"active"] != nil) {
@@ -2511,6 +2913,13 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
   if (map[@"scalabilityMode"] != nil) {
     [encoding setScalabilityMode:(NSString*)map[@"scalabilityMode"]];
+  }
+
+  if (map[@"priority"] != nil) {
+    encoding.bitratePriority = [self stringToBitratePriority:(NSString*)map[@"priority"]];
+  }
+  if (map[@"networkPriority"] != nil) {
+    encoding.networkPriority = [self stringToRTCPriority:(NSString*)map[@"networkPriority"]];
   }
 
   return encoding;
@@ -2565,6 +2974,57 @@ static FlutterWebRTCPlugin *sharedSingleton;
   return RTCRtpTransceiverDirectionInactive;
 }
 
+- (RTCPriority)stringToRTCPriority:(NSString*)priority {
+  if ([priority isEqualToString:@"very-low"]) {
+    return RTCPriorityVeryLow;
+  } else if ([priority isEqualToString:@"low"]) {
+    return RTCPriorityLow;
+  } else if ([priority isEqualToString:@"medium"]) {
+    return RTCPriorityMedium;
+  } else if ([priority isEqualToString:@"high"]) {
+    return RTCPriorityHigh;
+  }
+  return RTCPriorityLow;
+}
+
+- (NSString*)rtcPriorityToString:(RTCPriority)priority {
+  switch (priority) {
+    case RTCPriorityVeryLow:
+      return @"very-low";
+    case RTCPriorityLow:
+      return @"low";
+    case RTCPriorityMedium:
+      return @"medium";
+    case RTCPriorityHigh:
+      return @"high";
+  }
+  return @"low";
+}
+
+- (double)stringToBitratePriority:(NSString*)priority {
+  if ([priority isEqualToString:@"very-low"]) {
+    return 0.5;
+  } else if ([priority isEqualToString:@"low"]) {
+    return 1.0;
+  } else if ([priority isEqualToString:@"medium"]) {
+    return 2.0;
+  } else if ([priority isEqualToString:@"high"]) {
+    return 4.0;
+  }
+  return 1.0;
+}
+
+- (NSString*)bitratePriorityToString:(double)bitratePriority {
+  if (bitratePriority <= 0.5) {
+    return @"very-low";
+  } else if (bitratePriority <= 1.0) {
+    return @"low";
+  } else if (bitratePriority <= 2.0) {
+    return @"medium";
+  }
+  return @"high";
+}
+
 - (RTCRtpParameters*)updateRtpParameters:(RTCRtpParameters*)parameters
                                     with:(NSDictionary*)newParameters {
   // current encodings
@@ -2581,8 +3041,8 @@ static FlutterWebRTCPlugin *sharedSingleton;
           parameters.degradationPreference = [NSNumber numberWithInt:RTCDegradationPreferenceMaintainResolution];
       } else if ([degradationPreference isEqualToString:@"balanced"]) {
           parameters.degradationPreference = [NSNumber numberWithInt:RTCDegradationPreferenceBalanced];
-      } else if ([degradationPreference isEqualToString:@"disabled"]) {
-          parameters.degradationPreference = [NSNumber numberWithInt:RTCDegradationPreferenceDisabled];
+      } else if ([degradationPreference isEqualToString:@"maintain-framerate-and-resolution"]) {
+          parameters.degradationPreference = [NSNumber numberWithInt:RTCDegradationPreferenceMaintainFramerateAndResolution];
       }
   }
 
@@ -2613,12 +3073,6 @@ static FlutterWebRTCPlugin *sharedSingleton;
 
     if (currentParams != nil) {
       // update values
-#if TARGET_OS_IPHONE
-      NSArray* priorities = @[@"very-low", @"low", @"medium", @"high"];
-      NSUInteger priority = [priorities indexOfObject:newParams[@"networkPriority"] ?: @""];
-      if (priority != NSNotFound)
-        currentParams.networkPriority = (RTCPriority)priority;
-#endif
       NSNumber* active = [newParams objectForKey:@"active"];
       if (active != nil)
         currentParams.isActive = [active boolValue];
@@ -2637,6 +3091,15 @@ static FlutterWebRTCPlugin *sharedSingleton;
       NSNumber* scaleResolutionDownBy = [newParams objectForKey:@"scaleResolutionDownBy"];
       if (scaleResolutionDownBy != nil)
         currentParams.scaleResolutionDownBy = scaleResolutionDownBy;
+      NSString* scalabilityMode = [newParams objectForKey:@"scalabilityMode"];
+      if (scalabilityMode != nil)
+        [currentParams setScalabilityMode:scalabilityMode];
+      NSString* priority = [newParams objectForKey:@"priority"];
+      if (priority != nil)
+        currentParams.bitratePriority = [self stringToBitratePriority:priority];
+      NSString* networkPriority = [newParams objectForKey:@"networkPriority"];
+      if (networkPriority != nil)
+        currentParams.networkPriority = [self stringToRTCPriority:networkPriority];
     }
   }
 

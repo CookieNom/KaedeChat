@@ -23,11 +23,16 @@ bool lkPlatformIsMobile() => [PlatformType.iOS, PlatformType.android].contains(l
 
 bool lkPlatformIsWebMobile() => lkPlatformIsWebMobileImplementation();
 
+bool lkPlatformIsApple() => [PlatformType.iOS, PlatformType.macOS].contains(lkPlatform());
+
 bool lkPlatformIsDesktop() => [
-      PlatformType.macOS,
-      PlatformType.windows,
-      PlatformType.linux,
-    ].contains(lkPlatform());
+  PlatformType.macOS,
+  PlatformType.windows,
+  PlatformType.linux,
+].contains(lkPlatform());
+
+bool lkPlatformSupportsExplicitAudioRecordingStart() =>
+    !lkPlatformIsTest() && [PlatformType.iOS, PlatformType.macOS, PlatformType.android].contains(lkPlatform());
 
 bool lkPlatformSupportsE2EE() => lkE2EESupportedImplementation();
 
@@ -39,9 +44,7 @@ BrowserVersion lkBrowserVersion() => lkBrowserVersionImplementation();
 
 /// skips stop/replaceTrack for the following platforms and only toggles
 /// track.enabled.
-bool skipStopForTrackMute() =>
-    {PlatformType.windows}.contains(lkPlatform()) ||
-    (lkPlatformIs(PlatformType.web) && [BrowserType.firefox].contains(lkBrowser()));
+bool skipStopForTrackMute() => (lkPlatformIs(PlatformType.web) && [BrowserType.firefox].contains(lkBrowser()));
 
 enum PlatformType { web, windows, linux, macOS, android, fuchsia, iOS }
 

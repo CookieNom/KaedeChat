@@ -13,7 +13,7 @@
 @class FlutterRTCMediaRecorder;
 @class AudioManager;
 
-void postEvent(FlutterEventSink _Nonnull sink, id _Nullable event);
+void postEvent(FlutterEventSink _Nullable sink, id _Nullable event);
 
 typedef void (^CompletionHandler)(void);
 
@@ -63,6 +63,22 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 @property(nonatomic, strong) NSString* _Nonnull focusMode;
 @property(nonatomic, strong) NSString* _Nonnull exposureMode;
 
+@property(nonatomic, readonly) BOOL audioSessionManagementEnabled;
+
+/// Globally enable/disable Flutter WebRTC's own platform audio-session
+/// management (category/mode/focus/routing). Intended to be set once from
+/// native code (e.g. another plugin's registration) before any audio op.
+/// Defaults to YES.
++ (void)setAudioSessionManagementEnabled:(BOOL)enabled;
+
+/// Register a delegate to receive the audio device module's engine-lifecycle
+/// callbacks. Intended to be set once from native code (e.g. another plugin's
+/// registration) before the peer connection factory is created, so the
+/// embedder can own audio-session policy. Held weakly — the caller must retain
+/// the delegate. When set, it takes over the audio device module's `observer`
+/// slot; when unset, the plugin's default observer behavior is unchanged.
++ (void)setAudioDeviceModuleObserver:(id<RTCAudioDeviceModuleDelegate> _Nullable)observer;
+
 @property(nonatomic) BOOL _usingFrontCamera;
 @property(nonatomic) NSInteger _lastTargetWidth;
 @property(nonatomic) NSInteger _lastTargetHeight;
@@ -94,6 +110,17 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 - (RTCRtpSender* _Nullable)getRtpSenderById:(RTCPeerConnection* _Nonnull)peerConnection
                                          Id:(NSString* _Nonnull)Id;
 
+/// Process-wide. The first registered instance, or the one that created the
+/// peer connection factory once any instance has. Nil when no instance is
+/// registered. With more than one Flutter engine this can belong to another
+/// engine, so a caller that knows its engine should prefer
+/// +instanceForMessenger:.
 + (FlutterWebRTCPlugin* _Nullable)sharedSingleton;
+
+/// The instance registered with the engine that owns `messenger` (any
+/// registrar's messenger from that engine works). Nil if that engine has no
+/// instance or has been detached.
++ (FlutterWebRTCPlugin* _Nullable)instanceForMessenger:
+    (NSObject<FlutterBinaryMessenger>* _Nonnull)messenger;
 
 @end

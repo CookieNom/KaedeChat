@@ -25,6 +25,6 @@
                    type:(nonnull NSString*)type;
 
 - (void)dataChannelGetBufferedAmount:(nonnull NSString*)peerConnectionId
-          dataChannelId:(nonnull NSString*)dataChannelId 
+          dataChannelId:(nonnull NSString*)dataChannelId
                 result:(nonnull FlutterResult)result;
 @end

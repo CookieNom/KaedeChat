@@ -38,6 +38,24 @@ Global shortcuts use the X11 backend on Linux, so Wayland sessions may not recei
 push to talk. Voice activity remains available in that case, and the UI reports
 the limitation.
 
+## Native video codecs
+
+Desktop builds use a matching custom WebRTC archive with HEVC enabled. Obtain
+the CI artifact and prepare the pinned SDK as described in
+[codec validation](../../docs/av1-e2ee/README.md#desktop-native-artifacts).
+
+| Platform | Hardware path |
+| --- | --- |
+| Windows | NVIDIA NVENC/NVDEC when its driver supports the codec; Media Foundation/D3D11 across physical adapters for Intel/AMD and other registered hardware |
+| macOS | VideoToolbox H.264/HEVC |
+| Linux | NVIDIA H.264/HEVC/AV1 encode and H.264/HEVC/VP9/AV1 decode; existing VAAPI H.264 encode |
+
+Support is checked per codec, dimensions and scalability mode. NVIDIA has no
+VP9 encoder; VP9 can still serve as the compatible track when upload is limited
+and CPU headroom permits software encoding. HEVC never uses software fallback.
+An installed Windows HEVC extension or a second GPU is not by itself proof of a
+usable hardware path. Missing hardware leaves the compatible stream available.
+
 Windows, macOS, and Linux AppImage builds poll the latest GitHub Release for a
 signed Tauri update. Checking is automatic; installation and restart always require a
 user action. The updater signature is independent of Windows Authenticode and

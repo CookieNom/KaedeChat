@@ -5,6 +5,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mobile_dir="$(cd -- "$script_dir/.." && pwd)"
 repo_dir="$(cd -- "$mobile_dir/.." && pwd)"
 manifest="$repo_dir/desktop/crates/kaede-e2ee-ffi/Cargo.toml"
+# Cargo resolves workspace codec patches even for the MLS-only mobile crate.
+python3 "$repo_dir/desktop/tool/prepare_codecs.py"
 cargo_bin="${CARGO:-$(command -v cargo || true)}"
 rustup_bin="${RUSTUP:-$(command -v rustup || true)}"
 if [[ -z "$cargo_bin" ]]; then

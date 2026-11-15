@@ -1,0 +1,22 @@
+{
+  "sdk_repository": "https://github.com/CookieNom/rust-sdks.git",
+  "sdk_revision": "d245c429f63372ea23cddf3e37761e88903ff5ea",
+  "webrtc_repository": "https://github.com/webrtc-sdk/webrtc.git",
+  "webrtc_revision": "83af826464a3212bf452fcb3a8d0619e7d77a368",
+  "depot_tools_revision": "ec77017fb3e090ff02bffb9c6980ebcdd3006ddc",
+  "cuda_version": "12.9.79",
+  "cuda_headers": {
+    "linux-x64": {
+      "url": "https://files.pythonhosted.org/packages/bc/46/a92db19b8309581092a3add7e6fceb4c301a3fd233969856a8cbf042cd3c/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3"
+    },
+    "linux-arm64": {
+      "url": "https://files.pythonhosted.org/packages/bc/e0/0279bd94539fda525e0c8538db29b72a5a8495b0c12173113471d28bce78/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
+      "sha256": "83469a846206f2a733db0c42e223589ab62fd2fabac4432d2f8802de4bded0a4"
+    },
+    "win-x64": {
+      "url": "https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
+      "sha256": "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 {
   "name": "WebRTC-SDK",
-  "version": "137.7151.04",
-  "summary": "Kaede WebRTC with authenticated AV1 frame encryption.",
+  "version": "150.7871.06",
+  "summary": "Kaede WebRTC with authenticated AV1/HEVC encryption and hardware-only HEVC.",
   "homepage": "https://github.com/webrtc-sdk/webrtc",
   "license": {
     "type": "BSD",
@@ -10,7 +10,7 @@
   "authors": "The WebRTC project authors",
   "source": {
     "git": "https://github.com/webrtc-sdk/webrtc.git",
-    "commit": "a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd"
+    "commit": "83af826464a3212bf452fcb3a8d0619e7d77a368"
   },
   "platforms": {
     "ios": "15.0"

@@ -37,6 +37,15 @@
                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+- (BOOL)closedByPlugin {
+  return [objc_getAssociatedObject(self, _cmd) boolValue];
+}
+
+- (void)setClosedByPlugin:(BOOL)closedByPlugin {
+  objc_setAssociatedObject(self, @selector(closedByPlugin), @(closedByPlugin),
+                           OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 - (NSMutableDictionary<NSString*, RTCDataChannel*>*)dataChannels {
   return objc_getAssociatedObject(self, _cmd);
 }
@@ -574,6 +583,7 @@
   NSString* flutterChannelId = [[NSUUID UUID] UUIDString];
   NSNumber* dataChannelId = [NSNumber numberWithInteger:dataChannel.channelId];
   dataChannel.peerConnectionId = peerConnection.flutterId;
+  dataChannel.eventQueue = nil;
   dataChannel.delegate = self;
   peerConnection.dataChannels[flutterChannelId] = dataChannel;
 
@@ -584,7 +594,6 @@
 
   dataChannel.eventChannel = eventChannel;
   dataChannel.flutterChannelId = flutterChannelId;
-  dataChannel.eventQueue = nil;
 
   dispatch_async(dispatch_get_main_queue(), ^{
     // setStreamHandler on main thread

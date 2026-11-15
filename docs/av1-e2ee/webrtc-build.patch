@@ -1,139 +1,20 @@
-diff --git a/build/.gclient b/build/.gclient
-index a2f863d..6c0264b 100644
---- a/build/.gclient
-+++ b/build/.gclient
-@@ -5,5 +5,7 @@ solutions = [
-     "deps_file": "DEPS",
-     "managed": False,
-     "custom_deps": {},
-+    # M137's only unnamed hook downloads test audio/video, unused by these builds.
-+    "custom_hooks": [{"name": ""}],
-   },
- ]
 diff --git a/build/VERSION b/build/VERSION
-index 56a0424..ff13c39 100644
 --- a/build/VERSION
 +++ b/build/VERSION
 @@ -1,4 +1,4 @@
--WEBRTC_BUILD_VERSION=150.7871.01
--WEBRTC_VERSION=150.7871.01
--WEBRTC_READABLE_VERSION=M150.7871@{#1}
--WEBRTC_COMMIT=73cb8180f7258ee292878d6edd05177f41883962
-+WEBRTC_BUILD_VERSION=137.7151.04.1
-+WEBRTC_VERSION=137.7151.04
-+WEBRTC_READABLE_VERSION=M137-Kaede-AV1-E2EE
-+WEBRTC_COMMIT=a4bd28d99eb9ed3bc8e41ce7b9ce7254ee7308bd
+-WEBRTC_BUILD_VERSION=150.7871.06
++WEBRTC_BUILD_VERSION=150.7871.06.1
+ WEBRTC_VERSION=150.7871.06
+-WEBRTC_READABLE_VERSION=M150.7871@{#6}
++WEBRTC_READABLE_VERSION=M150.7871-Kaede-Video-1
+ WEBRTC_COMMIT=83af826464a3212bf452fcb3a8d0619e7d77a368
 diff --git a/build/patches/kaede_av1_e2ee.patch b/build/patches/kaede_av1_e2ee.patch
 new file mode 100644
-index 0000000..94ed8b8
 --- /dev/null
 +++ b/build/patches/kaede_av1_e2ee.patch
-@@ -0,0 +1,223 @@
-+--- a/api/crypto/frame_crypto_transformer.cc
-++++ b/api/crypto/frame_crypto_transformer.cc
-+@@ -1,3 +1,4 @@
-++#include "api/crypto/av1_frame.h"
-+ /*
-+  * Copyright 2022 LiveKit
-+  *
-+@@ -490,7 +491,13 @@
-+   }
-+ 
-+   auto key_set = key_handler->GetKeySet(key_index_);
-+-  uint8_t unencrypted_bytes = get_unencrypted_bytes(frame.get(), type_);
-++  const bool av1 = type_ == MediaType::kVideoFrame &&
-++      static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1;
-++  kaede_av1::Layout av1_layout;
-++  if (av1 && (algorithm_ != Algorithm::kAesGcm || !kaede_av1::Parse(std::span<const uint8_t>(data_in.data(), data_in.size()), false, key_index_, av1_layout))) return;
-++  size_t unencrypted_bytes = av1 ? 0 : get_unencrypted_bytes(frame.get(), type_);
-++  if (unencrypted_bytes > data_in.size()) return;
-++
-+ 
-+   rtc::Buffer frame_header(unencrypted_bytes);
-+   for (size_t i = 0; i < unencrypted_bytes; i++) {
-+@@ -507,6 +514,10 @@
-+     payload[i - unencrypted_bytes] = data_in[i];
-+   }
-+ 
-++  if (av1) {
-++    frame_header.SetData(av1_layout.aad.data(), av1_layout.aad.size());
-++    payload.SetData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
-++  }
-+   std::vector<uint8_t> buffer;
-+   if (AesEncryptDecrypt(EncryptOrDecrypt::kEncrypt, algorithm_,
-+                         key_set->encryption_key, iv, frame_header, payload,
-+@@ -528,13 +539,17 @@
-+     } else if (FrameIsH265(frame.get(), type_)) {
-+       H265::WriteRbsp(data_without_header.data(), data_without_header.size(),
-+                       &data_out);
-+-    } else {
-++    } else if (!av1) {
-+       data_out.AppendData(data_without_header);
-+       RTC_CHECK_EQ(data_out.size(), frame_header.size() +
-+                                         encrypted_payload.size() + iv.size() +
-+                                         frame_trailer.size());
-+     }
-+ 
-++    if (av1) {
-++      if (!kaede_av1::Seal(av1_layout, buffer, std::span<const uint8_t>(iv.data(), iv.size()))) return;
-++      data_out.SetData(av1_layout.frame.data(), av1_layout.frame.size());
-++    }
-+     frame->SetData(data_out);
-+ 
-+     if (last_enc_error_ != FrameCryptionState::kOk) {
-+@@ -590,7 +605,7 @@
-+   }
-+ 
-+   auto uncrypted_magic_bytes = key_provider_->options().uncrypted_magic_bytes;
-+-  if (uncrypted_magic_bytes.size() > 0 &&
-++  if (!(type_ == MediaType::kVideoFrame && static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1) && uncrypted_magic_bytes.size() > 0 &&
-+       data_in.size() >= uncrypted_magic_bytes.size()) {
-+     auto tmp = data_in.subview(data_in.size() - (uncrypted_magic_bytes.size()),
-+                                uncrypted_magic_bytes.size());
-+@@ -614,7 +629,23 @@
-+     }
-+   }
-+ 
-+-  uint8_t unencrypted_bytes = get_unencrypted_bytes(frame.get(), type_);
-++  const bool av1 = type_ == MediaType::kVideoFrame &&
-++      static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1;
-++  kaede_av1::Layout av1_layout;
-++  rtc::Buffer av1_wire;
-++  if (av1) {
-++    if (algorithm_ != Algorithm::kAesGcm || !kaede_av1::Parse(std::span<const uint8_t>(data_in.data(), data_in.size()), true, 0, av1_layout)) return;
-++    av1_wire.AppendData(av1_layout.aad.data(), av1_layout.aad.size());
-++    av1_wire.AppendData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
-++    av1_wire.AppendData(av1_layout.tag.data(), av1_layout.tag.size());
-++    av1_wire.AppendData(av1_layout.iv.data(), av1_layout.iv.size());
-++    const uint8_t trailer[] = {12, av1_layout.key_index};
-++    av1_wire.AppendData(trailer, 2);
-++    data_in = rtc::ArrayView<const uint8_t>(av1_wire.data(), av1_wire.size());
-++  }
-++  size_t unencrypted_bytes = av1 ? av1_layout.aad.size() : get_unencrypted_bytes(frame.get(), type_);
-++  if (unencrypted_bytes > data_in.size() || data_in.size() - unencrypted_bytes < 30) return;
-++
-+ 
-+   rtc::Buffer frame_header(unencrypted_bytes);
-+   for (size_t i = 0; i < unencrypted_bytes; i++) {
-+@@ -684,6 +715,7 @@
-+         H265::ParseRbsp(encrypted_buffer.data(), encrypted_buffer.size()));
-+   }
-+ 
-++  if (encrypted_buffer.size() < size_t(ivLength) + 2 + 16) return;
-+   rtc::Buffer encrypted_payload(encrypted_buffer.size() - ivLength - 2);
-+   for (size_t i = 0; i < encrypted_payload.size(); i++) {
-+     encrypted_payload[i] = encrypted_buffer[i];
-+@@ -762,6 +794,10 @@
-+   rtc::Buffer data_out;
-+   data_out.AppendData(frame_header);
-+   data_out.AppendData(payload);
-++  if (av1) {
-++    if (!av1_layout.Scatter(buffer)) return;
-++    data_out.SetData(av1_layout.frame.data(), av1_layout.frame.size());
-++  }
-+   frame->SetData(data_out);
-+ 
-+   if (last_dec_error_ != FrameCryptionState::kOk) {
+@@ -0,0 +1,575 @@
++diff --git a/api/crypto/av1_frame.h b/api/crypto/av1_frame.h
++new file mode 100644
 +--- /dev/null
 ++++ b/api/crypto/av1_frame.h
 +@@ -0,0 +1,115 @@
@@ -252,11 +133,465 @@ index 0000000..94ed8b8
 ++}
 ++} // namespace kaede_av1
 ++#endif
++diff --git a/api/crypto/frame_crypto_transformer.cc b/api/crypto/frame_crypto_transformer.cc
++--- a/api/crypto/frame_crypto_transformer.cc
+++++ b/api/crypto/frame_crypto_transformer.cc
++@@ -15,6 +15,8 @@
++  */
++
++ #include "api/crypto/frame_crypto_transformer.h"
+++#include "api/crypto/av1_frame.h"
+++#include "api/crypto/h26x_frame.h"
++
++ #include <openssl/aes.h>
++ #include <openssl/digest.h>
++@@ -155,82 +157,17 @@
++   return false;
++ }
++
++-uint8_t get_unencrypted_bytes(webrtc::TransformableFrameInterface* frame,
++-                              webrtc::FrameCryptorTransformer::MediaType type) {
++-  uint8_t unencrypted_bytes = 0;
++-  switch (type) {
++-    case webrtc::FrameCryptorTransformer::MediaType::kAudioFrame:
++-      unencrypted_bytes = 1;
++-      break;
++-    case webrtc::FrameCryptorTransformer::MediaType::kVideoFrame: {
++-      auto videoFrame =
++-          static_cast<webrtc::TransformableVideoFrameInterface*>(frame);
++-      if (videoFrame->header().codec ==
++-          webrtc::VideoCodecType::kVideoCodecAV1) {
++-        unencrypted_bytes = 0;
++-      } else if (videoFrame->header().codec ==
++-                 webrtc::VideoCodecType::kVideoCodecVP8) {
++-        unencrypted_bytes = videoFrame->IsKeyFrame() ? 10 : 3;
++-      } else if (videoFrame->header().codec ==
++-                 webrtc::VideoCodecType::kVideoCodecH264) {
++-        std::span<const uint8_t> data_in = frame->GetData();
++-        std::vector<webrtc::H264::NaluIndex> nalu_indices =
++-            webrtc::H264::FindNaluIndices(data_in);
++-
++-        int idx = 0;
++-        for (const auto& index : nalu_indices) {
++-          std::span<const uint8_t> slice =
++-              data_in.subspan(index.payload_start_offset);
++-          webrtc::H264::NaluType nalu_type =
++-              webrtc::H264::ParseNaluType(slice[0]);
++-          switch (nalu_type) {
++-            case webrtc::H264::NaluType::kIdr:
++-            case webrtc::H264::NaluType::kSlice:
++-              unencrypted_bytes = index.payload_start_offset + 2;
++-              RTC_LOG(LS_INFO)
++-                  << "NonParameterSetNalu::payload_size: " << index.payload_size
++-                  << ", nalu_type " << nalu_type << ", NaluIndex [" << idx++
++-                  << "] offset: " << index.payload_start_offset;
++-              return unencrypted_bytes;
++-            default:
++-              break;
++-          }
++-        }
++-#ifdef RTC_ENABLE_H265
++-      } else if (videoFrame->header().codec ==
++-                 webrtc::VideoCodecType::kVideoCodecH265) {
++-        std::span<const uint8_t> data_in = frame->GetData();
++-        std::vector<webrtc::H265::NaluIndex> nalu_indices =
++-            webrtc::H265::FindNaluIndices(data_in);
++-
++-        int idx = 0;
++-        for (const auto& index : nalu_indices) {
++-          std::span<const uint8_t> slice =
++-              data_in.subspan(index.payload_start_offset);
++-          webrtc::H265::NaluType nalu_type =
++-              webrtc::H265::ParseNaluType(slice[0]);
++-          if (IsH265SliceNalu(nalu_type)) {
++-            // H.265 has a 2-byte NALU header, so unencrypted bytes = offset +
++-            // header size
++-            unencrypted_bytes =
++-                index.payload_start_offset + webrtc::H265::kNaluHeaderSize;
++-            RTC_LOG(LS_INFO)
++-                << "H265 NonParameterSetNalu::payload_size: "
++-                << index.payload_size << ", nalu_type "
++-                << static_cast<int>(nalu_type) << ", NaluIndex [" << idx++
++-                << "] offset: " << index.payload_start_offset
++-                << ", unencrypted_bytes: " << unencrypted_bytes;
++-            return unencrypted_bytes;
++-          }
++-        }
++-#endif // RTC_ENABLE_H265
++-      }
++-      break;
++-    }
++-    default:
++-      break;
++-  }
++-  return unencrypted_bytes;
+++size_t get_unencrypted_bytes(webrtc::TransformableFrameInterface* frame,
+++                             webrtc::FrameCryptorTransformer::MediaType type) {
+++  if (type == webrtc::FrameCryptorTransformer::MediaType::kAudioFrame) return 1;
+++  if (type != webrtc::FrameCryptorTransformer::MediaType::kVideoFrame) return 0;
+++  const auto* video = static_cast<webrtc::TransformableVideoFrameInterface*>(frame);
+++  if (video->header().codec == webrtc::kVideoCodecVP8) return video->IsKeyFrame() ? 10 : 3;
+++  if (FrameIsH264(frame, type) || FrameIsH265(frame, type)) {
+++    const auto data = frame->GetData();
+++    return kaede_h26x::ClearPrefix(data, FrameIsH265(frame, type)).value_or(data.size() + 1);
+++  }
+++  return 0;
++ }
++
++ int DeriveHkdfSha256FromSecret(const std::vector<uint8_t>& secret,
++@@ -562,7 +499,12 @@
++   }
++
++   auto key_set = key_handler->GetKeySet(key_index_);
++-  uint8_t unencrypted_bytes = get_unencrypted_bytes(frame.get(), type_);
+++  const bool av1 = type_ == MediaType::kVideoFrame &&
+++      static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1;
+++  kaede_av1::Layout av1_layout;
+++  if (av1 && (algorithm_ != Algorithm::kAesGcm || !kaede_av1::Parse(data_in, false, key_index_, av1_layout))) return;
+++  size_t unencrypted_bytes = av1 ? 0 : get_unencrypted_bytes(frame.get(), type_);
+++  if (unencrypted_bytes > data_in.size()) return;
++
++   webrtc::Buffer frame_header =
++       webrtc::Buffer::CreateUninitializedWithSize(unencrypted_bytes);
++@@ -570,6 +512,12 @@
++     frame_header[i] = data_in[i];
++   }
++
+++  if (FrameIsH264(frame.get(), type_) || FrameIsH265(frame.get(), type_)) {
+++    // RTP reconstructs four-byte start codes before the receiver authenticates the header.
+++    const auto normalized = kaede_h26x::NormalizeHeader(std::span(data_in).first(unencrypted_bytes));
+++    frame_header.SetData(normalized.data(), normalized.size());
+++  }
+++
++   webrtc::Buffer frame_trailer = webrtc::Buffer::CreateUninitializedWithSize(2);
++   frame_trailer[0] = getIvSize();
++   frame_trailer[1] = key_index_;
++@@ -581,6 +529,10 @@
++     payload[i - unencrypted_bytes] = data_in[i];
++   }
++
+++  if (av1) {
+++    frame_header.SetData(av1_layout.aad.data(), av1_layout.aad.size());
+++    payload.SetData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
+++  }
++   // A receiver reads pic_parameter_set_id from an H.264 IDR slice before the
++   // decrypt transform, and drops the keyframe if the id names an unknown PPS.
++   // Some encoders (Intel Quick Sync) put the id past the unencrypted bytes, so
++@@ -632,13 +584,17 @@
++       H265::WriteRbsp(data_without_header.data(), data_without_header.size(),
++                       &data_out);
++ #endif // RTC_ENABLE_H265
++-    } else {
+++    } else if (!av1) {
++       data_out.AppendData(data_without_header);
++       RTC_CHECK_EQ(data_out.size(), frame_header.size() +
++                                         encrypted_payload.size() + iv.size() +
++                                         frame_trailer.size());
++     }
++
+++    if (av1) {
+++      if (!kaede_av1::Seal(av1_layout, buffer, iv)) return;
+++      data_out.SetData(av1_layout.frame.data(), av1_layout.frame.size());
+++    }
++     frame->SetData(data_out);
++
++     if (last_enc_error_ != FrameCryptionState::kOk) {
++@@ -730,20 +686,31 @@
++     }
++   }
++
++-  uint8_t unencrypted_bytes = get_unencrypted_bytes(frame.get(), type_);
++-
++-  // The frame comes from the network: make sure that it can hold the header,
++-  // the IV, the trailer and the AES-GCM tag before any offset is computed.
++-  if (data_in.size() <
++-      unencrypted_bytes + getIvSize() + 2 + kAesGcmTagLengthBytes) {
++-    RTC_LOG(LS_WARNING) << "FrameCryptorTransformer::decryptFrame() frame "
++-                           "too short, size "
++-                        << data_in.size();
++-    if (last_dec_error_ != FrameCryptionState::kDecryptionFailed) {
++-      last_dec_error_ = FrameCryptionState::kDecryptionFailed;
++-      onFrameCryptionStateChanged(last_dec_error_);
++-    }
++-    return;
+++  const bool av1 = type_ == MediaType::kVideoFrame &&
+++      static_cast<TransformableVideoFrameInterface*>(frame.get())->header().codec == kVideoCodecAV1;
+++  kaede_av1::Layout av1_layout;
+++  webrtc::Buffer av1_wire;
+++  if (av1) {
+++    if (algorithm_ != Algorithm::kAesGcm || !kaede_av1::Parse(data_in, true, 0, av1_layout)) return;
+++    av1_wire.AppendData(av1_layout.aad.data(), av1_layout.aad.size());
+++    av1_wire.AppendData(av1_layout.protected_bytes.data(), av1_layout.protected_bytes.size());
+++    av1_wire.AppendData(av1_layout.tag.data(), av1_layout.tag.size());
+++    av1_wire.AppendData(av1_layout.iv.data(), av1_layout.iv.size());
+++    const uint8_t trailer[] = {12, av1_layout.key_index};
+++    av1_wire.AppendData(trailer, 2);
+++    data_in = av1_wire;
+++  }
+++  size_t unencrypted_bytes = av1 ? av1_layout.aad.size() : get_unencrypted_bytes(frame.get(), type_);
+++  if (unencrypted_bytes > data_in.size() || data_in.size() - unencrypted_bytes < 30) return;
+++
+++  webrtc::Buffer unescaped_wire;
+++  if ((FrameIsH264(frame.get(), type_) || FrameIsH265(frame.get(), type_)) &&
+++      NeedsRbspUnescaping(data_in.subspan(unencrypted_bytes))) {
+++    unescaped_wire.AppendData(data_in.subspan(0, unencrypted_bytes));
+++    const auto clear = H264::ParseRbsp(data_in.data() + unencrypted_bytes, data_in.size() - unencrypted_bytes);
+++    unescaped_wire.AppendData(clear.data(), clear.size());
+++    data_in = unescaped_wire;
+++    if (data_in.size() - unencrypted_bytes < 30) return;
++   }
++
++   webrtc::Buffer frame_header =
++@@ -803,18 +770,6 @@
++       webrtc::Buffer::CreateUninitializedWithSize(data_in.size() - unencrypted_bytes);
++   for (size_t i = unencrypted_bytes; i < data_in.size(); i++) {
++     encrypted_buffer[i - unencrypted_bytes] = data_in[i];
++-  }
++-
++-  if (FrameIsH264(frame.get(), type_) &&
++-      NeedsRbspUnescaping(encrypted_buffer)) {
++-    encrypted_buffer.SetData(
++-        H264::ParseRbsp(encrypted_buffer.data(), encrypted_buffer.size()));
++-#ifdef RTC_ENABLE_H265
++-  } else if (FrameIsH265(frame.get(), type_) &&
++-             NeedsRbspUnescaping(encrypted_buffer)) {
++-    encrypted_buffer.SetData(
++-        H265::ParseRbsp(encrypted_buffer.data(), encrypted_buffer.size()));
++-#endif // RTC_ENABLE_H265
++   }
++
++   // RBSP unescaping can make the buffer shorter than the check above allowed.
++@@ -909,6 +864,10 @@
++   webrtc::Buffer data_out;
++   data_out.AppendData(frame_header);
++   data_out.AppendData(payload);
+++  if (av1) {
+++    if (!av1_layout.Scatter(buffer)) return;
+++    data_out.SetData(av1_layout.frame.data(), av1_layout.frame.size());
+++  }
++   frame->SetData(data_out);
++
++   if (last_dec_error_ != FrameCryptionState::kOk) {
++diff --git a/api/crypto/h26x_frame.h b/api/crypto/h26x_frame.h
++new file mode 100644
++--- /dev/null
+++++ b/api/crypto/h26x_frame.h
++@@ -0,0 +1,79 @@
+++// Copyright 2026 Kaede Chat contributors. SPDX-License-Identifier: Apache-2.0
+++#pragma once
+++#include <cstddef>
+++#include <cstdint>
+++#include <optional>
+++#include <span>
+++#include <vector>
+++
+++namespace kaede_h26x {
+++inline size_t StartCode(std::span<const uint8_t> data, size_t offset) {
+++  if (offset + 3 <= data.size() && data[offset] == 0 && data[offset + 1] == 0) {
+++    if (data[offset + 2] == 1) return 3;
+++    if (offset + 4 <= data.size() && data[offset + 2] == 0 && data[offset + 3] == 1) return 4;
+++  }
+++  return 0;
+++}
+++
+++inline std::optional<size_t> ClearPrefix(std::span<const uint8_t> data, bool hevc) {
+++  if (!StartCode(data, 0)) return std::nullopt;
+++  for (size_t offset = 0; offset < data.size(); ++offset) {
+++    const size_t start = StartCode(data, offset);
+++    if (!start) continue;
+++    offset += start;
+++    if (offset + 2 > data.size()) return std::nullopt;
+++    const uint8_t type = hevc ? (data[offset] >> 1) & 0x3f : data[offset] & 0x1f;
+++    const bool slice = hevc ? (type <= 9 || (type >= 16 && type <= 21)) : (type == 1 || type == 5);
+++    if (slice) return offset + 2;
+++  }
+++  return std::nullopt;
+++}
+++
+++inline std::vector<uint8_t> NormalizeHeader(std::span<const uint8_t> header) {
+++  std::vector<uint8_t> result;
+++  result.reserve(header.size());
+++  for (size_t offset = 0; offset < header.size();) {
+++    const size_t start = StartCode(header, offset);
+++    if (start) {
+++      result.insert(result.end(), {0, 0, 0, 1});
+++      offset += start;
+++    } else {
+++      result.push_back(header[offset++]);
+++    }
+++  }
+++  return result;
+++}
+++// Keep the legacy two-byte wire prefix while hardware H.264 receivers inspect PPS ids.
+++inline std::optional<uint32_t> H264PpsId(std::span<const uint8_t> nalu) {
+++  if (nalu.empty() || (nalu[0] & 0x1f) != 5) return std::nullopt;
+++  std::vector<uint8_t> rbsp;
+++  for (size_t i = 1; i < nalu.size() && i < 17; ++i) {
+++    if (i >= 3 && nalu[i] == 3 && nalu[i - 1] == 0 && nalu[i - 2] == 0) continue;
+++    rbsp.push_back(nalu[i]);
+++  }
+++  size_t bit = 0;
+++  auto read = [&]() -> std::optional<uint32_t> {
+++    if (bit >= rbsp.size() * 8) return std::nullopt;
+++    const size_t current = bit++;
+++    return (rbsp[current / 8] >> (7 - (current % 8))) & 1;
+++  };
+++  uint32_t value = 0;
+++  for (int field = 0; field < 3; ++field) {
+++    size_t zeros = 0;
+++    while (true) {
+++      const auto next = read();
+++      if (!next || zeros >= 31) return std::nullopt;
+++      if (*next) break;
+++      ++zeros;
+++    }
+++    value = 1;
+++    for (size_t i = 0; i < zeros; ++i) {
+++      const auto next = read();
+++      if (!next) return std::nullopt;
+++      value = (value << 1) | *next;
+++    }
+++    --value;
+++  }
+++  return value;
+++}
+++}  // namespace kaede_h26x
++diff --git a/api/crypto/h26x_frame_test.cpp b/api/crypto/h26x_frame_test.cpp
++new file mode 100644
++--- /dev/null
+++++ b/api/crypto/h26x_frame_test.cpp
++@@ -0,0 +1,35 @@
+++// Copyright 2026 Kaede Chat contributors. SPDX-License-Identifier: Apache-2.0
+++#include "h26x_frame.h"
+++#include <cassert>
+++
+++int main() {
+++  for (bool hevc : {false, true}) {
+++    for (size_t length : {3, 4}) {
+++      std::vector<uint8_t> frame(length - 1, 0);
+++      frame.push_back(1);
+++      frame.push_back(hevc ? 0x40 : 0x67);
+++      frame.push_back(1);
+++      frame.insert(frame.end(), 300, 0x55);
+++      frame.insert(frame.end(), length - 1, 0);
+++      frame.push_back(1);
+++      frame.push_back(hevc ? 0x26 : 0x65);
+++      frame.push_back(1);
+++      const size_t prefix = frame.size();
+++      frame.insert(frame.end(), {0x80, 11, 22, 33, 44});
+++      assert(kaede_h26x::ClearPrefix(frame, hevc) == prefix);
+++      const auto header = kaede_h26x::NormalizeHeader(std::span(frame).first(prefix));
+++      assert(header.size() == prefix + 2 * (4 - length));
+++      assert(kaede_h26x::ClearPrefix(header, hevc) == header.size());
+++      assert(kaede_h26x::NormalizeHeader(header) == header);
+++      assert(!kaede_h26x::ClearPrefix(std::span(frame).first(prefix - 1), hevc));
+++    }
+++  }
+++  assert(!kaede_h26x::ClearPrefix({}, true));
+++  const uint8_t invalid[] = {0, 0, 1};
+++  assert(!kaede_h26x::ClearPrefix(invalid, true));
+++  const uint8_t intel[] = {0x65, 0x88, 0x80, 0x40, 0x87, 0x0a};
+++  const uint8_t changed[] = {0x65, 0x88, 0x5f, 0xff};
+++  assert(kaede_h26x::H264PpsId(intel) == 0);
+++  assert(kaede_h26x::H264PpsId(changed) == 1);
+++  assert(!kaede_h26x::H264PpsId(std::span(intel).first(2)));
+++}
++diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm
++--- a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm
+++++ b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm
++@@ -49,6 +49,12 @@
++       addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoEncoderAV1) supportedCodecs]];
++ #endif
++
+++  if (@available(iOS 17.4, macCatalyst 17.4, macOS 10.13, tvOS 17.4, visionOS 1.1, *)) {
+++    [result addObject:[[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc]
+++        initWithName:RTC_CONSTANT_TYPE(RTCVideoCodecH265Name)
+++        parameters:@{@"profile-id": @"1", @"tier-flag": @"0", @"level-id": @"153"}
+++        scalabilityModes:@[@"L1T1"]]];
+++  }
++   return result;
++ }
++
++diff --git a/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm b/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
++--- a/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
+++++ b/sdk/objc/components/video_codec/RTCVideoDecoderH265.mm
++@@ -436,12 +436,32 @@
++       h265DecompressionOutputCallback,
++       (__bridge void *)self,
++   };
++-  OSStatus status = VTDecompressionSessionCreate(nullptr, _videoFormat, nullptr, attributes,
++-                                                 &record, &_decompressionSession);
+++  NSDictionary* decoderSpecs;
+++  if (@available(iOS 17.0, macCatalyst 17.0, macOS 10.13, tvOS 17.0, visionOS 1.0, *)) {
+++    decoderSpecs = @{
+++      (__bridge NSString*)kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: @YES
+++    };
+++  } else {
+++    CFRelease(attributes);
+++    return WEBRTC_VIDEO_CODEC_ERROR;
+++  }
+++  OSStatus status = VTDecompressionSessionCreate(nullptr, _videoFormat,
+++      (__bridge CFDictionaryRef)decoderSpecs, attributes, &record, &_decompressionSession);
++   CFRelease(attributes);
++   if (status != noErr) {
++     [self destroyDecompressionSession];
++     return WEBRTC_VIDEO_CODEC_ERROR;
+++  }
+++  if (@available(iOS 17.0, macCatalyst 17.0, macOS 10.13, tvOS 17.0, visionOS 1.0, *)) {
+++    CFBooleanRef hardware = nullptr;
+++    status = VTSessionCopyProperty(_decompressionSession,
+++        kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder, kCFAllocatorDefault, &hardware);
+++    const bool proven = status == noErr && hardware && CFBooleanGetValue(hardware);
+++    if (hardware) CFRelease(hardware);
+++    if (!proven) {
+++      [self destroyDecompressionSession];
+++      return WEBRTC_VIDEO_CODEC_ERROR;
+++    }
++   }
++   [self configureDecompressionSession];
++
++diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm b/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
++--- a/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
+++++ b/sdk/objc/components/video_codec/RTCVideoEncoderH265.mm
++@@ -388,8 +388,13 @@
++
++   if (@available(iOS 17.4, macCatalyst 17.4, macOS 10.9, tvOS 17.4, visionOS 1.1, *)) {
++     CFDictionarySetValue(encoder_specs,
++-                         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+++                         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
++                          kCFBooleanTrue);
+++  } else {
+++    // Older iOS cannot prove or enforce hardware HEVC; keep its compatible track.
+++    CFRelease(encoder_specs);
+++    CFRelease(sourceAttributes);
+++    return WEBRTC_VIDEO_CODEC_ERROR;
++   }
++
++   // kVTVideoEncoderSpecification_EnableLowLatencyRateControl restricts the encoder to "High
++@@ -429,13 +434,18 @@
++     status = VTSessionCopyProperty(_compressionSession,
++                                    kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
++                                    kCFAllocatorDefault, &hwaccl_enabled);
++-    if (status == noErr && (CFBooleanGetValue(hwaccl_enabled))) {
+++    const bool hardware = status == noErr && hwaccl_enabled && CFBooleanGetValue(hwaccl_enabled);
+++    if (hardware) {
++       RTC_LOG(LS_INFO) << "Compression session created with hw accl enabled";
++     } else {
++       RTC_LOG(LS_INFO) << "Compression session created with hw accl disabled";
++     }
++     if (hwaccl_enabled) {
++       CFRelease(hwaccl_enabled);
+++    }
+++    if (!hardware) {
+++      [self destroyCompressionSession];
+++      return WEBRTC_VIDEO_CODEC_ERROR;
++     }
++   }
++   [self configureCompressionSession];
 diff --git a/build/run.py b/build/run.py
-index b95533a..3588ed6 100644
 --- a/build/run.py
 +++ b/build/run.py
-@@ -218,7 +218,7 @@ PATCH_INFO = {
+@@ -218,7 +218,7 @@
  }
  
  PATCHES = {
@@ -265,20 +600,15 @@ index b95533a..3588ed6 100644
      'apple_prefixed': [
          'apple_prefix.patch',
      ],
-@@ -246,11 +246,7 @@ PATCHES = {
-         'add_license_dav1d.patch',
+@@ -247,6 +247,7 @@
          'fix_mocks.patch',
      ],
--    'android': [
--        'add_license_dav1d.patch',
--        'android_webrtc_version.patch',
--        'fix_mocks.patch',
--    ],
-+    'android': ['kaede_av1_e2ee.patch'],
-     'android_prefixed': [
+     'android': [
++        'kaede_av1_e2ee.patch',
          'add_license_dav1d.patch',
          'android_webrtc_version.patch',
-@@ -332,11 +328,11 @@ def get_webrtc(source_dir, patch_dir, version, target,
+         'fix_mocks.patch',
+@@ -332,11 +333,11 @@
          with cd(webrtc_source_dir):
              cmd(['gclient'])
              shutil.copyfile(os.path.join(BASE_DIR, '.gclient'), '.gclient')
@@ -292,7 +622,7 @@ index b95533a..3588ed6 100644
                  with open('.gclient', 'a') as f:
                      f.write("target_os = [ 'ios' ]\n")
              fetch = True
-@@ -344,7 +340,7 @@ def get_webrtc(source_dir, patch_dir, version, target,
+@@ -344,7 +345,7 @@
      src_dir = os.path.join(webrtc_source_dir, 'src')
      if fetch:
          with cd(src_dir):
@@ -301,7 +631,7 @@ index b95533a..3588ed6 100644
              if version == 'HEAD':
                  # Update origin/HEAD (default branch may have changed)
                  cmd(['git', 'remote', 'set-head', 'origin', '-a'])
-@@ -352,7 +348,7 @@ def get_webrtc(source_dir, patch_dir, version, target,
+@@ -352,7 +353,7 @@
              else:
                  cmd(['git', 'checkout', '-f', version])
              cmd(['git', 'clean', '-df'])
