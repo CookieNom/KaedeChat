@@ -1,0 +1,46 @@
+"""Check desktop build setup without fetching or compiling native code."""
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import build_webrtc as build
+
+
+class DesktopWebRTCBuildTest(unittest.TestCase):
+    def test_bootstrap_precedes_sync_with_auto_updates_disabled(self):
+        for target in ('linux-x64', 'mac-arm64', 'win-x64'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                (work / f'{target}-release').mkdir()
+                commands = []
+
+                def run(*args, cwd):
+                    if 'sync' in args:
+                        self.assertEqual(os.environ['DEPOT_TOOLS_UPDATE'], '0')
+                    commands.append(args)
+
+                with (
+                    patch('sys.argv', ['build_webrtc.py', '--work-dir', str(work), '--output', str(work / 'output')]),
+                    patch.dict(os.environ),
+                    patch.object(build, 'triple', return_value=target),
+                    patch.object(build, 'prepare_sdk', return_value=work / 'sdk'),
+                    patch.object(build, 'fingerprint', return_value='fixture'),
+                    patch.object(build, 'verify_artifact'),
+                    patch.object(build, 'run', side_effect=run),
+                    patch.object(build.subprocess, 'check_output', side_effect=[
+                        build.PINS['depot_tools_revision'],
+                        *(['C:/Visual Studio'] if target.startswith('win-') else []),
+                        build.PINS['webrtc_revision'],
+                    ]),
+                ):
+                    build.main()
+                bootstrap = 'bootstrap/win_tools.bat' if target.startswith('win-') else 'ensure_bootstrap'
+                bootstrap_index = next(i for i, args in enumerate(commands) if str(work / 'depot_tools' / bootstrap) in args)
+                sync_index = next(i for i, args in enumerate(commands) if 'sync' in args)
+                self.assertLess(bootstrap_index, sync_index)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -36,6 +36,11 @@ def main():
     os.environ['PATH'] = str(depot) + os.pathsep + os.environ['PATH']
     os.environ['DEPOT_TOOLS_UPDATE'] = '0'
     os.environ['DEPOT_TOOLS_WIN_TOOLCHAIN'] = '0'
+    # Pinned gclient skips auto-update, which also skips Python bootstrapping.
+    if system == 'win':
+        run('cmd', '/c', str(depot / 'bootstrap/win_tools.bat'), cwd=work)
+    else:
+        run('bash', str(depot / 'ensure_bootstrap'), cwd=work)
     solution = {'name': 'src', 'url': PINS['webrtc_repository'] + '@' + PINS['webrtc_revision'],
                 'custom_deps': {}, 'deps_file': 'DEPS', 'managed': False}
     (work / '.gclient').write_text('solutions = ' + repr([solution]) + '\n')

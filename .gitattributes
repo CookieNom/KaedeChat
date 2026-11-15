@@ -1,2 +1,4 @@
 # CocoaPods hashes the Podfile bytes; Windows checkouts must preserve its checksum.
 mobile/ios/Podfile text eol=lf
+# Patches are applied to LF-only native source checkouts on every runner.
+*.patch text eol=lf

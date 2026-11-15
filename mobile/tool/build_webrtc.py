@@ -68,17 +68,18 @@ def main():
         # macOS, tvOS or visionOS slices. Use the pinned WebRTC iOS XCFramework builder.
         run(sys.executable, "run.py", "build", "apple", "--webrtc-fetch", "--commit", WEBRTC_REV, cwd=build)
         source = build / "_source/apple/webrtc/src"
+        ios_output = source / "out/ios"
         os.environ["PATH"] = str(build / "_source/apple/depot_tools") + os.pathsep + os.environ["PATH"]
         run(sys.executable, str(source / "tools_webrtc/ios/build_ios_libs.py"),
             "--build_config", "release", "--arch", "device:arm64", "simulator:arm64", "simulator:x64",
             # Unlike run.py's Android builder, this direct entry point does
             # not inherit COMMON_GN_ARGS. The SDK's audio module needs RTTI.
             "--extra-gn-args", gn_args + " use_rtti=true ios_deployment_target=\"15.0\"",
-            "-o", str(work / "ios"), cwd=source)
+            "-o", str(ios_output), cwd=source)
         destination = OUTPUT / "WebRTC.xcframework"
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(work / "ios/WebRTC.xcframework", destination, symlinks=True)
+        shutil.copytree(ios_output / "WebRTC.xcframework", destination, symlinks=True)
     source = build / f"_source/{'apple' if args.platform == 'ios' else 'android'}/webrtc/src"
     # Run the shared Annex-B regression vectors with the host compiler in CI.
     cryptor_test = work / "h26x-frame-test"

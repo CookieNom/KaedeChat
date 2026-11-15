@@ -19,7 +19,8 @@ class WebRTCBuildTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             (work / "webrtc-build").mkdir()
-            framework = work / "ios/WebRTC.xcframework"
+            source = work / "webrtc-build/build/_source/apple/webrtc/src"
+            framework = source / "out/ios/WebRTC.xcframework"
             framework.mkdir(parents=True)
             (framework / "WebRTC").write_bytes(b"test framework")
             # Windows runners may not permit symlink creation.
@@ -38,6 +39,7 @@ class WebRTCBuildTest(unittest.TestCase):
                 webrtc.main()
             calls = [call.args[0] for call in command.call_args_list]
             ios = next(args for args in calls if any(str(arg).endswith("build_ios_libs.py") for arg in args))
+            self.assertTrue(Path(ios[ios.index("-o") + 1]).is_relative_to(source))
             gn_args = ios[ios.index("--extra-gn-args") + 1].split()
             self.assertIn("use_rtti=true", gn_args)
             self.assertIn("enable_libaom=true", gn_args)
