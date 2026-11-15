@@ -17,7 +17,7 @@ spec.loader.exec_module(webrtc)
 class WebRTCBuildTest(unittest.TestCase):
     def test_ios_direct_builder_enables_rtti_and_preserves_framework_links(self):
         with tempfile.TemporaryDirectory() as directory:
-            work = Path(directory)
+            work = Path(directory).resolve()
             (work / "webrtc-build").mkdir()
             source = work / "webrtc-build/build/_source/apple/webrtc/src"
             framework = source / "out/ios/WebRTC.xcframework"

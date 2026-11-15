@@ -12,7 +12,7 @@ class DesktopWebRTCBuildTest(unittest.TestCase):
     def test_bootstrap_precedes_sync_with_auto_updates_disabled(self):
         for target in ('linux-x64', 'mac-arm64', 'win-x64'):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
-                work = Path(directory)
+                work = Path(directory).resolve()
                 (work / f'{target}-release').mkdir()
                 commands = []
 

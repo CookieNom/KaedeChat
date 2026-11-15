@@ -37,9 +37,12 @@ on Linux (`ios` on macOS). See [the native codec build notes](../docs/av1-e2ee/R
 for extraction instructions and prerequisites. The stock native library cannot
 process Kaede's encrypted AV1 format. CI and release builds use the same artifacts.
 
-Build an unsigned/debug Android artifact with:
+Android builds require JDK 21 to read the patched WebRTC library's Java classes.
+Point `JAVA_HOME` to your JDK 21 installation, then select it for Flutter and
+build an unsigned/debug Android artifact:
 
 ```sh
+flutter config --jdk-dir="$JAVA_HOME"
 flutter build apk --debug
 ```
 
