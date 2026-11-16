@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from prepare_codecs import NATIVE, PINS, ROOT, fingerprint, prepare_sdk, run, triple, verify_artifact
 
@@ -57,6 +58,10 @@ def main():
     actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
     if actual != PINS['webrtc_revision']:
         raise SystemExit('WebRTC revision mismatch')
+    # Fork commits need not have Change-Id trailers; use the pinned build HEAD.
+    run(sys.executable, str(source / 'build/util/lastchange.py'), '--filter=',
+        '--source-dir', str(source / 'build'),
+        '-o', str(source / 'build/util/LASTCHANGE'), cwd=work)
     patch = ROOT / 'desktop/patches/webrtc-hevc.patch'
     run('git', 'apply', '--check', str(patch), cwd=source)
     run('git', 'apply', str(patch), cwd=source)

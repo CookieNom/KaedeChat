@@ -605,7 +605,7 @@ index 116809a..6498d52 100644
 +  if ((FrameIsH264(frame.get(), type_) || FrameIsH265(frame.get(), type_)) &&
 +      NeedsRbspUnescaping(data_in.subspan(unencrypted_bytes))) {
 +    unescaped_wire.AppendData(data_in.subspan(0, unencrypted_bytes));
-+    const auto clear = H264::ParseRbsp(data_in.data() + unencrypted_bytes, data_in.size() - unencrypted_bytes);
++    const auto clear = H264::ParseRbsp(data_in.subspan(unencrypted_bytes).data(), data_in.size() - unencrypted_bytes);
 +    unescaped_wire.AppendData(clear.data(), clear.size());
 +    data_in = unescaped_wire;
 +    if (data_in.size() - unencrypted_bytes < 30) return;

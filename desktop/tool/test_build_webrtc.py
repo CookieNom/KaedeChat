@@ -40,6 +40,16 @@ class DesktopWebRTCBuildTest(unittest.TestCase):
                 bootstrap_index = next(i for i, args in enumerate(commands) if str(work / 'depot_tools' / bootstrap) in args)
                 sync_index = next(i for i, args in enumerate(commands) if 'sync' in args)
                 self.assertLess(bootstrap_index, sync_index)
+                timestamp_index = next(i for i, args in enumerate(commands)
+                                       if str(work / 'src/build/util/lastchange.py') in args)
+                timestamp = commands[timestamp_index]
+                self.assertIn('--filter=', timestamp)
+                self.assertEqual(timestamp[timestamp.index('--source-dir') + 1], str(work / 'src/build'))
+                self.assertEqual(timestamp[timestamp.index('-o') + 1], str(work / 'src/build/util/LASTCHANGE'))
+                self.assertLess(sync_index, timestamp_index)
+                native_index = next(i for i, args in enumerate(commands)
+                                    if any(str(arg).endswith(('build_linux.sh', 'build_macos.sh', 'build_windows.cmd')) for arg in args))
+                self.assertLess(timestamp_index, native_index)
 
 
 if __name__ == '__main__':
