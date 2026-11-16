@@ -303,6 +303,15 @@ diff --git a/webrtc-sys/libwebrtc/build_windows.cmd b/webrtc-sys/libwebrtc/build
 index 9fcb8d1..81f3dee 100644
 --- a/webrtc-sys/libwebrtc/build_windows.cmd
 +++ b/webrtc-sys/libwebrtc/build_windows.cmd
+@@ -5,2 +5,3 @@
++set "COMMAND_DIR=%~dp0"
+ set arch=
+ set profile=release
+@@ -39,4 +40,3 @@
+-set COMMAND_DIR=%~dp0
+ set PATH=%cd%\depot_tools;%PATH%
+ set DEPOT_TOOLS_WIN_TOOLCHAIN=0
+ set GYP_GENERATORS=ninja,msvs-ninja
 @@ -43,7 +43,7 @@ set GYP_GENERATORS=ninja,msvs-ninja
  set GYP_MSVS_VERSION=2022
  set OUTPUT_DIR=src\out-!arch!-!profile!

@@ -1,7 +1,9 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +13,24 @@ import prepare_codecs as codecs
 
 
 class CodecPreparationTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'requires the Windows batch interpreter')
+    def test_windows_argument_parsing_preserves_script_directory(self):
+        script = codecs.SDK / 'webrtc-sys/libwebrtc/build_windows.cmd'
+        parser, marker, _ = script.read_text().partition('echo "Building LiveKit WebRTC - Windows"')
+        self.assertTrue(marker, 'Cannot isolate batch argument parsing safely')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            scripts = root / 'sdk scripts'
+            scripts.mkdir()
+            batch = scripts / 'parse.cmd'
+            # Execute only argument parsing; no downloads, patching or compilation.
+            batch.write_text(parser + '\necho COMMAND_DIR=!COMMAND_DIR!\n')
+            result = subprocess.run(
+                ['cmd', '/c', str(batch), '--arch', 'x64', '--profile', 'release'],
+                cwd=root, check=True, capture_output=True, text=True,
+            )
+            self.assertIn(f'COMMAND_DIR={scripts}\\', result.stdout)
+
     def test_artifact_requires_matching_source_target_and_hevc_build(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(codecs, 'fingerprint', return_value='expected'), patch.object(codecs, 'triple', return_value='linux-x64'):
             root = Path(temp)
