@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: |
           python desktop/tool/prepare_codecs.py --artifact desktop/native/webrtc
-          tar -cf "$RUNNER_TEMP/desktop-webrtc.tar" -C desktop/native/webrtc .
+          tar -cf - -C desktop/native/webrtc . > "$RUNNER_TEMP/desktop-webrtc.tar"
       - uses: ./.github/actions/upload-artifact
         with:
           name: kaede-desktop-webrtc-${{ runner.os }}-${{ runner.arch }}

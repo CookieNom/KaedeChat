@@ -14,5 +14,5 @@ runs:
       shell: bash
       run: |
         mkdir -p desktop/native/webrtc
-        tar -xf "$RUNNER_TEMP/desktop-codecs/desktop-webrtc.tar" -C desktop/native/webrtc
+        tar -xf - -C desktop/native/webrtc < "$RUNNER_TEMP/desktop-codecs/desktop-webrtc.tar"
         python desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc --github-env

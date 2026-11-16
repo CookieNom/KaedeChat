@@ -269,6 +269,9 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   BOOL _speakerOnButPreferBluetooth;
   AVAudioSessionPort _preferredInput;
   AudioManager* _audioManager;
+#if TARGET_OS_IPHONE
+  KaedeVideoPip* _videoPip;
+#endif
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
   FlutterRTCVideoPlatformViewFactory *_platformViewFactory;
 #endif
