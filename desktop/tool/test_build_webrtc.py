@@ -1,5 +1,6 @@
 """Check desktop build setup without fetching or compiling native code."""
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,8 +10,26 @@ import build_webrtc as build
 
 
 class DesktopWebRTCBuildTest(unittest.TestCase):
+    def test_sync_retries_transient_failure_but_preserves_persistent_failure(self):
+        for failures in (0, 1, 2, 3):
+            with self.subTest(failures=failures):
+                error = subprocess.CalledProcessError(2, ['gclient', 'sync'])
+                outcomes = [error] * failures + ([None] if failures < 3 else [])
+                with patch.object(build, 'run', side_effect=outcomes) as run, patch.object(build.time, 'sleep') as sleep:
+                    if failures == 3:
+                        with self.assertRaises(subprocess.CalledProcessError) as raised:
+                            build.sync_dependencies('gclient', cwd=Path('work'))
+                        self.assertIs(raised.exception, error)
+                    else:
+                        build.sync_dependencies('gclient', cwd=Path('work'))
+                    self.assertEqual(run.call_count, min(failures + 1, 3))
+                    for call in run.call_args_list:
+                        self.assertEqual(call.args, ('gclient', 'sync', '-D', '--no-history'))
+                        self.assertEqual(call.kwargs, {'cwd': Path('work')})
+                    self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 20][:failures])
+
     def test_bootstrap_precedes_sync_with_auto_updates_disabled(self):
-        for target in ('linux-x64', 'mac-arm64', 'win-x64'):
+        for target in ('linux-x64', 'mac-arm64', 'mac-x64', 'win-x64'):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
                 work = Path(directory).resolve()
                 (work / f'{target}-release').mkdir()

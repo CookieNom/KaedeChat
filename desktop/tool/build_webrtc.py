@@ -8,8 +8,22 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 from prepare_codecs import NATIVE, PINS, ROOT, fingerprint, prepare_sdk, run, triple, verify_artifact
+
+
+def sync_dependencies(*command, cwd):
+    # Sync is resumable; retry downloads/hooks before applying any local patches.
+    for attempt in range(1, 4):
+        try:
+            run(*command, 'sync', '-D', '--no-history', cwd=cwd)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == 3:
+                raise
+            print(f'WebRTC dependency sync failed; retrying in {attempt * 10}s ({attempt}/3).', flush=True)
+            time.sleep(attempt * 10)
 
 
 def main():
@@ -51,9 +65,9 @@ def main():
         if not installation:
             raise SystemExit('Visual Studio C++ build tools are required')
         os.environ['vs2022_install'] = installation
-        run('cmd', '/c', str(depot / 'gclient.bat'), 'sync', '-D', '--no-history', cwd=work)
+        sync_dependencies('cmd', '/c', str(depot / 'gclient.bat'), cwd=work)
     else:
-        run(str(depot / 'gclient'), 'sync', '-D', '--no-history', cwd=work)
+        sync_dependencies(str(depot / 'gclient'), cwd=work)
     source = work / 'src'
     actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
     if actual != PINS['webrtc_revision']:
