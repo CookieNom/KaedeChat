@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,53 @@ import prepare_codecs as codecs
 
 
 class CodecPreparationTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'requires Apple frameworks')
+    def test_hevc_encoder_discovery_requires_hardware(self):
+        source = (codecs.SDK / 'webrtc-sys/src/objc_video_factory.mm').read_text()
+        start = source.index('static BOOL KaedeHardwareHEVCEncoderAvailable()')
+        end = source.index('\n}\n', start) + 3
+        program = r'''#import <Foundation/Foundation.h>
+#import <VideoToolbox/VideoToolbox.h>
+#include <cassert>
+static NSArray *testEncoders = nil;
+static OSStatus testStatus = noErr;
+static OSStatus CopyTestEncoders(CFDictionaryRef, CFArrayRef *output) {
+  *output = testEncoders ? (CFArrayRef)CFRetain((__bridge CFArrayRef)testEncoders) : nullptr;
+  return testStatus;
+}
+#define VTCopyVideoEncoderList CopyTestEncoders
+''' + source[start:end] + r'''
+static NSDictionary *Encoder(CMVideoCodecType codec, BOOL hardware) {
+  return @{(__bridge NSString *)kVTVideoEncoderList_CodecType: @(codec),
+           (__bridge NSString *)kVTVideoEncoderList_IsHardwareAccelerated: @(hardware)};
+}
+int main() {
+  @autoreleasepool {
+    testStatus = -1;
+    assert(!KaedeHardwareHEVCEncoderAvailable());
+    testStatus = noErr;
+    assert(!KaedeHardwareHEVCEncoderAvailable());
+    testEncoders = @[];
+    assert(!KaedeHardwareHEVCEncoderAvailable());
+    testEncoders = @[Encoder(kCMVideoCodecType_H264, YES), Encoder(kCMVideoCodecType_HEVC, NO)];
+    assert(!KaedeHardwareHEVCEncoderAvailable());
+    testEncoders = @[Encoder(kCMVideoCodecType_HEVC, NO), Encoder(kCMVideoCodecType_HEVC, YES)];
+    assert(KaedeHardwareHEVCEncoderAvailable());
+  }
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            fixture = root / 'encoder-discovery.mm'
+            fixture.write_text(program)
+            executable = root / 'encoder-discovery'
+            subprocess.run([
+                'xcrun', 'clang++', '-std=c++20', '-fobjc-arc',
+                '-framework', 'Foundation', '-framework', 'VideoToolbox',
+                str(fixture), '-o', str(executable),
+            ], check=True)
+            subprocess.run([str(executable)], check=True)
+
     @unittest.skipUnless(os.name == 'nt', 'requires the Windows batch interpreter')
     def test_windows_argument_parsing_preserves_script_directory(self):
         script = codecs.SDK / 'webrtc-sys/libwebrtc/build_windows.cmd'

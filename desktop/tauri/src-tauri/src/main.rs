@@ -347,6 +347,7 @@ impl From<VoiceError> for NativeError {
                         "SCREEN_CAPTURE_UNAVAILABLE"
                     }
                     VoiceError::ScreenAudio(_) => "SCREEN_AUDIO_UNAVAILABLE",
+                    VoiceError::VideoSendBudget => "VIDEO_SEND_BUDGET",
                     VoiceError::Api(_) => unreachable!("API voice errors returned above"),
                 };
                 Self::operation(code, message, error)
@@ -4969,6 +4970,14 @@ mod tests {
         assert!(native.message.contains("Update Kaede"));
         assert!(!native.message.contains("canonical KDF"));
         assert_eq!(native.detail, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn video_send_budget_error_has_safe_recovery_message() {
+        let error = NativeError::from(kaede_voice::VoiceError::VideoSendBudget);
+        assert_eq!(error.code, "VIDEO_SEND_BUDGET");
+        assert_eq!(error.message, "Video could not start. Try sharing again.");
+        assert_eq!(error.detail, serde_json::Value::Null);
     }
 
     #[test]

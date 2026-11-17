@@ -1095,7 +1095,7 @@ diff --git a/webrtc-sys/src/nvidia/nvidia_encoder_factory.cpp b/webrtc-sys/src/n
 diff --git a/webrtc-sys/src/objc_video_factory.mm b/webrtc-sys/src/objc_video_factory.mm
 --- a/webrtc-sys/src/objc_video_factory.mm
 +++ b/webrtc-sys/src/objc_video_factory.mm
-@@ -19,20 +19,87 @@
+@@ -19,20 +19,102 @@
  #import <sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.h>
  #import <sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.h>
  #import <sdk/objc/components/video_codec/RTCVideoEncoderFactorySimulcast.h>
@@ -1107,6 +1107,21 @@ diff --git a/webrtc-sys/src/objc_video_factory.mm b/webrtc-sys/src/objc_video_fa
  #include "sdk/objc/native/api/video_encoder_factory.h"
 +
 +#ifdef RTC_ENABLE_H265
++static BOOL KaedeHardwareHEVCEncoderAvailable() {
++  CFArrayRef encoders = nullptr;
++  if (VTCopyVideoEncoderList(nullptr, &encoders) != noErr || !encoders) return NO;
++  BOOL available = NO;
++  for (NSDictionary *encoder in (__bridge NSArray *)encoders) {
++    if ([encoder[(__bridge NSString *)kVTVideoEncoderList_CodecType] unsignedIntValue] == kCMVideoCodecType_HEVC &&
++        [encoder[(__bridge NSString *)kVTVideoEncoderList_IsHardwareAccelerated] boolValue]) {
++      available = YES;
++      break;
++    }
++  }
++  CFRelease(encoders);
++  return available;
++}
++
 +// The default ObjC encoder creates HEVC but omits it from supportedCodecs.
 +// Expose it only when the OS identifies a hardware implementation; Kaede still
 +// proves an actual session at the requested settings before publishing.
@@ -1116,7 +1131,7 @@ diff --git a/webrtc-sys/src/objc_video_factory.mm b/webrtc-sys/src/objc_video_fa
 ++ (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
 +  NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *codecs = [[super supportedCodecs] mutableCopy];
 +  if (@available(macOS 10.13, iOS 11.0, *)) {
-+    if (VTIsHardwareEncodeSupported(kCMVideoCodecType_HEVC)) {
++    if (KaedeHardwareHEVCEncoderAvailable()) {
 +      BOOL present = NO;
 +      for (RTC_OBJC_TYPE(RTCVideoCodecInfo) *codec in codecs) {
 +        if ([codec.name caseInsensitiveCompare:@"H265"] == NSOrderedSame) present = YES;
@@ -1129,7 +1144,7 @@ diff --git a/webrtc-sys/src/objc_video_factory.mm b/webrtc-sys/src/objc_video_fa
 +- (id<RTC_OBJC_TYPE(RTCVideoEncoder)>)createEncoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
 +  if ([info.name caseInsensitiveCompare:@"H265"] == NSOrderedSame) {
 +    if (@available(macOS 10.13, iOS 11.0, *)) {
-+      if (!VTIsHardwareEncodeSupported(kCMVideoCodecType_HEVC)) return nil;
++      if (!KaedeHardwareHEVCEncoderAvailable()) return nil;
 +    } else { return nil; }
 +  }
 +  return [super createEncoder:info];
@@ -1183,3 +1198,11 @@ diff --git a/webrtc-sys/src/objc_video_factory.mm b/webrtc-sys/src/objc_video_fa
  }
  
  }  // namespace livekit_ffi
+diff --git a/webrtc-sys/src/nvidia/NvCodec/include/Utils/Logger.h b/webrtc-sys/src/nvidia/NvCodec/include/Utils/Logger.h
+--- a/webrtc-sys/src/nvidia/NvCodec/include/Utils/Logger.h
++++ b/webrtc-sys/src/nvidia/NvCodec/include/Utils/Logger.h
+@@ -21,3 +21,3 @@
+ #ifdef _WIN32
+-#include <winsock.h>
++#include <winsock2.h>
+ #include <windows.h>
