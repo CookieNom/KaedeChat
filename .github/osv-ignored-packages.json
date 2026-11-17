@@ -1,5 +1,20 @@
 {
   "crates.io": {
     "glib": "Tauri's GTK3 stack requires glib 0.18. No callers of the affected VariantStrIter API were found in Kaede or reviewed dependencies (RUSTSEC-2024-0429). Reassess when the GTK dependencies change."
+  },
+  "npm": {
+    "picomatch": {
+      "versions": [
+        "4.0.5",
+        "4.0.7"
+      ],
+      "advisories": [
+        "GHSA-fc5q-39xc-vjpf"
+      ],
+      "paths": [
+        "frontend/pnpm-lock.yaml"
+      ],
+      "reason": "GHSA-fc5q-39xc-vjpf requires attacker-controlled glob patterns. These versions are used only by frontend build, lint, and test tools with repository-controlled patterns; picomatch is absent from production dependencies. No patched release exists as of 2026-11-17. Reassess on dependency upgrades or any use with untrusted patterns."
+    }
   }
 }

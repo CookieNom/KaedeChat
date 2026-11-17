@@ -16,9 +16,17 @@ def load_ignored_packages():
     for ecosystem, packages in ignored.items():
         if not ecosystem.strip() or not isinstance(packages, dict):
             raise ValueError("each ignore ecosystem must map package names to reasons")
-        for name, reason in packages.items():
+        for name, rule in packages.items():
+            reason = rule.get("reason") if isinstance(rule, dict) else rule
             if not name.strip() or not isinstance(reason, str) or not reason.strip():
                 raise ValueError("each ignored package must have a name and a reason")
+            if isinstance(rule, dict):
+                for field in ("versions", "advisories", "paths"):
+                    values = rule.get(field)
+                    if not isinstance(values, list) or not values or not all(
+                        isinstance(value, str) and value.strip() for value in values
+                    ):
+                        raise ValueError(f"scoped ignores require nonempty {field}")
     return ignored
 
 
@@ -41,8 +49,17 @@ def main(command):
         for result in results:
             for item in result["packages"]:
                 package = item["package"]
-                reason = ignored_packages.get(package["ecosystem"], {}).get(package["name"])
+                rule = ignored_packages.get(package["ecosystem"], {}).get(package["name"])
                 for group in item["groups"]:
+                    reason = rule
+                    if isinstance(rule, dict):
+                        source = result["source"]["path"].removeprefix("/workspace/")
+                        matches = (
+                            package["version"] in rule["versions"]
+                            and source in rule["paths"]
+                            and bool(set(group["ids"]) & set(rule["advisories"]))
+                        )
+                        reason = rule["reason"] if matches else None
                     # OSV computes the maximum CVSS across each advisory's aliases.
                     raw_score = group["max_severity"]
                     score = None if raw_score == "" else float(raw_score)

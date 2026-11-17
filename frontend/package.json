@@ -29,6 +29,11 @@
     },
     "patchedDependencies": {
       "livekit-client@2.24.1": "patches/livekit-client@2.24.1.patch"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-fc5q-39xc-vjpf"
+      ]
     }
   },
   "dependencies": {

@@ -96,6 +96,27 @@ class OsvAuditTest(unittest.TestCase):
         self.assertIn("FAIL: glib 0.18.5", output)
         self.assertIn("2 non-ignored vulnerability group(s) above CVSS 6.0", output)
 
+    def test_scoped_ignore_only_matches_reviewed_versions_advisory_and_lockfile(self):
+        ignored = osv_audit.load_ignored_packages()
+        for version, advisory, source, expected in (
+            ("4.0.5", "GHSA-fc5q-39xc-vjpf", "frontend/pnpm-lock.yaml", 0),
+            ("4.0.7", "GHSA-fc5q-39xc-vjpf", "/workspace/frontend/pnpm-lock.yaml", 0),
+            ("4.0.8", "GHSA-fc5q-39xc-vjpf", "frontend/pnpm-lock.yaml", 1),
+            ("4.0.7", "GHSA-other-advisory", "frontend/pnpm-lock.yaml", 1),
+            ("4.0.7", "GHSA-fc5q-39xc-vjpf", "backend/pnpm-lock.yaml", 1),
+        ):
+            with self.subTest(version=version, advisory=advisory, source=source):
+                data = report("8.7")
+                result = data["results"][0]
+                result["source"]["path"] = source
+                item = result["packages"][0]
+                item["package"] = {"ecosystem": "npm", "name": "picomatch", "version": version}
+                item["groups"][0]["ids"] = [advisory]
+                status, output, errors = self.run_scan(json.dumps(data), ignored=ignored)
+                self.assertEqual(status, expected)
+                self.assertEqual(errors, "")
+                self.assertIn("IGNORED:" if expected == 0 else "FAIL:", output)
+
     def test_ignores_do_not_hide_scan_errors_or_invalid_scores(self):
         for score, code, stderr in (
             ("6.9", 129, ""),
@@ -122,6 +143,8 @@ class OsvAuditTest(unittest.TestCase):
                     '{"crates.io": {"": "reason"}}',
                     '{"crates.io": {"glib": " "}}',
                     '{"crates.io": {"glib": 1}}',
+                    '{"npm": {"picomatch": {"reason": "reviewed"}}}',
+                    '{"npm": {"picomatch": {"reason": "reviewed", "versions": [], "advisories": ["GHSA-example"], "paths": ["frontend/pnpm-lock.yaml"]}}}',
                 ):
                     with self.subTest(data=data):
                         config.write_text(data, encoding="utf-8")
