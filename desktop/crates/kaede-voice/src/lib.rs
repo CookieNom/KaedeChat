@@ -1085,7 +1085,7 @@ async fn run_room(
                         video.adjustment = Some(change_video_codec(&room, video, compatible, true, variant_backoff.clone()));
                         continue;
                     }
-                    let current = video.variants.lock().ok().and_then(|tracks| tracks.first().map(|track| track.name()));
+                    let current = video.variants.lock().ok().and_then(|tracks| tracks.first().map(LocalVideoTrack::name));
                     if current.as_ref().is_some_and(|name| desired.is_none_or(|codec| !name.ends_with(&format!(":{}", codec.as_str())))) {
                         if let Some(name) = &current
                             && let Some(codec) = name.rsplit(':').next()
@@ -2298,7 +2298,7 @@ fn change_video_codec(
     let restore_options = participant
         .track_publications()
         .get(&original.sid())
-        .map(|publication| publication.publish_options());
+        .map(livekit::prelude::LocalTrackPublication::publish_options);
     let source = original.rtc_source();
     let dimensions = source.video_resolution();
     let mut encoding = video.encoding.clone();
@@ -2417,7 +2417,7 @@ fn change_video_codec(
                 }
             }
         }
-        match publish_budgeted_video(
+        if publish_budgeted_video(
             &participant,
             &track,
             options,
@@ -2426,39 +2426,37 @@ fn change_video_codec(
             profile_bitrate,
         )
         .await
+        .is_ok()
         {
-            Ok(_) => {
-                if compatible {
-                    Some((track, codec))
-                } else {
-                    if let Ok(mut variants) = variants.lock() {
-                        variants.push(track);
-                    }
-                    None
+            if compatible {
+                Some((track, codec))
+            } else {
+                if let Ok(mut variants) = variants.lock() {
+                    variants.push(track);
                 }
+                None
             }
-            Err(_) => {
-                fail();
-                if compatible {
-                    // Restore the previous compatible publication after a failed replacement.
-                    let restore = restore_options.unwrap_or_else(|| TrackPublishOptions {
-                        source: track_source,
-                        video_codec: original_codec,
-                        ..video_publish_options(encrypted, encoding)
-                    });
-                    let _ = publish_budgeted_video(
-                        &participant,
-                        &original,
-                        restore,
-                        &send_budget,
-                        &budget_source,
-                        profile_bitrate,
-                    )
-                    .await;
-                    Some((original, original_codec))
-                } else {
-                    None
-                }
+        } else {
+            fail();
+            if compatible {
+                // Restore the previous compatible publication after a failed replacement.
+                let restore = restore_options.unwrap_or_else(|| TrackPublishOptions {
+                    source: track_source,
+                    video_codec: original_codec,
+                    ..video_publish_options(encrypted, encoding)
+                });
+                let _ = publish_budgeted_video(
+                    &participant,
+                    &original,
+                    restore,
+                    &send_budget,
+                    &budget_source,
+                    profile_bitrate,
+                )
+                .await;
+                Some((original, original_codec))
+            } else {
+                None
             }
         }
     })
@@ -3194,6 +3192,10 @@ async fn publish_camera(
     send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
 ) -> Result<PublishedVideo, VoiceError> {
     let settings = camera_settings(video_quality_mode);
+    let encoding = VideoEncoding {
+        max_bitrate: settings.max_bitrate,
+        max_framerate: f64::from(settings.frame_rate),
+    };
     let camera_id = device_id.map(str::to_owned);
     let source = NativeVideoSource::new(
         VideoResolution {
@@ -3220,7 +3222,7 @@ async fn publish_camera(
     let failure = Arc::new(Mutex::new(None));
     let thread_failure = failure.clone();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let capture_thread = match thread::Builder::new()
+    let capture_thread = thread::Builder::new()
         .name("kaede-camera-capture".to_owned())
         .spawn(move || {
             run_camera_capture(
@@ -3232,10 +3234,8 @@ async fn publish_camera(
                 ready_tx,
                 thread_failure,
             );
-        }) {
-        Ok(thread) => thread,
-        Err(error) => return Err(VoiceError::CaptureThread(error)),
-    };
+        })
+        .map_err(VoiceError::CaptureThread)?;
     match ready_rx.await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -3256,10 +3256,7 @@ async fn publish_camera(
             source: TrackSource::Camera,
             ..video_publish_options(
                 room.e2ee_manager().encryption_type() != EncryptionType::None,
-                VideoEncoding {
-                    max_bitrate: settings.max_bitrate,
-                    max_framerate: f64::from(settings.frame_rate),
-                },
+                encoding.clone(),
             )
         },
         &send_budget,
@@ -3279,10 +3276,7 @@ async fn publish_camera(
         audio_capture_thread: None,
         capture_failure: failure,
         source: TrackSource::Camera,
-        encoding: VideoEncoding {
-            max_bitrate: settings.max_bitrate,
-            max_framerate: f64::from(settings.frame_rate),
-        },
+        encoding,
         adjustment: None,
         capture_level,
         variants: Arc::new(Mutex::new(Vec::new())),

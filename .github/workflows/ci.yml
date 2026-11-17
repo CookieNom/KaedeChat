@@ -349,7 +349,9 @@ jobs:
           enableCrossOsArchive: true
       - run: make desktop-check
       - run: make desktop-lint
+        id: desktop_lint
       - run: make desktop-test
+        if: ${{ !cancelled() && (steps.desktop_lint.outcome == 'success' || steps.desktop_lint.outcome == 'failure') }}
       - name: Enforce Cargo cache size budget
         if: always()
         run: bash .github/scripts/enforce-cache-budgets.sh cargo

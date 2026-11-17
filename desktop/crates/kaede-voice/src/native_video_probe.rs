@@ -409,23 +409,28 @@ mod tests {
     }
 
     #[test]
-    fn hevc_recovery_is_bounded_and_late_probe_cannot_override_live_failure() {
+    fn hevc_recovery_is_bounded_and_late_probe_cannot_override_live_failure()
+    -> Result<(), &'static str> {
         let mut proof = HevcDecoderProof::default();
         let now = Instant::now();
-        let generation = proof.begin(now).unwrap();
+        let generation = proof.begin(now).ok_or("initial probe should start")?;
         assert!(proof.begin(now).is_none());
         proof.observe(false, now);
         proof.complete(generation, true, now);
         assert!(!proof.proven);
         assert!(proof.begin(now + Duration::from_secs(59)).is_none());
         let retry = now + Duration::from_mins(1);
-        let generation = proof.begin(retry).unwrap();
+        let generation = proof
+            .begin(retry)
+            .ok_or("probe should retry after cooldown")?;
         proof.complete(generation, true, retry);
         assert!(proof.proven);
         proof.observe(false, retry);
         assert!(proof.begin(retry + Duration::from_mins(4)).is_none());
         let retry = retry + Duration::from_mins(5);
-        let generation = proof.begin(retry).unwrap();
+        let generation = proof
+            .begin(retry)
+            .ok_or("probe should retry after cooldown")?;
         proof.complete(generation, true, retry);
         for sample in 0..crate::video_policy::PREMIUM_TRUST_SAMPLES {
             proof.observe(
@@ -437,6 +442,7 @@ mod tests {
             + crate::video_policy::SAMPLE * u32::from(crate::video_policy::PREMIUM_TRUST_SAMPLES);
         proof.observe(false, trusted);
         assert!(proof.begin(trusted + Duration::from_mins(1)).is_some());
+        Ok(())
     }
 
     #[tokio::test]

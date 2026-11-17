@@ -79,7 +79,7 @@ index e313e19..d97bd85 100644
              println!("cargo:rustc-link-lib=dylib=dwmapi");
              println!("cargo:rustc-link-lib=dylib=shcore");
  
-+            for lib in ["mfplat", "mf", "mfuuid", "oleaut32"] {
++            for lib in ["mfplat", "mf", "mfuuid", "oleaut32", "dxguid"] {
 +                println!("cargo:rustc-link-lib=dylib={lib}");
 +            }
 +            builder.file("src/media_foundation/media_foundation_video.cpp");
