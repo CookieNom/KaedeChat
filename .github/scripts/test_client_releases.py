@@ -49,7 +49,7 @@ class ClientReleaseTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
     @unittest.skipIf(os.name == "nt", "macOS packaging uses POSIX shell")
-    def test_dmg_retry_preserves_failures(self):
+    def test_macos_packaging_retry_preserves_failures(self):
         block = WORKFLOW.read_text().split("      - name: Build, sign, and notarize macOS packages\n")[1]
         script = textwrap.dedent(block.split("        run: |\n")[1].split("      - name:")[0])
         script = "set -euo pipefail\n" + script[script.index('dmg_log="$(mktemp)"'):]
@@ -71,6 +71,9 @@ fi
                 (0, "", 1, 0),
                 (1, "error running bundle_dmg.sh", 2, 0),
                 (9, "error running bundle_dmg.sh", 3, 7),
+                (1, "A timestamp was expected but was not found.", 2, 0),
+                (9, "A timestamp was expected but was not found.", 3, 7),
+                (1, "A required agreement is missing or has expired", 1, 7),
                 (1, "code signing failed", 1, 7),
                 (1, "compilation failed", 1, 7),
             ):

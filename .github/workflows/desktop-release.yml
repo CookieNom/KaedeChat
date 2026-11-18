@@ -485,7 +485,7 @@ jobs:
           umask 077
           printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY_BASE64" | base64 -D > "$APPLE_API_KEY_PATH"
           # Tauri hides disk-image command output unless verbose logging is enabled.
-          # Retry only DMG-script failures; compilation/signing failures remain fatal.
+          # Retry DMG-script and timestamp-service failures; other signing errors remain fatal.
           dmg_log="$(mktemp)"
           trap 'rm -f "$APPLE_API_KEY_PATH" "$dmg_log"' EXIT
           for attempt in 1 2 3; do
@@ -496,10 +496,14 @@ jobs:
             else
               status=${PIPESTATUS[0]}
             fi
-            if [[ "$attempt" == 3 ]] || ! grep -Fq 'error running bundle_dmg.sh' "$dmg_log"; then
+            if grep -Fq 'A required agreement is missing or has expired' "$dmg_log"; then
+              echo '::error::Apple notarization is blocked by a pending or expired agreement. The Account Holder must review agreements at https://developer.apple.com/account/ before retrying.'
               exit "$status"
             fi
-            echo "DMG packaging failed; retrying in $((attempt * 10)) seconds ($attempt/3)." >&2
+            if [[ "$attempt" == 3 ]] || ! grep -Eq 'error running bundle_dmg\.sh|A timestamp was expected but was not found\.' "$dmg_log"; then
+              exit "$status"
+            fi
+            echo "macOS packaging or timestamp service failed; retrying in $((attempt * 10)) seconds ($attempt/3)." >&2
             sleep "$((attempt * 10))"
           done
       - name: Collect macOS release files
