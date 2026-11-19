@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:kaede_mobile/src/auth/turnstile_actions.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
@@ -56,6 +57,8 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
       <String, String>{
         'action': widget.action,
         'request_id': requestId,
+        if (widget.action == TurnstileActions.register)
+          'native_registration': '2',
       },
     );
     controller = WebViewController()
@@ -177,8 +180,8 @@ bool isExpectedNativeChallenge(Uri candidate, Uri expected) =>
     candidate.host.toLowerCase() == expected.host.toLowerCase() &&
     candidate.port == expected.port &&
     candidate.path == expected.path &&
-    candidate.queryParameters['action'] == expected.queryParameters['action'] &&
-    candidate.queryParameters['request_id'] ==
-        expected.queryParameters['request_id'] &&
-    candidate.queryParameters.length == expected.queryParameters.length &&
+    candidate.queryParametersAll.length == expected.queryParameters.length &&
+    candidate.queryParametersAll.entries.every((entry) =>
+        entry.value.length == 1 &&
+        entry.value.single == expected.queryParameters[entry.key]) &&
     !candidate.hasFragment;

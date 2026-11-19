@@ -294,6 +294,28 @@ void main() {
       expect(threadStarterDisplayMessage(missing).contentUnavailable, isTrue);
     });
 
+    test('timeline hides MLS setup and keeps unreadable chat messages', () {
+      final channel = KaedeChannel.fromJson(_channelJson(id: '11', type: 1));
+      final base = KaedeMessage.fromJson(_messageJson('90', channelId: '11'));
+      KaedeMessage encrypted(String operation, int type) => base.copyWith(
+            messageType: type,
+            e2ee: {'version': 2, 'protocol': 'mls10', 'operation': operation},
+          );
+      final chat = encrypted('create', 0);
+      final state = MobileState(
+        selectedChannel: channel.ref,
+        messageStore: {
+          channel.ref: [
+            encrypted('welcome', 7),
+            encrypted('commit', 7),
+            chat,
+            base
+          ],
+        },
+      );
+      expect(visibleChannelMessages(state, channel), [chat, base]);
+    });
+
     test('adds a detached source once and deduplicates native starters', () {
       final starter =
           KaedeMessage.fromJson(_messageJson('90', channelId: '11'));

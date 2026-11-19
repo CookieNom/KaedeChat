@@ -361,6 +361,21 @@ void main() {
         '?action=login&request_id=0123456789abcdef',
       );
       expect(isExpectedNativeChallenge(expected, expected), isTrue);
+      final registration = expected.replace(queryParameters: {
+        'action': 'kaede-register',
+        'request_id': '0123456789abcdef',
+        'native_registration': '2',
+      });
+      expect(isExpectedNativeChallenge(registration, registration), isTrue);
+      for (final query in [
+        registration.query.replaceFirst('native_registration=2', 'other=2'),
+        '${registration.query}&native_registration=2',
+      ]) {
+        expect(
+            isExpectedNativeChallenge(
+                registration.replace(query: query), registration),
+            isFalse);
+      }
       expect(
         isExpectedNativeChallenge(
           Uri.parse('https://challenges.cloudflare.com/turnstile'),

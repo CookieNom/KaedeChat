@@ -9,6 +9,9 @@ import androidx.lifecycle.Lifecycle
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.plugin.common.MethodChannel
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 class MainActivity : FlutterFragmentActivity() {
     private lateinit var systemCallChannel: MethodChannel
@@ -89,6 +92,44 @@ class MainActivity : FlutterFragmentActivity() {
                     error.message ?: "Could not update the Android voice service.",
                     null,
                 )
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "chat.kaede.mobile/aead",
+        ).setMethodCallHandler { call, result ->
+            // AES-256-GCM for the encryption store. The 16-byte tag follows
+            // the ciphertext, matching the Dart cipher this stands in for.
+            val mode = when (call.method) {
+                "seal" -> Cipher.ENCRYPT_MODE
+                "open" -> Cipher.DECRYPT_MODE
+                else -> {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+            }
+            val key = call.argument<ByteArray>("key")
+            val nonce = call.argument<ByteArray>("nonce")
+            val data = call.argument<ByteArray>("data")
+            val aad = call.argument<ByteArray>("aad")
+            if (key == null || nonce == null || data == null || aad == null ||
+                key.size != 32 || nonce.size != 12
+            ) {
+                key?.fill(0)
+                result.error("AEAD_INVALID", null, null)
+                return@setMethodCallHandler
+            }
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(mode, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+                cipher.updateAAD(aad)
+                result.success(cipher.doFinal(data))
+            } catch (_: Exception) {
+                // Includes a rejected tag; Dart re-checks with its own cipher.
+                result.error("AEAD_FAILED", null, null)
+            } finally {
+                key.fill(0)
             }
         }
 

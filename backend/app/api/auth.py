@@ -7,11 +7,11 @@ import re
 import secrets
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn, cast
+from typing import Annotated, NoReturn, cast
 
 import pyotp
 from cryptography.exceptions import InvalidTag
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, or_, select, update
@@ -26,6 +26,7 @@ from app.api.dependencies import (
     require_user,
 )
 from app.auth.account_status import account_is_banned
+from app.auth.native_registration import native_registration_page
 from app.auth.schemas import (
     EmailChangeRequest,
     LoginRequest,
@@ -33,6 +34,7 @@ from app.auth.schemas import (
     MfaDisableRequest,
     MfaLoginRequest,
     MfaSetupRequest,
+    NativeRegistrationConsent,
     PasswordForgotRequest,
     PasswordKdfLookupRequest,
     PasswordResetRequest,
@@ -47,7 +49,9 @@ from app.auth.security import (
     decrypt_secret,
     encrypt_secret,
     hash_password_async,
+    new_token,
     recovery_code,
+    token_key,
     verify_password_async,
 )
 from app.auth.service import (
@@ -106,6 +110,7 @@ from app.email.templates import email_change_confirmation, password_reset_email,
 from app.tasks import email_outbox_drain
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+NATIVE_REGISTRATION_RECEIPT_PREFIX = "kaede-reg-v1."
 
 
 def auth_error(code: str, message: str, status_code: int, **details: object) -> HTTPException:
@@ -289,19 +294,28 @@ def token_response(
 
 
 @router.get("/config")
-async def auth_configuration(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+async def auth_configuration(
+    settings: Settings = Depends(get_settings),
+    x_kaede_client: Annotated[str | None, Header()] = None,
+    native_registration: str | None = None,
+) -> dict[str, object]:
     email_enabled = email_delivery_enabled(settings)
+    agreement_required = legal_agreement_required(settings)
+    # Older mobile clients open the server's registration WebView only for this flag.
+    legacy_consent = (
+        x_kaede_client == "mobile" and native_registration != "2" and agreement_required
+    )
     return {
         "email_required": email_enabled,
         "password_recovery_enabled": email_enabled,
         "turnstile": {
-            "enabled": settings.turnstile_enabled,
+            "enabled": settings.turnstile_enabled or legacy_consent,
             "site_key": settings.turnstile_site_key if settings.turnstile_enabled else None,
         },
         "gif_picker_enabled": settings.klipy_enabled,
         "message_search_enabled": settings.search_enabled,
         "e2ee_activation_enabled": settings.e2ee_activation_enabled,
-        "legal_agreement_required": legal_agreement_required(settings),
+        "legal_agreement_required": agreement_required,
     }
 
 
@@ -376,21 +390,23 @@ async def native_turnstile_challenge(
     action: str,
     request_id: str,
     settings: Settings = Depends(get_settings),
+    native_registration: str | None = None,
 ) -> HTMLResponse:
-    """Render Turnstile inside the packaged desktop client's restricted WebView.
-
-    The page never accepts credentials and does not exchange the challenge itself.
-    Its only output is the short-lived provider token delivered over the native
-    WebView IPC bridge, where the desktop parent verifies ``request_id`` before
-    attaching it to login or registration.
-    """
-
-    if not settings.turnstile_enabled or settings.turnstile_site_key is None:
-        raise auth_error("TURNSTILE_DISABLED", "Verification is not enabled", 404)
+    """Serve the challenge at the exact URL the native client allows in its WebView."""
     if action not in {LOGIN_ACTION, REGISTER_ACTION}:
         raise auth_error("TURNSTILE_ACTION_INVALID", "Invalid verification action", 400)
     if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", request_id) is None:
         raise auth_error("TURNSTILE_REQUEST_INVALID", "Invalid verification request", 400)
+    if (
+        action == REGISTER_ACTION
+        and native_registration != "2"
+        and legal_agreement_required(settings)
+    ):
+        return native_registration_page(
+            request_id, settings.turnstile_site_key if settings.turnstile_enabled else None
+        )
+    if not settings.turnstile_enabled or settings.turnstile_site_key is None:
+        raise auth_error("TURNSTILE_DISABLED", "Verification is not enabled", 404)
     safe_site_key = html.escape(settings.turnstile_site_key, quote=True)
     safe_action = html.escape(action, quote=True)
     safe_request_id = html.escape(request_id, quote=True)
@@ -443,6 +459,49 @@ window.addEventListener('load',()=>{{
     )
 
 
+def registration_receipt_key(settings: Settings, receipt: str) -> str:
+    # Enabling or rotating Turnstile invalidates receipts issued under the previous setting.
+    site_key = settings.turnstile_site_key if settings.turnstile_enabled else "off"
+    return f"auth:native-registration:{settings.domain}:{site_key}:{token_key(receipt)}"
+
+
+async def require_registration_turnstile(settings: Settings, token: str | None, ip: str) -> None:
+    if not settings.turnstile_enabled:
+        return
+    if token is None:
+        raise auth_error("TURNSTILE_REQUIRED", "Complete the verification challenge", 403)
+    try:
+        verified = await verify_turnstile_token(settings, token, ip, action=REGISTER_ACTION)
+    except TurnstileUnavailableError as exc:
+        raise auth_error(
+            "TURNSTILE_UNAVAILABLE", "Verification is temporarily unavailable; try again", 503
+        ) from exc
+    if not verified:
+        raise auth_error(
+            "TURNSTILE_INVALID", "Verification expired or was unsuccessful; try again", 403
+        )
+
+
+@router.post("/native-registration-consent", include_in_schema=False)
+async def native_registration_consent(
+    payload: NativeRegistrationConsent,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    redis: Redis = Depends(get_redis),
+) -> dict[str, str]:
+    if not legal_agreement_required(settings):
+        raise auth_error("NOT_FOUND", "This server does not require a registration agreement", 404)
+    if not payload.accepted_terms:
+        raise auth_error("TERMS_AGREEMENT_REQUIRED", "Agree to the terms to continue", 422)
+    ip = client_ip(request, settings)
+    if not await redis.set(f"auth:consent-limit:{ip}", "1", ex=5, nx=True):
+        raise auth_error("RATE_LIMITED", "Try again shortly", 429)
+    await require_registration_turnstile(settings, payload.turnstile_token, ip)
+    receipt = new_token(NATIVE_REGISTRATION_RECEIPT_PREFIX)
+    await redis.set(registration_receipt_key(settings, receipt), "1", ex=300)
+    return {"receipt": receipt}
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(
     request: Request,
@@ -454,9 +513,20 @@ async def register(
 ) -> dict[str, str | bool]:
     # Password hashing is intentionally expensive. Bound anonymous callers
     # before spending Argon2 work or enqueueing mail.
-    if not await redis.set(f"auth:register:{client_ip(request, settings)}", "1", ex=5, nx=True):
+    ip = client_ip(request, settings)
+    if not await redis.set(f"auth:register:{ip}", "1", ex=5, nx=True):
         raise auth_error("RATE_LIMITED", "Try again shortly", 429)
-    if legal_agreement_required(settings) and not payload.accepted_terms:
+    token = payload.turnstile_token
+    receipt_key = (
+        registration_receipt_key(settings, token)
+        if token and token.startswith(NATIVE_REGISTRATION_RECEIPT_PREFIX)
+        else None
+    )
+    if (
+        legal_agreement_required(settings)
+        and not payload.accepted_terms
+        and ("accepted_terms" in payload.model_fields_set or receipt_key is None)
+    ):
         raise auth_error(
             "TERMS_AGREEMENT_REQUIRED",
             "Agree to the Terms of Service and Privacy Policy to create an account",
@@ -465,28 +535,10 @@ async def register(
     email_enabled = email_delivery_enabled(settings)
     if email_enabled and payload.email is None:
         raise auth_error("EMAIL_REQUIRED", "Email is required on this instance", 422)
-    if settings.turnstile_enabled:
-        if payload.turnstile_token is None:
-            raise auth_error("TURNSTILE_REQUIRED", "Complete the verification challenge", 403)
-        try:
-            verified = await verify_turnstile_token(
-                settings,
-                payload.turnstile_token,
-                client_ip(request, settings),
-                action=REGISTER_ACTION,
-            )
-        except TurnstileUnavailableError as exc:
-            raise auth_error(
-                "TURNSTILE_UNAVAILABLE",
-                "Verification is temporarily unavailable; try again",
-                503,
-            ) from exc
-        if not verified:
-            raise auth_error(
-                "TURNSTILE_INVALID",
-                "Verification expired or was unsuccessful; try again",
-                403,
-            )
+    if receipt_key is None:
+        await require_registration_turnstile(settings, token, ip)
+    elif await redis.getdel(receipt_key) is None:
+        raise auth_error("TURNSTILE_INVALID", "Verification expired; try again", 403)
     email = str(payload.email).lower() if email_enabled and payload.email is not None else None
     user = User(
         id=await snowflake.mint(),

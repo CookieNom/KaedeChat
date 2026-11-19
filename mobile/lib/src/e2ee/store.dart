@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/e2ee/platform_aead.dart';
 import 'package:path_provider/path_provider.dart';
 
 const _maximumE2eeStateBytes = 32 * 1024 * 1024;
@@ -789,7 +790,7 @@ final class MobileE2EEStore {
       synchronizable: false,
     ),
   );
-  static final _aead = AesGcm.with256bits();
+  static const _aead = PlatformAesGcm();
   static final _recoveryKdf = Pbkdf2(
     macAlgorithm: Hmac.sha256(),
     iterations: 600000,

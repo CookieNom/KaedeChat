@@ -40,6 +40,11 @@ class PasswordKdfLookupRequest(UnambiguousInputModel):
     identifier: str = Field(min_length=2, max_length=320)
 
 
+class NativeRegistrationConsent(UnambiguousInputModel):
+    accepted_terms: StrictBool
+    turnstile_token: str | None = Field(default=None, min_length=1, max_length=2048)
+
+
 class RegisterRequest(UnambiguousInputModel):
     # Required by the register handler only when the instance publishes policies.
     accepted_terms: StrictBool = False

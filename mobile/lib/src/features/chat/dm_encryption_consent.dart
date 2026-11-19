@@ -6,6 +6,7 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
+import 'package:kaede_mobile/src/e2ee/setup_retry.dart';
 
 class DmEncryptionConsent extends ConsumerStatefulWidget {
   const DmEncryptionConsent({super.key, required this.channel});
@@ -20,6 +21,7 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
   Timer? _timer;
   Map<String, Object?>? _request;
   bool _busy = false;
+  bool _enabling = false;
   bool _loading = false;
   String? _error;
 
@@ -64,6 +66,7 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
     }
     setState(() {
       _busy = true;
+      _enabling = action != 'disagree';
       _error = null;
     });
     try {
@@ -80,8 +83,18 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
             _request = (result['request'] as Map).cast<String, Object?>());
       }
       if (action != 'disagree') {
-        final client = await controller.e2eeClient();
-        final updated = await client.enableRoom(widget.channel);
+        // Starting the client and enabling the room both resume safely, so
+        // retry here instead of asking the user to press the button again.
+        final client = await retryE2eeSetup(
+          controller.e2eeClient,
+          waitForBusyVault: true,
+          keepTrying: () => mounted,
+        );
+        final updated = await client.enableRoom(
+          widget.channel,
+          waitForBusyVault: true,
+          keepTrying: () => mounted,
+        );
         if (account != null) {
           await acknowledgeEncryptedRoom(account, updated.ref.wire);
         }
@@ -94,7 +107,12 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
                 'Could not update this encryption request. Please try again.'));
       }
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _enabling = false;
+        });
+      }
     }
   }
 
@@ -102,6 +120,7 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
   Widget build(BuildContext context) {
     final request = _request;
     if (request == null) return const SizedBox.shrink();
+    if (_enabling) return const _EnablingEncryptionCard();
     final state = ref.watch(mobileControllerProvider);
     final requester = request['requester'] as Map;
     final mine =
@@ -172,6 +191,46 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
                         TextStyle(color: Theme.of(context).colorScheme.error)),
             ]),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Stands in for the full consent card while encryption is being turned on,
+/// so the wait takes one row instead of covering the conversation.
+class _EnablingEncryptionCard extends StatelessWidget {
+  const _EnablingEncryptionCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.all(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Semantics(
+          container: true,
+          liveRegion: true,
+          child: Row(children: [
+            const SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Turning on end-to-end encryption…',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 2),
+                  Text('This can take several minutes. Keep Kaede open.',
+                      style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ),
+            ),
+          ]),
         ),
       ),
     );

@@ -287,7 +287,8 @@ final class KaedeRepository {
 
   Future<Map<String, Object?>> authConfig(Domain instance) async {
     api.selectInstance(instance);
-    return api.getJson('/api/v1/auth/config');
+    return api.getJson('/api/v1/auth/config',
+        query: const {'native_registration': '2'});
   }
 
   Future<MobilePasswordKdfContext> _passwordKdfContext(

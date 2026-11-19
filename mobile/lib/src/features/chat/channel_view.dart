@@ -470,13 +470,20 @@ List<KaedeMessage> threadTimelineMessages(
   return List<KaedeMessage>.unmodifiable(<KaedeMessage>[starter, ...messages]);
 }
 
-List<KaedeMessage> _visibleChannelMessages(
+@visibleForTesting
+List<KaedeMessage> visibleChannelMessages(
         MobileState state, KaedeChannel channel) =>
     (canReadRetainedChannelHistory(channel)
             ? threadTimelineMessages(channel, state.messages)
             : state.messages)
         .where((message) =>
-            message.deletedAt == null && !state.isMessageBlocked(message))
+            message.deletedAt == null &&
+            !state.isMessageBlocked(message) &&
+            !(message.messageType == 7 &&
+                message.e2ee?['version'] == 2 &&
+                message.e2ee?['protocol'] == 'mls10' &&
+                (message.e2ee?['operation'] == 'welcome' ||
+                    message.e2ee?['operation'] == 'commit')))
         .toList();
 
 /// Discord type-21 thread starters carry the source message only in
@@ -1236,7 +1243,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         moderationStatus == null;
     final canReadHistory = canReadRetainedChannelHistory(channel);
     final stateMessages = state.messages;
-    final messages = _visibleChannelMessages(state, channel);
+    final messages = visibleChannelMessages(state, channel);
     final detachedStarter = !canReadHistory ||
             state.isMessageBlocked(channel.starterMessage) ||
             messages.length == stateMessages.length
@@ -2769,7 +2776,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
         final state = ref.read(mobileControllerProvider);
         final channel = state.activeChannel;
         if (channel == null) return;
-        final messages = _visibleChannelMessages(state, channel);
+        final messages = visibleChannelMessages(state, channel);
         final targetIndex = messages.indexWhere(
           (message) => message.ref == request.message,
         );

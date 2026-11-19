@@ -12,6 +12,7 @@ import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
 import 'package:kaede_mobile/src/e2ee/native_mls.dart';
+import 'package:kaede_mobile/src/e2ee/setup_retry.dart';
 import 'package:kaede_mobile/src/e2ee/store.dart';
 
 const mlsProtocol = 'mls10';
@@ -5085,29 +5086,28 @@ final class MobileE2EEClient {
     }
   }
 
-  Future<KaedeChannel> enableRoom(KaedeChannel channel) async {
-    return _synchronizedWithLease(
-      (leaseToken) => _startRoomOperation(
-        channel.ref,
-        'activate',
-        leaseToken,
-      ),
-      persist: false,
-      rollbackOnOperationError: false,
-    );
-  }
+  /// Turns on encryption for [channel]. A slow or interrupted attempt resumes
+  /// its saved operation under a fresh lease; see [retryE2eeSetup].
+  Future<KaedeChannel> enableRoom(
+    KaedeChannel channel, {
+    bool waitForBusyVault = false,
+    bool Function()? keepTrying,
+  }) =>
+      retryE2eeSetup(
+        () => _runRoomOperation(channel, 'activate'),
+        waitForBusyVault: waitForBusyVault,
+        keepTrying: keepTrying,
+      );
 
-  Future<KaedeChannel> rekeyRoom(KaedeChannel channel) async {
-    return _synchronizedWithLease(
-      (leaseToken) => _startRoomOperation(
-        channel.ref,
-        'rekey',
-        leaseToken,
-      ),
-      persist: false,
-      rollbackOnOperationError: false,
-    );
-  }
+  Future<KaedeChannel> rekeyRoom(KaedeChannel channel) =>
+      retryE2eeSetup(() => _runRoomOperation(channel, 'rekey'));
+
+  Future<KaedeChannel> _runRoomOperation(KaedeChannel channel, String kind) =>
+      _synchronizedWithLease(
+        (leaseToken) => _startRoomOperation(channel.ref, kind, leaseToken),
+        persist: false,
+        rollbackOnOperationError: false,
+      );
 
   Future<KaedeChannel> _startRoomOperation(
     EntityRef channel,

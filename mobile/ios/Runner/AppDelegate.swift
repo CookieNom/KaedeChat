@@ -14,6 +14,7 @@ import CryptoKit
   private var screenShareChannel: FlutterMethodChannel?
   private var systemCallChannel: FlutterMethodChannel?
   private var pushStateChannel: FlutterMethodChannel?
+  private var aeadChannel: FlutterMethodChannel?
   private var voipRegistry: PKPushRegistry?
   private var debugEvents: [String] = []
   private var debugLoggingEnabled: Bool {
@@ -218,6 +219,57 @@ import CryptoKit
       }
     }
     pushStateChannel = pushState
+
+    let aead = FlutterMethodChannel(
+      name: "chat.kaede.mobile/aead",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    aead.setMethodCallHandler { call, result in
+      // AES-256-GCM for the encryption store. The 16-byte tag follows the
+      // ciphertext, matching the Dart cipher this stands in for.
+      guard call.method == "seal" || call.method == "open" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      guard let arguments = call.arguments as? [String: Any],
+            let key = (arguments["key"] as? FlutterStandardTypedData)?.data,
+            let nonce = (arguments["nonce"] as? FlutterStandardTypedData)?.data,
+            let data = (arguments["data"] as? FlutterStandardTypedData)?.data,
+            let aad = (arguments["aad"] as? FlutterStandardTypedData)?.data,
+            key.count == 32,
+            nonce.count == 12 else {
+        result(FlutterError(code: "AEAD_INVALID", message: nil, details: nil))
+        return
+      }
+      do {
+        let symmetricKey = SymmetricKey(data: key)
+        let gcmNonce = try AES.GCM.Nonce(data: nonce)
+        if call.method == "seal" {
+          let box = try AES.GCM.seal(
+            data,
+            using: symmetricKey,
+            nonce: gcmNonce,
+            authenticating: aad
+          )
+          result(FlutterStandardTypedData(bytes: box.ciphertext + box.tag))
+        } else {
+          guard data.count >= 16 else {
+            throw CryptoKitError.incorrectParameterSize
+          }
+          let box = try AES.GCM.SealedBox(
+            nonce: gcmNonce,
+            ciphertext: data.prefix(data.count - 16),
+            tag: data.suffix(16)
+          )
+          let opened = try AES.GCM.open(box, using: symmetricKey, authenticating: aad)
+          result(FlutterStandardTypedData(bytes: opened))
+        }
+      } catch {
+        // Includes a rejected tag; Dart re-checks with its own cipher.
+        result(FlutterError(code: "AEAD_FAILED", message: nil, details: nil))
+      }
+    }
+    aeadChannel = aead
   }
 
   private func reportIncoming(callID: String, caller: String, result: @escaping FlutterResult) {

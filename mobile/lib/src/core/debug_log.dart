@@ -32,6 +32,7 @@ enum DebugEvent {
   gatewayConnected,
   gatewayReconnecting,
   gatewayOffline,
+  encryptionCipher,
 }
 
 /// Device-local, opt-in diagnostics. Never accepts messages, URLs or payloads.

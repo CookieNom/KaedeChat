@@ -94,9 +94,13 @@ chmod 600 .env
 Once the operator legal fields below are configured, registration requires
 explicit agreement to the instance’s terms and an acknowledgment of its privacy
 policy. Without them, signup shows no agreement step, because there's no policy
-to agree to. Deploy updated clients with the backend: on an instance with
-published policies, older clients can't register without the new agreement
-field and should use the updated web signup page.
+to agree to.
+
+Deploy the web frontend and API together. The 0.1.104 iOS and Android apps show
+the published policies in their existing verification window, including on
+instances with Turnstile disabled. If the app says the policies could not be
+loaded, check that the same instance serves the full, dated policy text at
+`/terms.html` and `/privacy.html`.
 
 When you change the policy text, or deploy a Kaede release that changes it,
 update `KAEDE_LEGAL_EFFECTIVE_DATE` and run `make deploy` so the pages show the
