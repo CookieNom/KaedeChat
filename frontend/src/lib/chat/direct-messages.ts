@@ -9,7 +9,9 @@ export function promoteDirectMessage(channels: Channel[], active: Channel): Chan
   return [
     active,
     ...channels.filter(
-      (channel) => channel.id !== active.id || channel.origin_domain !== active.origin_domain
+      (channel) =>
+        channel.origin_domain !== active.origin_domain ||
+        (channel.id !== active.id && channel.id !== active.dm_previous_id)
     )
   ];
 }

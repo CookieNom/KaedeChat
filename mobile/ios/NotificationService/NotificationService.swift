@@ -47,6 +47,9 @@ final class NotificationService: UNNotificationServiceExtension {
       fallback.title = title
       fallback.body = body
       fallback.categoryIdentifier = self.category(for: result["kind"] as? String)
+      if result["kind"] as? String == "relationship" {
+        fallback.userInfo["screen"] = "friends"
+      }
       if let channel = result["channel_ref"] as? String {
         fallback.threadIdentifier = channel
         fallback.userInfo["channel_ref"] = channel
@@ -71,6 +74,7 @@ final class NotificationService: UNNotificationServiceExtension {
     case "guild_message": return "kaede_guilds"
     case "call": return "kaede_calls"
     case "moderation": return "kaede_moderation"
+    case "relationship": return "kaede_relationships"
     default: return "kaede_activity"
     }
   }

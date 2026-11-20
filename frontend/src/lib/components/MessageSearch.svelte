@@ -12,9 +12,11 @@
     type MessageSearchAuthorType,
     type MessageSearchOperator
   } from '$lib/chat/message-search';
+  import { searchLoadedMessages } from '$lib/chat/search-loaded-messages';
   import { entityRef } from '$lib/chat/refs';
   import type {
     Channel,
+    Message,
     MessageSearchResponse,
     MessageSearchResult,
     UserSummary
@@ -36,6 +38,7 @@
     channel,
     channels = [],
     users = [],
+    localHistory = [],
     customEmojis,
     onJump,
     placement = 'dialog'
@@ -47,6 +50,7 @@
     channel?: Channel | null;
     channels?: Channel[];
     users?: UserSummary[];
+    localHistory?: Message[];
     customEmojis?: CustomEmojiOption[];
     onJump?: (result: MessageSearchResult) => void | Promise<void>;
     placement?: 'dialog' | 'header';
@@ -167,6 +171,26 @@
       Number(Boolean(before)) +
       Number(Boolean(after))
   );
+  let localQuery = $state('');
+  const privateResults = $derived(
+    channel?.dm_previous_id ? searchLoadedMessages(localHistory, localQuery) : []
+  );
+  const displayedResults = $derived.by(() => {
+    const publicHits =
+      response?.results.filter((hit) => !chatEntities.isMessageBlocked(hit.message)) ?? [];
+    const privateHits = channel
+      ? privateResults.map((hit) => ({ ...hit, channel, guild: null }))
+      : [];
+    const hits = [...publicHits, ...privateHits];
+    if (privateHits.length && sort !== 'relevance') {
+      hits.sort(
+        (a, b) =>
+          (Date.parse(a.message.created_at) - Date.parse(b.message.created_at)) *
+          (sort === 'oldest' ? 1 : -1)
+      );
+    }
+    return hits;
+  });
   const uniqueUsers = $derived(
     [...new Map(users.map((user) => [entityRef(user), user])).values()].sort((a, b) =>
       userDisplayName(a).localeCompare(userDisplayName(b))
@@ -425,6 +449,7 @@
         })
       });
       if (generation !== searchGeneration) return;
+      localQuery = activeFilterCount === 0 ? query.trim().toLocaleLowerCase() : '';
       response =
         next && response
           ? { ...result, results: [...response.results, ...result.results] }
@@ -440,6 +465,13 @@
   }
 
   function jump(result: MessageSearchResult) {
+    if (result.message.channel_id !== result.channel.id && !result.guild) {
+      closeSearch();
+      document
+        .getElementById('message-' + entityRef(result.message))
+        ?.scrollIntoView({ block: 'center' });
+      return;
+    }
     if (onJump) {
       void onJump(result);
       closeSearch();
@@ -598,7 +630,7 @@
                   {advancedOpen
                     ? $t('ui_filters_546ebb8e')
                     : response
-                      ? `${response.results.length}${cursor ? '+' : ''} results`
+                      ? `${response.results.length + privateResults.length}${cursor ? '+' : ''} results`
                       : $t('ui_search_messages_ddf0602b')}
                 </h2>
                 {#if placement === 'dialog'}
@@ -900,6 +932,9 @@
             {/if}
           {/if}
 
+          {#if channel?.dm_previous_id}<p class="partial">
+              {$t('dm_privacy_mixed_search')}
+            </p>{/if}
           {#if error}<p class="error" role="alert">{error}</p>{/if}
           {#if response && !suggestionsOpen && !advancedOpen}
             {#if response.indexing}<p class="partial" role="status">
@@ -920,16 +955,18 @@
                 {$t('ui_encrypted_channels_were_excluded_from_these_r_7504f46e')}
               </p>{/if}
             <div class="results" aria-live="polite">
-              {#if response.results.length === 0}<p class="empty">
+              {#if response.results.length === 0 && !privateResults.length}<p class="empty">
                   {$t('ui_no_messages_matched_those_filters_e2e6b23d')}
                 </p>{/if}
-              {#each response.results.filter((result) => !chatEntities.isMessageBlocked(result.message)) as result (entityRef(result.message))}
+              {#each displayedResults as result (entityRef(result.message))}
                 <article class="result">
                   <button class="result-context" type="button" onclick={() => jump(result)}>
                     <span
-                      >{result.guild?.name ??
-                        result.channel.recipients?.map(userDisplayName).join(', ') ??
-                        $t('ui_direct_message_cd3e1605')} · {result.channel.name ??
+                      >{result.message.channel_id !== result.channel.id
+                        ? $t('dm_privacy_local_results')
+                        : (result.guild?.name ??
+                          result.channel.recipients?.map(userDisplayName).join(', ') ??
+                          $t('ui_direct_message_cd3e1605'))} · {result.channel.name ??
                         'conversation'}</span
                     >
                     <span>{$t('ui_jump_9ee0ca3e')}</span>

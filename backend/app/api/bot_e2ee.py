@@ -1444,7 +1444,11 @@ async def _pause_dm_bot_participation(
     session: AsyncSession,
     channel: Channel,
 ) -> None:
-    if channel.encryption_mode == "e2ee" and channel.encryption_state == "active":
+    if (
+        getattr(channel, "dm_successor_id", None) is None
+        and channel.encryption_mode == "e2ee"
+        and channel.encryption_state == "active"
+    ):
         channel.encryption_state = "rekeying"
     await session.flush()
 
@@ -1525,6 +1529,9 @@ async def _grant_dm_bot_e2ee(
         actor,
         channel_ref,
     )
+    await session.refresh(channel, with_for_update=True)
+    if channel.dm_successor_id is not None:
+        raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
     application_id, application_domain = application_ref.resolve(settings.domain)
     grant = await session.scalar(
         select(BotDMGrant)

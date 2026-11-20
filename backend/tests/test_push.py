@@ -465,6 +465,50 @@ async def test_outbound_push_relay_ignores_silence_but_honors_suspension(
     lock.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("cohosted", "relay_status"), [(True, 202), (False, 401), (False, 410)])
+async def test_relay_wake_commits_cohosted_discovery_and_retries_auth_failure(
+    monkeypatch: pytest.MonkeyPatch, cohosted: bool, relay_status: int
+) -> None:
+    transitions: list[str] = []
+
+    async def check_policy(*_args: object) -> None:
+        transitions.append("policy")
+
+    async def discover(*_args: object) -> None:
+        transitions.append("discovery")
+
+    async def commit() -> None:
+        transitions.append("commit")
+
+    def receive(_request: httpx.Request) -> httpx.Response:
+        expected = ["policy", "discovery"]
+        if cohosted:
+            expected.extend(["commit", "policy"])
+        assert transitions == expected
+        return httpx.Response(relay_status)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(receive))
+    monkeypatch.setattr(push_client.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(push_client, "_require_relay_exchange_allowed", check_policy)
+    monkeypatch.setattr(push_client, "ensure_peer", discover)
+    monkeypatch.setattr(push_client, "federation_signing_headers", AsyncMock(return_value={}))
+    wake = push_client.send_relay_wake(
+        SimpleNamespace(commit=commit),  # type: ignore[arg-type]
+        SimpleNamespace(
+            domain="home.example",
+            push_relay_origin="home.example" if cohosted else "relay.example",
+            push_relay_url="https://push.example",
+        ),  # type: ignore[arg-type]
+        {},
+    )
+    if relay_status == 401:
+        with pytest.raises(FederationNetworkError, match="HTTP 401"):
+            await wake
+    else:
+        assert (await wake).status_code == relay_status
+
+
 @pytest.mark.parametrize("revoke", [False, True])
 @pytest.mark.asyncio
 async def test_federated_push_wake_rate_limit_precedes_subscription_lookup(
@@ -609,6 +653,51 @@ async def test_apns_http2_client_can_start_without_network() -> None:
     # dependency fails here rather than dropping every background iOS call.
     async with httpx.AsyncClient(http2=True) as client:
         assert not client.is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferences", "expected_body"),
+    [
+        ({}, "A friend request arrived."),
+        ({"show_notification_previews": False}, "Open Friends to view this update."),
+        ({"relationships": False}, None),
+        ({"presence_preference": "dnd"}, None),
+    ],
+)
+async def test_relationship_delivery_honors_recipient_settings(preferences, expected_body) -> None:
+    redis = MemoryRedis()
+    device_id = uuid4()
+    recipient = SimpleNamespace(id=123, origin_domain="home.example")
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=SimpleNamespace(enabled=True)),
+        get=AsyncMock(return_value=SimpleNamespace(notification_settings=preferences)),
+    )
+    token = await issue_push_sync(
+        redis,
+        PushSyncEvent(
+            device_id=str(device_id),
+            user_id=recipient.id,
+            user_domain=recipient.origin_domain,
+            message_id=789,
+            message_domain=recipient.origin_domain,
+            kind="relationship",
+            title="New friend request",
+            body="A friend request arrived.",
+            event_ref="relationship:456@remote.example:pending_in",
+        ),
+    )
+    response = await push_api.redeem_push_notification(
+        PushNotificationRedeem(installation_id=device_id, event_token=token),
+        SimpleNamespace(user=recipient),
+        session,
+        redis,
+    )
+    if expected_body is None:
+        assert response.status_code == 204
+    else:
+        assert response.body == expected_body
+    assert await load_push_sync(redis, token) is None
 
 
 @pytest.mark.asyncio

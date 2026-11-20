@@ -1,3 +1,6 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
 #include "Generated.xcconfig"
 APNS_ENVIRONMENT=production
+// Dart looks up the statically linked MLS functions in the Runner executable.
+EXPORTED_SYMBOLS_FILE = $(SRCROOT)/Runner/KaedeE2EE.exports
+STRIP_STYLE = non-global

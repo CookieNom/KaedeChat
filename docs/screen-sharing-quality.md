@@ -219,6 +219,14 @@ field. Fallback `demand` values also stay within the legacy set. Existing Kaede
 clients can ignore the extension and continue using their compatible track;
 HEVC does not require a coordinated client upgrade.
 
+In encrypted calls, updated clients include `encryptedH264: 2` in their hints
+to indicate support for the corrected H.264 frame format. They offer H.264 only
+after every participant signals that capability. With a 0.1.104 participant,
+VP8 is the fallback for camera and screen sharing. Leaving H.264 out of the
+advertised codec list also steers a 0.1.104 publisher to that fallback. AV1
+remains available when supported. Calls between older clients follow the codec
+policy built into those clients.
+
 VP9 can replace the compatible track only when every viewer accepts it, upload
 is constrained, and thirty seconds of healthy encoder evidence shows CPU load
 below half a core. A viewer asking for VP8 or H.264 prevents that replacement.
@@ -280,10 +288,9 @@ across encoding and decoding checks. Transient negative evidence expires after
 one minute; missing mode statistics are accepted only for baseline VP8/H.264
 `L1T1`, never as proof of a scalable or premium mode.
 
-Encrypted and plaintext calls use the same policy. Encryption remains enabled
-through codec changes, late joins and key rotation. The existing Kaede AV1 wire
-format is unchanged; HEVC uses the existing H.265 NAL cryptor, with full-width
-clear-prefix lengths and authenticated headers. See the
+Calls stay encrypted through codec changes, late joins and key rotation.
+Kaede retains its existing AV1 wire format. HEVC uses the H.265 NAL cryptor
+with full-width clear-prefix lengths and authenticated headers. See the
 [codec/E2EE validation notes](av1-e2ee/README.md) for native artifacts and the
 hardware interoperability matrix. A capability-probe pass does not replace those
 E2EE tests.

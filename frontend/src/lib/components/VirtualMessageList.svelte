@@ -155,7 +155,8 @@
   }
 
   async function loadEarlierAnchored() {
-    if (!onLoadEarlier || !viewport || loadingEarlier || !items.length) return;
+    if (!onLoadEarlier || !viewport || loadingEarlier) return;
+    if (!items.length) return onLoadEarlier();
     const previousHeight = viewport.scrollHeight;
     const previousTop = viewport.scrollTop;
     await onLoadEarlier();

@@ -23,6 +23,17 @@ async def _require_relay_exchange_allowed(session: AsyncSession, destination: st
         raise FederationNetworkError("federation with the push relay is suspended")
 
 
+async def _prepare_relay_exchange(session: AsyncSession, settings: Settings) -> None:
+    destination = settings.push_relay_origin
+    await _require_relay_exchange_allowed(session, destination)
+    await ensure_peer(session, settings, destination)
+    if destination == settings.domain:
+        # The co-hosted relay verifies this signature in a separate transaction.
+        # Publish discovery and release its locks before contacting the relay.
+        await session.commit()
+        await _require_relay_exchange_allowed(session, destination)
+
+
 async def send_relay_wake(
     session: AsyncSession,
     settings: Settings,
@@ -30,8 +41,7 @@ async def send_relay_wake(
 ) -> httpx.Response:
     """Send one idempotent wake to the operator-pinned relay transport URL."""
 
-    await _require_relay_exchange_allowed(session, settings.push_relay_origin)
-    await ensure_peer(session, settings, settings.push_relay_origin)
+    await _prepare_relay_exchange(session, settings)
     body = canonical_json(payload)
     headers = await federation_signing_headers(
         session,
@@ -43,13 +53,18 @@ async def send_relay_wake(
     )
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            return await client.post(
+            response = await client.post(
                 f"{settings.push_relay_url}{RELAY_WAKE_PATH}",
                 content=body,
                 headers=headers,
             )
     except httpx.HTTPError as exc:
         raise FederationNetworkError("push relay request failed") from exc
+    if response.status_code == 401:
+        # A relay refreshing the home's key can temporarily reject a valid wake.
+        # Keep it in the outbox for the next sweep until its normal expiry.
+        raise FederationNetworkError("push relay authentication failed (HTTP 401)")
+    return response
 
 
 async def revoke_relay_subscription(
@@ -58,8 +73,7 @@ async def revoke_relay_subscription(
     subscription_id: str,
 ) -> None:
     path = f"/_kaede/push/v1/subscriptions/{subscription_id}"
-    await _require_relay_exchange_allowed(session, settings.push_relay_origin)
-    await ensure_peer(session, settings, settings.push_relay_origin)
+    await _prepare_relay_exchange(session, settings)
     headers = await federation_signing_headers(
         session, settings, "DELETE", settings.push_relay_origin, path, b""
     )

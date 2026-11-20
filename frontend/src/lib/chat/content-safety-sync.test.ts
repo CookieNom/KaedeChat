@@ -13,6 +13,7 @@ vi.mock('$lib/stores/entities.svelte', () => ({
 import {
   applyContentSafetyUpdate,
   contentSafety,
+  invalidateContentSafety,
   syncContentSafety
 } from './content-safety.svelte';
 import { stripNetworkClientState } from '$lib/api/network-boundary';
@@ -56,6 +57,27 @@ it('does not finish synchronization before durable encrypted cache cleanup compl
   expect(contentSafety.ready).toBe(false);
   release();
   await pending;
+  expect(contentSafety.ready).toBe(true);
+});
+
+it('waits for a fresh check when a reconnect supersedes ongoing cleanup', async () => {
+  network.api.mockResolvedValue({ items: [], next_cursor: '0', has_more: false });
+  let finishOld!: () => void;
+  let finishNew!: () => void;
+  network.purge
+    .mockImplementationOnce(() => new Promise<void>((resolve) => (finishOld = resolve)))
+    .mockImplementationOnce(() => new Promise<void>((resolve) => (finishNew = resolve)));
+  const old = syncContentSafety(user);
+  await vi.waitFor(() => expect(finishOld).toBeDefined());
+  invalidateContentSafety();
+  const fresh = syncContentSafety({ ...user, id: '202' });
+  finishOld();
+  await old;
+  await vi.waitFor(() => expect(finishNew).toBeDefined());
+  expect(contentSafety.ready).toBe(false);
+  expect(network.purge.mock.calls[1][0].id).toBe('202');
+  finishNew();
+  await fresh;
   expect(contentSafety.ready).toBe(true);
 });
 

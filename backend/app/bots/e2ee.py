@@ -212,7 +212,10 @@ async def revoke_bot_e2ee_access(
         list(
             await session.scalars(
                 select(Channel)
-                .where(tuple_(Channel.id, Channel.origin_domain).in_(channel_refs))
+                .where(
+                    tuple_(Channel.id, Channel.origin_domain).in_(channel_refs),
+                    Channel.dm_successor_id.is_(None),
+                )
                 .order_by(Channel.origin_domain, Channel.id)
                 .with_for_update()
             )

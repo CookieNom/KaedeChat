@@ -4,7 +4,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,7 @@ from app.api.dependencies import AuthenticatedUser, get_redis, get_session, requ
 from app.bots.dm_capability import fence_bot_dm_capabilities_for_pair
 from app.chat.e2ee_membership import publish_e2ee_policy_updates
 from app.chat.events import publish_dispatch, user_topic
-from app.chat.payloads import relationship_payload, user_payload
+from app.chat.payloads import relationship_payload, relationship_snapshot, user_payload
 from app.chat.presence import publish_cached_presence
 from app.chat.privacy import blocked_between, lock_relationship_pair, relationship
 from app.chat.schemas import RelationshipRequest
@@ -132,22 +132,7 @@ async def list_relationships(
     auth: AuthenticatedUser = Depends(require_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, object]]:
-    rows = (
-        await session.execute(
-            select(Relationship, User)
-            .join(
-                User,
-                (User.id == Relationship.target_id)
-                & (User.origin_domain == Relationship.target_domain),
-            )
-            .where(
-                Relationship.user_id == auth.user.id,
-                Relationship.user_domain == auth.user.origin_domain,
-            )
-            .order_by(Relationship.type, func.lower(User.username))
-        )
-    ).all()
-    return [relationship_payload(item, target) for item, target in rows]
+    return await relationship_snapshot(session, auth.user)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

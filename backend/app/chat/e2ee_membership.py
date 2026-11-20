@@ -168,7 +168,9 @@ async def publish_e2ee_policy_updates(
     settings: Settings,
     channels: Iterable[Channel],
 ) -> None:
-    materialized_channels = list(channels)
+    materialized_channels = [
+        channel for channel in channels if getattr(channel, "dm_successor_id", None) is None
+    ]
     # Access changes move these channels out of ``active``. PostgreSQL owns
     # ``updated_at`` and SQLAlchemy expires it on UPDATE, so materialize all
     # versions at this shared fanout boundary before synchronous rendering.
@@ -248,6 +250,7 @@ async def pause_local_e2ee_for_device_change(
             .where(
                 Channel.encryption_mode == "e2ee",
                 Channel.encryption_state == "active",
+                Channel.dm_successor_id.is_(None),
                 (
                     tuple_(Channel.guild_id, Channel.guild_domain).in_(guild_refs)
                     | tuple_(Channel.id, Channel.origin_domain).in_(dm_refs)

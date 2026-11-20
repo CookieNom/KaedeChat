@@ -22,6 +22,48 @@ const videoCodecPolicy = {
 bool isPremiumVideoCodec(String? codec) =>
     videoCodecPolicy[codec]?.premium ?? false;
 
+const encryptedH264Version = 2;
+
+bool sharesEncryptedH264Format(Iterable<Object?> versions) =>
+    versions.isNotEmpty &&
+    versions
+        .every((version) => version is int && version == encryptedH264Version);
+
+String remoteVideoCodec(String mimeType, String? namedCodec,
+    {required bool encrypted}) {
+  final actual = mimeType.split(';').first.trim().toLowerCase().split('/').last;
+  // The SFU can substitute H.264 after a publisher names its track.
+  if (encrypted &&
+      (actual == 'h264' ||
+          namedCodec == 'h264' && videoCodecPolicy.containsKey(actual))) {
+    return actual;
+  }
+  return namedCodec ?? actual;
+}
+
+String encodeVideoHints(Set<String> codecs, Map<String, String> demand,
+    Map<String, String> health) {
+  final hints = <String, Object>{
+    'v': 1,
+    'encryptedH264': encryptedH264Version,
+    'codecs': codecs.where((codec) => videoCodecPolicy[codec]!.legacy).toList(),
+    'extendedCodecs':
+        codecs.where((codec) => !videoCodecPolicy[codec]!.legacy).toList(),
+    'demand': Map.fromEntries(demand.entries
+        .where((entry) =>
+            codecs.contains(entry.value) &&
+            videoCodecPolicy[entry.value]!.legacy &&
+            utf8.encode(entry.key).length <= 256)
+        .take(64)),
+    'health': health,
+  };
+  final encoded = jsonEncode(hints);
+  // Large rooms must still receive capability changes within the v1 wire limit.
+  if (utf8.encode(encoded).length <= 8192) return encoded;
+  return jsonEncode(
+      {...hints, 'demand': <String, String>{}, 'health': <String, String>{}});
+}
+
 /// Preserve the v1 field for old parsers; newer codecs travel only in its extension.
 Set<String>? parseVideoCodecs(Map<String, dynamic> hints) {
   final legacy = hints['codecs'];
@@ -333,19 +375,31 @@ class AdaptiveVideo {
 
   static const topic = 'kaede.video.v1';
   static VideoPublishOptions publishOptions(
-    Room room,
-    TrackSource source,
-    MobileMediaQuality quality,
-  ) {
+      Room room, TrackSource source, MobileMediaQuality quality,
+      {AdaptiveVideo? controller}) {
     final options = room.roomOptions.defaultVideoPublishOptions;
+    bool h264Allowed() =>
+        room.e2eeManager == null ||
+        (controller != null &&
+            identical(controller.room, room) &&
+            controller._h264Allowed);
+    final initialCodec = options.videoCodec == 'h264' && !h264Allowed()
+        ? 'vp8'
+        : options.videoCodec;
     final sourceName =
         source == TrackSource.screenShareVideo ? 'screen_share' : 'camera';
     return options.copyWith(
-      name: '$topic:$sourceName:${options.videoCodec}',
+      name: '$topic:$sourceName:$initialCodec',
+      videoCodec: initialCodec,
       screenShareEncoding: quality.screen.profile.parameters.encoding,
       backupVideoCodec: const BackupVideoCodec(enabled: false),
-      configureEncodings: (track, encodings, codec) =>
-          _prepareInitialEncodings(room, quality, track, encodings, codec),
+      configureEncodings: (track, encodings, codec) async {
+        // LiveKit can substitute its negotiated codec after we choose our preference.
+        if (codec == 'h264' && !h264Allowed()) {
+          throw StateError('This call requires another video codec');
+        }
+        await _prepareInitialEncodings(room, quality, track, encodings, codec);
+      },
     );
   }
 
@@ -496,10 +550,24 @@ class AdaptiveVideo {
   int get _level => max(_publisher.level, _device.levelFloor);
   bool get _uploadConstrained => _upload.level > 0;
 
+  bool get _h264Allowed {
+    if (room.e2eeManager == null) return true;
+    if (_closed) return false;
+    final now = DateTime.now();
+    return sharesEncryptedH264Format(
+        room.remoteParticipants.keys.map((identity) {
+      final hint = _peers[identity];
+      return hint == null || now.difference(hint.$1).inSeconds > 25
+          ? null
+          : hint.$2['encryptedH264'];
+    }));
+  }
+
   /// Decode codecs offered to publishers; AV1 is withheld when it would be
   /// decoded in software on a hot or power-saving device.
   Set<String> get _advertised {
     return _codecs.where((codec) {
+      if (codec == 'h264') return _h264Allowed;
       if (codec == 'h265') return _device.hevcHardwareDecode;
       return codec != 'av1' ||
           _device.av1HardwareDecode ||
@@ -517,6 +585,16 @@ class AdaptiveVideo {
 
   Future<void> start() async {
     _events = room.createListener()
+      ..on<RoomReconnectingEvent>((_) {
+        if (room.e2eeManager != null) {
+          _peers.clear();
+          _seen.clear();
+        }
+      })
+      ..on<RoomReconnectedEvent>((_) {
+        unawaited(_announce(force: true).catchError((_) {}));
+        unawaited(tick());
+      })
       ..on<TrackPublishedEvent>((event) {
         if (_closed) return;
         if (event.publication.kind == TrackType.AUDIO) {
@@ -527,6 +605,7 @@ class AdaptiveVideo {
       })
       ..on<ParticipantConnectedEvent>((event) {
         _seen[event.participant.identity] = DateTime.now();
+        _peers.remove(event.participant.identity);
         // New viewers need our hints before publishers can choose codecs.
         unawaited(_announce(force: true).catchError((_) {}));
         unawaited(tick());
@@ -536,16 +615,21 @@ class AdaptiveVideo {
         _seen.remove(identity);
         _peers.remove(identity);
         _backoff.clear('$identity/');
+        unawaited(_announce().catchError((_) {}));
         unawaited(tick());
       })
       ..on<DataReceivedEvent>((event) {
+        final peer = event.participant;
         if (_closed ||
             event.topic != topic ||
-            event.participant == null ||
-            event.data.length > 8192) {
+            peer == null ||
+            !identical(room.remoteParticipants[peer.identity], peer)) {
           return;
         }
+        final allowedBefore = _h264Allowed;
+        if (room.e2eeManager != null) _peers.remove(peer.identity);
         try {
+          if (event.data.length > 8192) return;
           final value = jsonDecode(utf8.decode(event.data));
           if (value is! Map<String, dynamic> ||
               value['demand'] is! Map ||
@@ -554,12 +638,17 @@ class AdaptiveVideo {
           }
           final codecs = parseVideoCodecs(value);
           if (codecs == null) return;
-          _peers[event.participant!.identity] = (
+          _peers[peer.identity] = (
             DateTime.now(),
             {...value, 'codecs': codecs.toList()},
           );
         } catch (_) {
           /* Ignore malformed peer hints. */
+        } finally {
+          if (allowedBefore != _h264Allowed) {
+            unawaited(_announce().catchError((_) {}));
+            unawaited(tick());
+          }
         }
       });
     try {
@@ -624,21 +713,7 @@ class AdaptiveVideo {
   /// [VideoPolicy.announceEvery] otherwise.
   Future<void> _announce({bool force = false}) async {
     if (_closed) return;
-    final payload = jsonEncode({
-      'v': 1,
-      'codecs': _advertised
-          .where((codec) => videoCodecPolicy[codec]!.legacy)
-          .toList(),
-      'extendedCodecs': _advertised
-          .where((codec) => !videoCodecPolicy[codec]!.legacy)
-          .toList(),
-      'demand': Map.fromEntries(
-        _demand.entries.where(
-          (entry) => videoCodecPolicy[entry.value]?.legacy == true,
-        ),
-      ),
-      'health': _health,
-    });
+    final payload = encodeVideoHints(_advertised, _demand, _health);
     final now = DateTime.now();
     if (!force &&
         payload == _lastAnnounced &&
@@ -699,6 +774,7 @@ class AdaptiveVideo {
     final reportKeys = <String>{};
     final now = DateTime.now();
     final codecs = _advertised;
+    final encrypted = room.e2eeManager != null;
     for (final participant in room.remoteParticipants.values.toList()) {
       for (final audio in participant.audioTrackPublications) {
         if (_closed) return;
@@ -725,9 +801,12 @@ class AdaptiveVideo {
             .where((p) => p.name.startsWith('$topic:$source:'))
             .toList();
         final choices = managed.isEmpty ? entry.value : managed;
-        String codec(RemoteTrackPublication publication) => managed.isEmpty
-            ? publication.mimeType.toLowerCase().split('/').last
-            : publication.name.split(':').last;
+        String codec(RemoteTrackPublication publication) => remoteVideoCodec(
+              publication.mimeType,
+              managed.isEmpty ? null : publication.name.split(':').last,
+              encrypted: encrypted,
+            );
+
         String? fallbackFor() {
           final fallback = choices
               .where(
@@ -804,7 +883,7 @@ class AdaptiveVideo {
             )
             .firstOrNull;
         // Legacy publications may omit codec metadata before subscription.
-        selected ??= managed.isEmpty
+        selected ??= managed.isEmpty && _h264Allowed
             ? choices
                 .where((publication) => codec(publication).isEmpty)
                 .firstOrNull
@@ -818,7 +897,10 @@ class AdaptiveVideo {
         for (final publication in entry.value) {
           if (publication != selected) await publication.unsubscribe();
         }
-        if (!_videoVisible) {
+        final selectedCodec = codec(selected);
+        if (!_videoVisible ||
+            ((selectedCodec == 'h264' || selectedCodec.isEmpty) &&
+                !_h264Allowed)) {
           await selected.unsubscribe();
           continue;
         }
@@ -970,6 +1052,14 @@ class AdaptiveVideo {
     LocalTrackPublication<LocalVideoTrack> publication,
     LocalVideoTrack track,
   ) async {
+    if (track.codec == 'h264' && !_h264Allowed) {
+      // A legacy join must not resume H.264 while its VP8 replacement is being prepared.
+      if (!_detached.contains(publication.sid) && track.sender != null) {
+        await track.sender!.replaceTrack(null);
+        _detached.add(publication.sid);
+      }
+      return;
+    }
     if (!_detached.contains(publication.sid)) return;
     final sender = track.sender;
     if (sender == null) {
@@ -988,6 +1078,7 @@ class AdaptiveVideo {
         throw StateError('Could not reserve compatible video bandwidth');
       }
     }
+    if (track.codec == 'h264' && !_h264Allowed) return;
     await sender.replaceTrack(track.mediaStreamTrack);
     // A failed resume must remain retryable before retiring the premium sender.
     _detached.remove(publication.sid);
@@ -1060,7 +1151,8 @@ class AdaptiveVideo {
       final fallbackCodec =
           track.codec ?? room.roomOptions.defaultVideoPublishOptions.videoCodec;
       // A viewer whose hints have not arrived yet keeps the current fallback.
-      final allH264 = viewers.isNotEmpty &&
+      final allH264 = _h264Allowed &&
+          viewers.isNotEmpty &&
           viewers.every(
             (identity) => pending(identity)
                 ? fallbackCodec == 'h264'
@@ -1125,7 +1217,9 @@ class AdaptiveVideo {
           }
           replacementPublication = await local.publishVideoTrack(
             replacement,
-            publishOptions: publishOptions(room, source, quality()).copyWith(
+            publishOptions:
+                publishOptions(room, source, quality(), controller: this)
+                    .copyWith(
               name: '$topic:$sourceName:$preferredFallback',
               videoCodec: preferredFallback,
               simulcast: !videoCodecPolicy[preferredFallback]!.scalable,
@@ -1134,6 +1228,7 @@ class AdaptiveVideo {
           );
           if (_closed ||
               replacement.codec != preferredFallback ||
+              (preferredFallback == 'h264' && !_h264Allowed) ||
               original.muted ||
               !local.trackPublications.containsKey(original.sid)) {
             await local.removePublishedTrack(replacementPublication.sid);
@@ -1236,7 +1331,9 @@ class AdaptiveVideo {
             await clone.stop();
             continue;
           }
-          final options = publishOptions(room, source, quality()).copyWith(
+          final options =
+              publishOptions(room, source, quality(), controller: this)
+                  .copyWith(
             name: '$topic:$sourceName:$variantCodec',
             videoCodec: variantCodec,
             simulcast: false,

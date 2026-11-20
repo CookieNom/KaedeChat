@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
@@ -9,10 +10,12 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
 import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Wording shared by the member list, profile sheets and the account bar.
 String presenceLabel(PresenceStatus status) => switch (status) {
@@ -355,7 +358,10 @@ Future<void> showUserProfile(
   KaedeUser user,
   PresenceStatus presence, {
   List<Widget> actions = const <Widget>[],
+  bool offerMessage = false,
+  VoidCallback? onOpenChat,
   String? memberOf,
+  Widget? guildMemberSection,
   EntityRef? guildRef,
   DateTime? joinedAt,
 }) {
@@ -384,31 +390,13 @@ Future<void> showUserProfile(
         return UserProfileSheet(
           user: state.userProfiles[user.ref] ?? user,
           profile: profile,
-          presence: presence,
-          actions: [
-            ...actions,
-            if (state.user != null &&
-                user.ref != state.user?.ref &&
-                !user.isSystem &&
-                user.profileResolved)
-              ActionButton(
-                kind: ActionButtonKind.outlined,
-                icon: Icon(state.isBlocked(user)
-                    ? Icons.lock_open_rounded
-                    : Icons.block),
-                label: Text(state.isBlocked(user)
-                    ? L10n.of(context).ui_unblock_987c7d5f
-                    : L10n.of(context).profile_block),
-                tooltip: L10n.of(context).profile_block_help,
-                onPressed: () async {
-                  await ref
-                      .read(mobileControllerProvider.notifier)
-                      .setUserBlocked(user, !state.isBlocked(user));
-                  if (context.mounted) Navigator.pop(context);
-                },
-              ),
-          ],
+          presence: state.presenceByUser[user.ref] ?? presence,
+          actions: actions,
+          viewer: state.user?.ref,
+          offerMessage: offerMessage || onOpenChat != null,
+          onOpenChat: onOpenChat,
           memberOf: memberOf,
+          guildMemberSection: guildMemberSection,
           joinedAt: guildJoinedAt,
           friendsSince: guildRef == null &&
                   memberOf == null &&
@@ -428,7 +416,11 @@ final class UserProfileSheet extends StatefulWidget {
     required this.presence,
     this.profile,
     this.actions = const <Widget>[],
+    this.viewer,
+    this.offerMessage = false,
+    this.onOpenChat,
     this.memberOf,
+    this.guildMemberSection,
     this.joinedAt,
     this.friendsSince,
     this.applicationLookup,
@@ -439,7 +431,11 @@ final class UserProfileSheet extends StatefulWidget {
   final Future<KaedeUser>? profile;
   final PresenceStatus presence;
   final List<Widget> actions;
+  final EntityRef? viewer;
+  final bool offerMessage;
+  final VoidCallback? onOpenChat;
   final String? memberOf;
+  final Widget? guildMemberSection;
   final DateTime? joinedAt;
   final DateTime? friendsSince;
   final Future<MobileBotProfileApplication?> Function(EntityRef bot)?
@@ -476,6 +472,23 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
       }
     } on Object {
       // Bot profiles remain fully usable when Add App discovery is unavailable.
+    }
+  }
+
+  Future<void> _viewApplication(MobileBotProfileApplication application) async {
+    final home = ProviderScope.containerOf(context)
+        .read(mobileControllerProvider.notifier)
+        .api
+        .tokens
+        ?.instance;
+    if (home == null || !application.directoryListed) return;
+    final uri = Uri.https(
+        home.value, '/application-directory/${application.application.wire}');
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication) &&
+        mounted) {
+      showActionFeedback(
+          context, L10n.of(context).ui_app_details_are_unavailable_b97be5ac,
+          error: true);
     }
   }
 
@@ -538,26 +551,55 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
           ],
         );
     final actions = <Widget>[
-      if (_application case final application?)
+      if (_application case final application?) ...[
         ActionButton(
           key: const ValueKey('bot-profile-add-app'),
           onPressed: () => _addApplication(application),
           icon: const Icon(Icons.add_rounded),
-          label: Text(L10n.of(context).ui_add_app_57813d5f),
+          label: Text(
+              application.installTemplate.installTypes.contains('guild_install')
+                  ? l10n.ui_add_bot_to_a_guild_f3f28629
+                  : l10n.ui_add_app_57813d5f),
         ),
+        if (application.directoryListed)
+          ActionButton(
+            kind: ActionButtonKind.outlined,
+            onPressed: () => _viewApplication(application),
+            icon: const Icon(Icons.open_in_new_rounded),
+            label: Text(l10n.ui_view_app_profile_d6423864),
+          ),
+      ],
       ...widget.actions,
+      if (widget.viewer != null && widget.viewer == user.ref)
+        ActionButton(
+          icon: const Icon(Icons.edit_outlined),
+          label: Text(l10n.profile_edit),
+          onPressed: () {
+            final navigator = Navigator.of(context);
+            navigator.pop();
+            navigator.push(MaterialPageRoute<void>(
+              builder: (context) => Scaffold(
+                appBar: AppBar(title: Text(L10n.of(context).profile_edit)),
+                body: const SafeArea(child: SettingsScreen()),
+              ),
+            ));
+          },
+        )
+      else if (widget.viewer != null && user.profileResolved && !user.isSystem)
+        _ProfileContactActions(
+          key: ValueKey(widget.viewer),
+          user: user,
+          offerMessage: widget.offerMessage,
+          onOpenChat: widget.onOpenChat,
+        ),
     ];
     final banner = publicAssetUri(
       user.ref.domain,
       user.bannerHash,
       variant: 'thumbnail_1024',
     );
-    return DraggableScrollableSheet(
-      initialChildSize: .68,
-      minChildSize: .42,
-      maxChildSize: .94,
-      expand: false,
-      builder: (context, scrollController) => Column(
+    Widget sheetContent(ScrollController scrollController, double height) {
+      return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
@@ -670,6 +712,24 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                                 ),
                               ),
                             ),
+                            if (user.profileResolved && user.handle.isNotEmpty)
+                              ActionButton(
+                                kind: ActionButtonKind.icon,
+                                icon: const Icon(Icons.copy_outlined, size: 18),
+                                tooltip: l10n.profile_copy_username,
+                                onPressed: () async {
+                                  final handle = user.handle;
+                                  await Clipboard.setData(ClipboardData(
+                                    text: handle.startsWith('@')
+                                        ? handle
+                                        : '@$handle',
+                                  ));
+                                  if (context.mounted) {
+                                    showActionFeedback(
+                                        context, l10n.profile_username_copied);
+                                  }
+                                },
+                              ),
                           ],
                         ),
                         SizedBox(height: 8),
@@ -754,6 +814,8 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
                             ),
                           ),
                         ],
+                        if (widget.guildMemberSection case final section?)
+                          section,
                         if (_developerMode(context)) ...[
                           SizedBox(height: 10),
                           _ProfileCard(
@@ -782,28 +844,179 @@ final class _UserProfileSheetState extends State<UserProfileSheet> {
             ),
           ),
           if (actions.isNotEmpty)
-            SafeArea(
-              top: false,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border(top: BorderSide(color: context.kaede.border)),
-                ),
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(16, 12, 16, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (var index = 0; index < actions.length; index++) ...[
-                        if (index > 0) SizedBox(height: 8),
-                        actions[index],
-                      ],
-                    ],
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: height * .55),
+              child: SingleChildScrollView(
+                child: SafeArea(
+                  top: false,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border:
+                          Border(top: BorderSide(color: context.kaede.border)),
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(16, 12, 16, 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (var index = 0;
+                              index < actions.length;
+                              index++) ...[
+                            if (index > 0) SizedBox(height: 8),
+                            actions[index],
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ),
             ),
         ],
+      );
+    }
+
+    return DraggableScrollableSheet(
+      initialChildSize: .68,
+      minChildSize: .42,
+      maxChildSize: .94,
+      expand: false,
+      builder: (context, scrollController) => LayoutBuilder(
+        builder: (context, constraints) =>
+            sheetContent(scrollController, constraints.maxHeight),
       ),
+    );
+  }
+}
+
+final class _ProfileContactActions extends ConsumerStatefulWidget {
+  const _ProfileContactActions({
+    super.key,
+    required this.user,
+    required this.offerMessage,
+    this.onOpenChat,
+  });
+
+  final KaedeUser user;
+  final bool offerMessage;
+  final VoidCallback? onOpenChat;
+
+  @override
+  ConsumerState<_ProfileContactActions> createState() =>
+      _ProfileContactActionsState();
+}
+
+final class _ProfileContactActionsState
+    extends ConsumerState<_ProfileContactActions> {
+  bool _busy = false;
+
+  Future<void> _run(
+      String? expectedType, Future<void> Function() action) async {
+    if (_busy ||
+        ref.read(mobileControllerProvider).relationshipType(widget.user.ref) !=
+            expectedType) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await action();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _message() async {
+    final controller = ref.read(mobileControllerProvider.notifier);
+    final account = ref.read(mobileControllerProvider).user?.ref;
+    final dm = await controller.repository.openDm(widget.user.handle);
+    if (!mounted || account != ref.read(mobileControllerProvider).user?.ref) {
+      return;
+    }
+    await controller.refreshNavigation();
+    if (!mounted || account != ref.read(mobileControllerProvider).user?.ref) {
+      return;
+    }
+    await controller.selectDm(dm);
+    if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+      Navigator.pop(context);
+      widget.onOpenChat?.call();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = widget.user;
+    final type = ref.watch(
+        mobileControllerProvider.select((s) => s.relationshipType(user.ref)));
+    final controller = ref.read(mobileControllerProvider.notifier);
+    final l10n = L10n.of(context);
+    ActionButton button(
+            String label, IconData icon, Future<void> Function() action,
+            {ActionButtonKind kind = ActionButtonKind.outlined,
+            bool danger = false}) =>
+        ActionButton(
+          kind: kind,
+          style: danger
+              ? OutlinedButton.styleFrom(foregroundColor: context.kaede.danger)
+              : null,
+          icon: Icon(icon),
+          label: Text(label),
+          onPressed: _busy ? null : () => _run(type, action),
+        );
+    final actions = <Widget>[
+      if (widget.offerMessage && type != 'blocked')
+        button(l10n.ui_message_ae0ed984, Icons.chat_bubble_outline_rounded,
+            _message,
+            kind: ActionButtonKind.filled),
+      if (userProfileSupportsFriendshipActions(user)) ...[
+        if (type == 'pending_out') Text(l10n.profile_request_sent),
+        if (type == 'friend') Text(l10n.ui_friends_63cc7b7a),
+        if (type == null)
+          button(
+              l10n.ui_send_friend_request_719d5c00,
+              Icons.person_add_alt_1_rounded,
+              () => controller.requestFriend(user.handle),
+              kind: ActionButtonKind.filled)
+        else if (type == 'pending_in') ...[
+          Text(l10n.profile_incoming_friend_request,
+              style: Theme.of(context).textTheme.labelLarge),
+          Row(children: [
+            Expanded(
+                child: button(l10n.ui_accept_50b26149, Icons.check_rounded,
+                    () => controller.acceptFriend(user.ref),
+                    kind: ActionButtonKind.filled)),
+            const SizedBox(width: 8),
+            Expanded(
+                child: button(l10n.ui_decline_58eaef39, Icons.close_rounded,
+                    () => controller.removeRelationship(user.ref))),
+          ]),
+        ] else if (type == 'pending_out')
+          button(l10n.ui_cancel_request_28568fb6, Icons.person_remove_outlined,
+              () => controller.removeRelationship(user.ref))
+        else if (type == 'friend')
+          button(
+              l10n.ui_remove_friend_1b6055cb,
+              Icons.person_remove_alt_1_rounded,
+              () => controller.removeRelationship(user.ref),
+              danger: true),
+      ],
+      button(
+          type == 'blocked' ? l10n.ui_unblock_987c7d5f : l10n.profile_block,
+          type == 'blocked' ? Icons.lock_open_rounded : Icons.block,
+          () => controller.setUserBlocked(user, type != 'blocked')),
+      if (type != 'blocked')
+        Text(l10n.profile_block_help,
+            style: Theme.of(context).textTheme.bodySmall),
+    ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < actions.length; i++) ...[
+          if (i > 0) const SizedBox(height: 8),
+          actions[i],
+        ],
+      ],
     );
   }
 }

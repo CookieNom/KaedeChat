@@ -2470,7 +2470,23 @@ final class _MembersTab extends StatefulWidget {
   State<_MembersTab> createState() => _MembersTabState();
 }
 
-final class _MembersTabState extends State<_MembersTab> {
+final class _MembersTabState extends State<_MembersTab>
+    with _MemberActions<_MembersTab> {
+  @override
+  KaedeGuild get _actionGuild => widget.guild;
+  @override
+  EntityRef? get _actor => widget.actorRef;
+  @override
+  KaedeRepository get _memberRepository => widget.repository;
+  @override
+  GuildMember? _currentMember(EntityRef ref) =>
+      mounted ? guildMemberByRef(_members, ref) : null;
+  @override
+  Future<void> _memberChanged(String action, GuildMember? updated) async {
+    await _load(reset: true);
+    if (mounted) await widget.changed('$action applied');
+  }
+
   final _search = TextEditingController();
   final _scroll = ScrollController();
   List<GuildMember> _members = const [];
@@ -2668,6 +2684,7 @@ final class _MembersTabState extends State<_MembersTab> {
                             widget.userProfiles,
                           );
                           final actions = _actionsFor(member);
+                          final busy = _actingOn.contains(member.user.ref);
                           final roleCount = member.roleIds.length;
                           return Padding(
                             padding: EdgeInsets.symmetric(horizontal: 14),
@@ -2711,14 +2728,25 @@ final class _MembersTabState extends State<_MembersTab> {
                               trailing: actions.isEmpty
                                   ? null
                                   : PopupMenuButton<String>(
+                                      enabled: !busy,
                                       tooltip: L10n.of(context)
                                           .ui_member_actions_8d33b0d8,
                                       position: PopupMenuPosition.under,
                                       onSelected: (value) =>
                                           _action(member, value),
-                                      itemBuilder: (_) => actions,
+                                      itemBuilder: (_) => [
+                                        for (final action in actions.entries)
+                                          PopupMenuItem(
+                                              value: action.key,
+                                              child: Text(action.value,
+                                                  style: action.key == 'ban'
+                                                      ? TextStyle(
+                                                          color: context
+                                                              .kaede.danger)
+                                                      : null)),
+                                      ],
                                     ),
-                              onTap: _canAssignRoles(member)
+                              onTap: !busy && _canAssignRoles(member)
                                   ? () => _action(member, 'roles')
                                   : null,
                             ),
@@ -2727,112 +2755,124 @@ final class _MembersTabState extends State<_MembersTab> {
                       ))),
         ]),
       );
+}
 
-  List<PopupMenuEntry<String>> _actionsFor(GuildMember member) {
-    final owner = widget.guild.ownerRef == widget.actorRef;
-    final self = member.user.ref == widget.actorRef;
-    final targetIsOwner = member.user.ref == widget.guild.ownerRef;
-    final canManageTarget = _canManageMember(member);
-    final items = <PopupMenuEntry<String>>[];
-    if (_canAssignRoles(member)) {
-      items.add(PopupMenuItem(
-          value: 'roles',
-          child: Text(L10n.of(context).ui_manage_roles_de7a2fe3)));
-    }
-    if (_canChangeNickname(member)) {
-      items.add(PopupMenuItem(
-          value: 'nickname',
-          child: Text(L10n.of(context).ui_change_nickname_123a63b7)));
-    }
-    if (!self && !targetIsOwner && canManageTarget) {
-      if (owner || widget.guild.allows(Permission.moderateMembers)) {
-        items.add(PopupMenuItem(
-            value: 'timeout',
-            child: Text(L10n.of(context).ui_timeout_82d97e28)));
-      }
-      if (owner || widget.guild.allows(Permission.kickMembers)) {
-        items.add(PopupMenuItem(
-            value: 'kick', child: Text(L10n.of(context).ui_kick_2cfbaa3f)));
-      }
-      if (owner || widget.guild.allows(Permission.banMembers)) {
-        items.add(PopupMenuItem(
-            value: 'ban',
-            child: Text(L10n.of(context).ui_ban_bfbc51a6,
-                style: TextStyle(color: context.kaede.danger))));
-      }
-    }
-    return items;
+mixin _MemberActions<T extends StatefulWidget> on State<T> {
+  KaedeGuild get _actionGuild;
+  EntityRef? get _actor;
+  KaedeRepository get _memberRepository;
+  GuildMember? _currentMember(EntityRef ref);
+  Future<void> _memberChanged(String action, GuildMember? updated);
+  final _actingOn = <EntityRef>{};
+
+  Map<String, String> _actionsFor(GuildMember member) {
+    final owner = _actionGuild.ownerRef == _actor;
+    final moderate = _canManageMember(member);
+    final l10n = L10n.of(context);
+    return {
+      if (_canAssignRoles(member)) 'roles': l10n.ui_manage_roles_de7a2fe3,
+      if (_canChangeNickname(member))
+        'nickname': l10n.ui_change_nickname_123a63b7,
+      if (moderate &&
+          (owner || _actionGuild.allows(Permission.moderateMembers)))
+        'timeout': l10n.ui_timeout_82d97e28,
+      if (moderate && (owner || _actionGuild.allows(Permission.kickMembers)))
+        'kick': l10n.ui_kick_2cfbaa3f,
+      if (moderate && (owner || _actionGuild.allows(Permission.banMembers)))
+        'ban': l10n.ui_ban_bfbc51a6,
+    };
+  }
+
+  Iterable<KaedeRole> _rolesWithinHierarchy() {
+    final highest = guildActorHighestRole(_actionGuild);
+    return _actionGuild.roles.where((role) =>
+        role.position != 0 &&
+        role.ref != _actionGuild.ref &&
+        guildActorCanManageRole(
+            guild: _actionGuild,
+            actorRef: _actor,
+            actorHighestRole: highest,
+            target: role));
   }
 
   bool _canAssignRoles(GuildMember member) {
-    final owner = widget.guild.ownerRef == widget.actorRef;
-    final self = member.user.ref == widget.actorRef;
-    return (owner || widget.guild.allows(Permission.manageRoles)) &&
-        (self || _canManageMember(member));
+    final owner = _actionGuild.ownerRef == _actor;
+    final self = member.user.ref == _actor;
+    return (owner || _actionGuild.allows(Permission.manageRoles)) &&
+        (self || _canManageMember(member)) &&
+        _rolesWithinHierarchy().any((role) => !role.managed);
   }
 
   bool _canManageMember(GuildMember member) => guildActorCanManageMember(
-        guild: widget.guild,
-        actorRef: widget.actorRef,
-        actorHighestRole: guildActorHighestRole(widget.guild),
+        guild: _actionGuild,
+        actorRef: _actor,
+        actorHighestRole: guildActorHighestRole(_actionGuild),
         target: member,
       );
 
   bool _canChangeNickname(GuildMember member) => canChangeGuildMemberNickname(
-        guild: widget.guild,
-        actorRef: widget.actorRef,
-        actorHighestRole: guildActorHighestRole(widget.guild),
+        guild: _actionGuild,
+        actorRef: _actor,
+        actorHighestRole: guildActorHighestRole(_actionGuild),
         target: member,
       );
 
-  GuildMember? _currentMember(EntityRef ref) => guildMemberByRef(_members, ref);
-
   Future<void> _action(GuildMember member, String action) async {
+    if (_actingOn.contains(member.user.ref)) return;
+    setState(() => _actingOn.add(member.user.ref));
+    GuildMember? updated;
     try {
       final currentAtOpen = _currentMember(member.user.ref);
       if (currentAtOpen == null) return;
       member = currentAtOpen;
+      final guildRef = _actionGuild.ref;
+      final actor = _actor;
+      GuildMember? currentTarget() {
+        final target = _currentMember(member.user.ref);
+        return target != null && _actionGuild.ref == guildRef && _actor == actor
+            ? target
+            : null;
+      }
+
       switch (action) {
         case 'roles':
           if (!_canAssignRoles(member)) return;
-          final actorHighestRole = guildActorHighestRole(widget.guild);
           final selected = await showDialog<Set<String>>(
               context: context,
               builder: (_) => _RoleAssignmentDialog(
-                  member: member,
-                  roles: widget.guild.roles
-                      .where((role) =>
-                          role.position != 0 &&
-                          role.ref != widget.guild.ref &&
-                          guildActorCanManageRole(
-                            guild: widget.guild,
-                            actorRef: widget.actorRef,
-                            actorHighestRole: actorHighestRole,
-                            target: role,
-                          ))
-                      .toList()));
+                  member: member, roles: _rolesWithinHierarchy().toList()));
           if (selected == null) return;
-          final current = _currentMember(member.user.ref);
+          final current = currentTarget();
           if (current == null || !_canAssignRoles(current)) return;
-          await widget.repository
-              .replaceMemberRoles(widget.guild.ref, current.user.ref, selected);
+          final previousIds = normalizedMemberRoleIds(member.roleIds);
+          final currentIds = normalizedMemberRoleIds(current.roleIds);
+          // Merge only edits made in the dialog into the latest roster.
+          final editable = _rolesWithinHierarchy()
+              .where((role) => !role.managed)
+              .map((role) => role.ref.id.value)
+              .toSet();
+          currentIds
+            ..removeAll(previousIds.difference(selected).intersection(editable))
+            ..addAll(selected.difference(previousIds).intersection(editable));
+          updated = await _memberRepository.replaceMemberRoles(
+              _actionGuild.ref, current.user.ref, currentIds);
           break;
         case 'nickname':
           if (!_canChangeNickname(member)) return;
           final nickname =
               await _prompt(context, 'Change nickname', 'Nickname');
           if (nickname == null) return;
-          final current = _currentMember(member.user.ref);
+          final current = currentTarget();
           if (current == null || !_canChangeNickname(current)) return;
-          await widget.repository.updateMember(
-              widget.guild.ref,
+          await _memberRepository.updateMember(
+              _actionGuild.ref,
               current.user.ref,
               {'nickname': nickname.isEmpty ? null : nickname});
           break;
         case 'timeout':
           if (!_canManageMember(member) ||
-              (widget.guild.ownerRef != widget.actorRef &&
-                  !widget.guild.allows(Permission.moderateMembers))) {
+              (_actionGuild.ownerRef != _actor &&
+                  !_actionGuild.allows(Permission.moderateMembers))) {
             return;
           }
           final choice = await showModerationOptions(
@@ -2842,16 +2882,16 @@ final class _MembersTabState extends State<_MembersTab> {
             timeout: true,
           );
           if (choice == null) return;
-          final current = _currentMember(member.user.ref);
+          final current = currentTarget();
           if (current == null ||
               !_canManageMember(current) ||
-              (widget.guild.ownerRef != widget.actorRef &&
-                  !widget.guild.allows(Permission.moderateMembers))) {
+              (_actionGuild.ownerRef != _actor &&
+                  !_actionGuild.allows(Permission.moderateMembers))) {
             return;
           }
           final indefinite = choice.durationSeconds < 0;
-          await widget.repository.updateMember(
-            widget.guild.ref,
+          await _memberRepository.updateMember(
+            _actionGuild.ref,
             current.user.ref,
             <String, Object?>{
               'timeout_until': indefinite
@@ -2867,27 +2907,27 @@ final class _MembersTabState extends State<_MembersTab> {
           break;
         case 'kick':
           if (!_canManageMember(member) ||
-              (widget.guild.ownerRef != widget.actorRef &&
-                  !widget.guild.allows(Permission.kickMembers))) {
+              (_actionGuild.ownerRef != _actor &&
+                  !_actionGuild.allows(Permission.kickMembers))) {
             return;
           }
           final reason = await _prompt(
               context, 'Kick ${member.user.name}?', 'Reason (optional)');
           if (reason == null) return;
-          final current = _currentMember(member.user.ref);
+          final current = currentTarget();
           if (current == null ||
               !_canManageMember(current) ||
-              (widget.guild.ownerRef != widget.actorRef &&
-                  !widget.guild.allows(Permission.kickMembers))) {
+              (_actionGuild.ownerRef != _actor &&
+                  !_actionGuild.allows(Permission.kickMembers))) {
             return;
           }
-          await widget.repository
-              .kick(widget.guild.ref, current.user.ref, reason: reason);
+          await _memberRepository.kick(_actionGuild.ref, current.user.ref,
+              reason: reason);
           break;
         case 'ban':
           if (!_canManageMember(member) ||
-              (widget.guild.ownerRef != widget.actorRef &&
-                  !widget.guild.allows(Permission.banMembers))) {
+              (_actionGuild.ownerRef != _actor &&
+                  !_actionGuild.allows(Permission.banMembers))) {
             return;
           }
           final choice = await showModerationOptions(
@@ -2897,15 +2937,15 @@ final class _MembersTabState extends State<_MembersTab> {
             includeDeleteHistory: true,
           );
           if (choice == null) return;
-          final current = _currentMember(member.user.ref);
+          final current = currentTarget();
           if (current == null ||
               !_canManageMember(current) ||
-              (widget.guild.ownerRef != widget.actorRef &&
-                  !widget.guild.allows(Permission.banMembers))) {
+              (_actionGuild.ownerRef != _actor &&
+                  !_actionGuild.allows(Permission.banMembers))) {
             return;
           }
-          await widget.repository.ban(
-            widget.guild.ref,
+          await _memberRepository.ban(
+            _actionGuild.ref,
             current.user.ref,
             reason: choice.reason,
             expiresAt: choice.durationSeconds == 0
@@ -2917,8 +2957,7 @@ final class _MembersTabState extends State<_MembersTab> {
           );
           break;
       }
-      await _load(reset: true);
-      await widget.changed('$action applied');
+      if (mounted) await _memberChanged(action, updated);
     } on Object catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -2929,7 +2968,203 @@ final class _MembersTabState extends State<_MembersTab> {
         )),
         backgroundColor: context.kaede.danger,
       ));
+    } finally {
+      if (mounted) setState(() => _actingOn.remove(member.user.ref));
     }
+  }
+}
+
+final class GuildMemberProfileSection extends ConsumerStatefulWidget {
+  const GuildMemberProfileSection({
+    super.key,
+    required this.guildRef,
+    required this.user,
+    this.member,
+  });
+  final EntityRef guildRef;
+  final KaedeUser user;
+  final GuildMember? member;
+
+  @override
+  ConsumerState<GuildMemberProfileSection> createState() =>
+      _GuildMemberProfileSectionState();
+}
+
+final class _GuildMemberProfileSectionState
+    extends ConsumerState<GuildMemberProfileSection>
+    with _MemberActions<GuildMemberProfileSection> {
+  KaedeGuild? _guild;
+  GuildMember? _member;
+  var _generation = 0;
+  var _memberRevision = 0;
+  Object? _loadError;
+
+  @override
+  KaedeGuild get _actionGuild => _guild!;
+  @override
+  EntityRef? get _actor => ref.read(mobileControllerProvider).user?.ref;
+  @override
+  KaedeRepository get _memberRepository =>
+      ref.read(mobileControllerProvider.notifier).repository;
+  @override
+  GuildMember? _currentMember(EntityRef target) =>
+      mounted && _guild != null && _member?.user.ref == target ? _member : null;
+
+  @override
+  void initState() {
+    super.initState();
+    GuildMember? liveMember(MobileState state) => guildMemberByRef(
+        state.guildMembers[widget.guildRef] ?? const [], widget.user.ref);
+    _member = liveMember(ref.read(mobileControllerProvider)) ?? widget.member;
+    ref.listenManual(mobileControllerProvider.select(liveMember), (_, next) {
+      _memberRevision++;
+      setState(() => _member = next);
+    });
+    ref.listenManual(mobileControllerProvider.select((state) {
+      final guild = state.guilds
+          .where((guild) => guild.ref == widget.guildRef)
+          .firstOrNull;
+      final actor = state.user?.ref;
+      final ownRoles = actor == null
+          ? null
+          : guildMemberByRef(
+                  state.guildMembers[widget.guildRef] ?? const [], actor)
+              ?.roleIds
+              .join(',');
+      return (
+        actor,
+        guild?.ref,
+        guild?.version,
+        guild?.permissions,
+        guild?.ownerRef,
+        ownRoles
+      );
+    }), (before, after) {
+      _generation++;
+      setState(() {
+        _guild = null;
+        _loadError = null;
+      });
+      if (before?.$1 == after.$1 && after.$2 != null) unawaited(_load());
+    });
+    unawaited(_load());
+  }
+
+  Future<GuildMember?> _findMember(int generation) async {
+    final cached = _member;
+    if (cached != null) return cached;
+    EntityRef? after;
+    while (mounted && generation == _generation) {
+      final page = await _memberRepository.members(widget.guildRef,
+          query: widget.user.handle.length <= 100
+              ? widget.user.handle
+              : widget.user.username,
+          after: after);
+      final member = guildMemberByRef(page, widget.user.ref);
+      if (member != null || page.length < 100 || page.last.user.ref == after) {
+        return member;
+      }
+      after = page.last.user.ref;
+    }
+    return null;
+  }
+
+  Future<void> _load() async {
+    final generation = ++_generation;
+    final memberRevision = _memberRevision;
+    try {
+      final guild = await _memberRepository.guild(widget.guildRef);
+      if (!mounted ||
+          generation != _generation ||
+          !canViewGuildMemberRoster(guild, _actor)) {
+        return;
+      }
+      final member = await _findMember(generation);
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _guild = guild;
+        if (memberRevision == _memberRevision) _member = member;
+        _loadError = null;
+      });
+    } on Object catch (error) {
+      if (mounted && generation == _generation) {
+        final unavailable = error is KaedeException &&
+            (error.status == 403 || error.status == 404);
+        setState(() => _loadError = unavailable ? null : error);
+      }
+    }
+  }
+
+  @override
+  Future<void> _memberChanged(String action, GuildMember? updated) async {
+    if (action == 'kick' || action == 'ban') {
+      Navigator.of(context).pop();
+    } else if (updated != null) {
+      setState(() => _member = updated);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = L10n.of(context);
+    if (_loadError != null) {
+      return Align(
+          alignment: Alignment.centerLeft,
+          child: ActionButton(
+            kind: ActionButtonKind.text,
+            onPressed: () {
+              setState(() => _loadError = null);
+              unawaited(_load());
+            },
+            icon: const Icon(Icons.refresh),
+            label:
+                Text('${l10n.ui_roles_3e77ce7e} · ${l10n.ui_retry_8036af59}'),
+          ));
+    }
+    final member = _member;
+    final guild = _guild;
+    if (member == null || guild == null) return const SizedBox.shrink();
+    final ids = normalizedMemberRoleIds(member.roleIds);
+    final assigned = guild.roles
+        .where(
+            (role) => role.ref != guild.ref && ids.contains(role.ref.id.value))
+        .toList()
+      ..sort((a, b) => compareGuildRoleRank(b, a));
+    final actions = _actionsFor(member)..remove('nickname');
+    if (assigned.isEmpty && actions.isEmpty) return const SizedBox.shrink();
+    final busy = _actingOn.contains(member.user.ref);
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (assigned.isNotEmpty) ...[
+          Text(l10n.ui_roles_3e77ce7e,
+              style: Theme.of(context).textTheme.labelLarge),
+          const SizedBox(height: 4),
+          Wrap(spacing: 6, runSpacing: 4, children: [
+            for (final role in assigned)
+              Chip(
+                  label: Text(role.name),
+                  avatar: Icon(Icons.circle,
+                      size: 12,
+                      color: role.color == 0
+                          ? context.kaede.muted
+                          : Color(0xff000000 | role.color))),
+          ]),
+        ],
+        if (actions.isNotEmpty)
+          Wrap(spacing: 8, runSpacing: 4, children: [
+            for (final action in actions.entries)
+              ActionButton(
+                  kind: ActionButtonKind.outlined,
+                  style: action.key == 'ban'
+                      ? OutlinedButton.styleFrom(
+                          foregroundColor: context.kaede.danger)
+                      : null,
+                  onPressed: busy ? null : () => _action(member, action.key),
+                  label: Text(action.value)),
+          ]),
+      ]),
+    );
   }
 }
 
@@ -10919,7 +11154,8 @@ final class _RoleAssignmentDialog extends StatefulWidget {
 }
 
 final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
-  late final selected = normalizedMemberRoleIds(widget.member.roleIds);
+  late final original = normalizedMemberRoleIds(widget.member.roleIds);
+  late final selected = Set<String>.of(original);
   @override
   Widget build(BuildContext context) => AlertDialog(
           title: Text(L10n.of(context).ui_roles_for_value0_0c4d969a(
@@ -10946,8 +11182,8 @@ final class _RoleAssignmentDialogState extends State<_RoleAssignmentDialog> {
                 child: Text(L10n.of(context).ui_cancel_35afca3b)),
             SaveButton(
                 hasChanges: () =>
-                    selected.length != widget.member.roleIds.length ||
-                    !selected.containsAll(widget.member.roleIds),
+                    selected.length != original.length ||
+                    !selected.containsAll(original),
                 onPressed: () => Navigator.pop(context, selected),
                 child: Text(L10n.of(context).ui_save_4d2d5d68))
           ]);

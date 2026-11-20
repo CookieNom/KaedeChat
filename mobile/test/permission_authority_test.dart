@@ -6,7 +6,6 @@ import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
 import 'package:kaede_mobile/src/features/chat/forum_channel_view.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
-import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/voice/voice_room.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 

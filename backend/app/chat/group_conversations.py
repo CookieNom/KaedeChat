@@ -260,9 +260,11 @@ async def load_authoritative_group(
         DMConversation.origin_domain == conversation_domain,
     )
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     conversation = await session.scalar(statement)
-    channel = await session.get(Channel, (conversation_id, conversation_domain))
+    channel = await session.get(
+        Channel, (conversation_id, conversation_domain), populate_existing=for_update
+    )
     if (
         conversation is None
         or channel is None
@@ -310,6 +312,8 @@ async def apply_authoritative_group_mutation(
     """
 
     await require_group_member(session, conversation, actor)
+    if getattr(channel, "dm_successor_id", None) is not None:
+        raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
     membership_changed = (
         getattr(channel, "encryption_mode", "plaintext") == "e2ee" and action != "rename"
     )

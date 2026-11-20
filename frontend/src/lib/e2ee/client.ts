@@ -460,10 +460,15 @@ let wasmPromise: Promise<typeof import('./wasm/kaede_e2ee')> | null = null;
 
 async function wasmModule(): Promise<typeof import('./wasm/kaede_e2ee')> {
   if (!wasmPromise) {
-    wasmPromise = import('./wasm/kaede_e2ee').then(async (module) => {
-      await module.default();
-      return module;
-    });
+    wasmPromise = import('./wasm/kaede_e2ee')
+      .then(async (module) => {
+        await module.default();
+        return module;
+      })
+      .catch((error) => {
+        wasmPromise = null;
+        throw error;
+      });
   }
   return wasmPromise;
 }

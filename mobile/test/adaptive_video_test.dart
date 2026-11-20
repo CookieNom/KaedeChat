@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
@@ -8,6 +10,8 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:mocktail/mocktail.dart';
 
 class _Room extends Mock implements Room {}
+
+class _Encryption extends Mock implements E2EEManager {}
 
 class _Participant extends Mock implements LocalParticipant {}
 
@@ -239,6 +243,74 @@ void main() {
       expect(isPremiumVideoCodec('vp9'), isFalse);
     },
   );
+
+  test('encrypted H264 requires a matching hint from every viewer', () {
+    expect(sharesEncryptedH264Format([]), isFalse);
+    expect(sharesEncryptedH264Format([2, 2]), isTrue);
+    for (final missingOrDifferent in <Object?>[null, '2', 2.0, 3]) {
+      expect(sharesEncryptedH264Format([2, missingOrDifferent]), isFalse);
+    }
+    expect(
+        remoteVideoCodec('video/H264;profile-level-id=42e01f', 'vp8',
+            encrypted: true),
+        'h264');
+    expect(remoteVideoCodec('video/VP8', 'h264', encrypted: true), 'vp8');
+    expect(remoteVideoCodec('', 'vp8', encrypted: true), 'vp8');
+  });
+
+  test('an encrypted publication cannot negotiate H264 before receiving hints',
+      () async {
+    final room = _Room();
+    when(() => room.roomOptions).thenReturn(const RoomOptions(
+      defaultVideoPublishOptions: VideoPublishOptions(videoCodec: 'h264'),
+    ));
+    when(() => room.e2eeManager).thenReturn(_Encryption());
+    when(() => room.remoteParticipants)
+        .thenReturn(UnmodifiableMapView(<String, RemoteParticipant>{}));
+    const quality = MobileMediaQuality();
+    final controller =
+        AdaptiveVideo(room, quality: () => quality, onNotice: (_) {});
+    final options = AdaptiveVideo.publishOptions(
+        room, TrackSource.camera, quality,
+        controller: controller);
+    expect(options.videoCodec, 'vp8');
+    expect(options.name, 'kaede.video.v1:camera:vp8');
+    await expectLater(
+        options.configureEncodings!(_Video(), [], 'h264'), throwsStateError);
+    when(() => room.e2eeManager).thenReturn(null);
+    expect(
+        AdaptiveVideo.publishOptions(room, TrackSource.camera, quality,
+                controller: controller)
+            .videoCodec,
+        'h264');
+  });
+
+  test(
+      'large rooms can withdraw H264 without dropping their codec announcement',
+      () {
+    final feedback = {
+      for (int i = 0; i < 65; i++) '${'猫' * 65}-$i/camera': 'healthy'
+    };
+    final encoded = encodeVideoHints(
+        {'vp8', 'av1', 'vp9'}, {'user/camera': 'h264'}, feedback);
+    expect(utf8.encode(encoded).length, lessThanOrEqualTo(8192));
+    final hint = jsonDecode(encoded) as Map<String, dynamic>;
+    expect(hint['encryptedH264'], 2);
+    expect(hint['codecs'], ['vp8', 'av1']);
+    expect(hint['extendedCodecs'], ['vp9']);
+    expect(hint['health'], isEmpty);
+    expect(hint['demand'], isEmpty);
+    final demands = {
+      'legacy/camera': 'h264',
+      '猫' * 86: 'vp8',
+      for (int i = 0; i < 66; i++) 'peer-$i/camera': 'vp8'
+    };
+    final compact = jsonDecode(encodeVideoHints({'vp8'}, demands, {}))
+        as Map<String, dynamic>;
+    final sent = compact['demand'] as Map<String, dynamic>;
+    expect(sent.length, 64);
+    expect(sent.keys, everyElement(startsWith('peer-')));
+  });
 
   test('premium choice counts overlapping audiences and AV1 wins ties', () {
     expect(

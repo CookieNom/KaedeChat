@@ -399,7 +399,11 @@ async def list_read_states(
     channels = list(
         await session.scalars(
             select(Channel)
-            .where(Channel.unavailable.is_(False), or_(guild_access, dm_access))
+            .where(
+                Channel.unavailable.is_(False),
+                Channel.dm_successor_id.is_(None),
+                or_(guild_access, dm_access),
+            )
             .order_by(Channel.id)
         )
     )

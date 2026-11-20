@@ -628,10 +628,11 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Add App'), findsOneWidget);
+    expect(find.text('Add bot to a server'), findsOneWidget);
+    expect(find.text('View app profile'), findsOneWidget);
     expect(userProfileSupportsFriendshipActions(bot), isFalse);
     expect(find.text('Send friend request'), findsNothing);
-    await tester.tap(find.text('Add App'));
+    await tester.tap(find.text('Add bot to a server'));
     expect(selected, profile);
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(MaterialApp(
@@ -643,7 +644,8 @@ void main() {
       onAddApplication: (application) => selected = application,
     ))));
     await tester.pumpAndSettle();
-    expect(find.text('Add App'), findsNothing);
+    expect(find.text('Add bot to a server'), findsNothing);
+    expect(find.text('View app profile'), findsNothing);
   });
 }
 

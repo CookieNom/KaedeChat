@@ -3,6 +3,7 @@
 
   import { api, userErrorMessage } from '$lib/api/client';
   import { applyTtsPreferences } from '$lib/chat/tts';
+  import { entityKey } from '$lib/chat/refs';
   import LanguageSuggestion from '$lib/components/LanguageSuggestion.svelte';
   import AppInbox from '$lib/components/AppInbox.svelte';
   import CommandSwitcher from '$lib/components/CommandSwitcher.svelte';
@@ -19,25 +20,33 @@
   import { applyLocale } from '$lib/ui/locale';
   import { applyTheme, type ThemePreference } from '$lib/ui/theme';
   import { onMount } from 'svelte';
-  import { contentSafety, syncContentSafety } from '$lib/chat/content-safety.svelte';
+  import { contentSafety } from '$lib/chat/content-safety.svelte';
   import { chatEntities } from '$lib/stores/entities.svelte';
 
   let { children } = $props();
   let notificationSettingsLoaded = $state(false);
   let notificationPromptBusy = $state(false);
   let notificationPromptError = $state('');
+  let notificationPromptHeight = $state(0);
   let notificationRetryBusy = $state(false);
   let notificationController: AbortController | null = null;
   let guildPreferenceRequest: Promise<void> | null = null;
+  const canCheckMessages = $derived(
+    authenticatedGateway.status.state === 'connected' ||
+      authenticatedGateway.status.state === 'degraded'
+  );
   const showNotificationPrompt = $derived(
     notificationSettingsLoaded &&
-      shouldOfferBrowserNotificationPrompt(
-        browserNotifications.supported,
-        browserNotifications.permission,
-        browserNotifications.enabled,
-        browserNotifications.promptHandled,
-        browserNotifications.configured
-      )
+      chatEntities.currentUser &&
+      !browserNotifications.isPromptDismissed(chatEntities.currentUser) &&
+      (notificationPromptError ||
+        shouldOfferBrowserNotificationPrompt(
+          browserNotifications.supported,
+          browserNotifications.permission,
+          browserNotifications.enabled,
+          browserNotifications.promptHandled,
+          browserNotifications.configured
+        ))
   );
 
   interface UserSettingsPayload {
@@ -178,16 +187,24 @@
   });
 
   function dismissNotificationPrompt() {
-    browserNotifications.markPromptHandled();
+    if (chatEntities.currentUser) browserNotifications.dismissPrompt(chatEntities.currentUser);
     notificationPromptError = '';
   }
 
   async function enableBrowserNotifications() {
-    if (notificationPromptBusy) return;
+    const user = chatEntities.currentUser;
+    const controller = notificationController;
+    if (notificationPromptBusy || !user || !controller) return;
+    const current = () =>
+      !controller.signal.aborted &&
+      chatEntities.currentUser &&
+      entityKey(chatEntities.currentUser) === entityKey(user) &&
+      !browserNotifications.isPromptDismissed(user);
     notificationPromptBusy = true;
     notificationPromptError = '';
     try {
       const permission = await browserNotifications.requestPermission();
+      if (!current()) return;
       if (permission !== 'granted') {
         notificationPromptError = browserNotifications.permissionError
           ? browserNotifications.permissionError
@@ -196,9 +213,13 @@
             : 'Notification permission was not granted. Try again when you are ready.';
         return;
       }
-      const latest = await api<UserSettingsPayload>('/users/@me/settings');
+      const latest = await api<UserSettingsPayload>('/users/@me/settings', {
+        signal: controller.signal
+      });
+      if (!current()) return;
       const updated = await api<UserSettingsPayload>('/users/@me/settings', {
         method: 'PATCH',
+        signal: controller.signal,
         body: JSON.stringify({
           notification_settings: {
             ...latest.notification_settings,
@@ -206,9 +227,11 @@
           }
         })
       });
+      if (!current()) return;
       browserNotifications.apply(updated.notification_settings);
       browserNotifications.markPromptHandled();
     } catch (caught) {
+      if (!current()) return;
       notificationPromptError = userErrorMessage(
         caught,
         `Could not enable ${isNativeDesktop() ? 'desktop' : 'browser'} notifications. Try again in settings.`
@@ -219,7 +242,10 @@
   }
 </script>
 
-<div class="authenticated-workspace">
+<div
+  class="authenticated-workspace"
+  style:--notification-space={showNotificationPrompt ? `${notificationPromptHeight + 20}px` : '0px'}
+>
   {#if contentSafety.ready}
     <AppInbox />
     {@render children()}
@@ -227,18 +253,19 @@
     <div class="content-safety-check" role="status">
       <strong
         >{contentSafety.error
-          ? 'Messages are temporarily unavailable'
-          : 'Checking message availability…'}</strong
+          ? $t('safety_unavailable')
+          : canCheckMessages
+            ? $t('safety_checking')
+            : $t('safety_wait_connection')}</strong
       >
       {#if contentSafety.error}
         <p>{contentSafety.error}</p>
+        {#if !canCheckMessages}<p>{$t('safety_wait_connection')}</p>{/if}
         <button
           type="button"
-          onclick={() => {
-            if (chatEntities.currentUser)
-              void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
-          }}
-          disabled={!chatEntities.currentUser}>Try again</button
+          disabled={!canCheckMessages}
+          onclick={() => void authenticatedGateway.retryContentSafety().catch(() => undefined)}
+          >{$t('ui_try_again_d8b8392e')}</button
         >
       {/if}
     </div>
@@ -266,8 +293,12 @@
   </aside>
 {/if}
 
-{#if showNotificationPrompt || notificationPromptError}
-  <aside class="notification-opt-in" aria-labelledby="notification-opt-in-title">
+{#if showNotificationPrompt}
+  <aside
+    class="notification-opt-in"
+    aria-labelledby="notification-opt-in-title"
+    bind:offsetHeight={notificationPromptHeight}
+  >
     <div>
       <strong id="notification-opt-in-title">{$t('ui_stay_up_to_date_3fea6421')}</strong>
       <p>
@@ -278,13 +309,13 @@
       {#if notificationPromptError}<small role="alert">{notificationPromptError}</small>{/if}
     </div>
     <div class="notification-opt-in-actions">
-      <button type="button" disabled={notificationPromptBusy} onclick={dismissNotificationPrompt}
-        >{$t('ui_not_now_a0e63d7c')}</button
-      >
+      <button type="button" onclick={dismissNotificationPrompt}>{$t('ui_not_now_a0e63d7c')}</button>
       <button
         class="notification-opt-in-primary"
         type="button"
-        disabled={notificationPromptBusy}
+        disabled={notificationPromptBusy ||
+          !browserNotifications.supported ||
+          browserNotifications.permission === 'denied'}
         onclick={() => void enableBrowserNotifications()}
       >
         {notificationPromptBusy
@@ -493,7 +524,12 @@
     background: var(--accent);
   }
 
-  @media (max-width: 560px) {
+  @media (max-width: 740px) {
+    .authenticated-workspace :global(.home-app),
+    .authenticated-workspace :global(.chat-app) {
+      height: calc(100dvh - var(--app-utility-height) - var(--notification-space));
+    }
+
     .notification-opt-in {
       right: 10px;
       bottom: 10px;

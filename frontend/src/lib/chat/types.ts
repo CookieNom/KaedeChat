@@ -40,6 +40,9 @@ export interface ThreadMember {
 }
 
 export interface Channel {
+  dm_previous_id?: string;
+  continuation_requester?: string | null;
+  dm_successor_id?: string;
   id: string;
   origin_domain: string;
   guild_id: string | null;

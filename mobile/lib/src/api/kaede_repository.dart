@@ -2246,6 +2246,24 @@ final class KaedeRepository {
         },
       );
 
+  Future<Map<String, Object?>> dmContinuation(EntityRef channel, String action,
+          {String? requestId}) =>
+      api.sendJson('POST',
+          '/api/v1/e2ee/channels/${channel.wire}/plaintext-continuation/${action == 'commit' ? 'commit' : 'consent'}',
+          data: {
+            if (action != 'commit') 'action': action,
+            if (requestId != null) 'request_id': requestId
+          });
+
+  Future<KaedeChannel?> previousDmSegment(EntityRef channel) async {
+    final response = await api
+        .getJson('/api/v1/e2ee/channels/${channel.wire}/previous-segment');
+    final data = response['channel'];
+    return data is Map
+        ? KaedeChannel.fromJson(Map<String, Object?>.from(data))
+        : null;
+  }
+
   Future<Map<String, Object?>> dmEncryptionConsent(
           EntityRef channel, String action, {String? requestId}) =>
       api.sendJson('POST', '/api/v1/e2ee/channels/${channel.wire}/consent',

@@ -17,6 +17,8 @@ The AV1 cryptor leaves required OBU structure clear **and authenticated**, encry
 the remaining bytes with AES-GCM, and carries the IV/tag in a versioned metadata
 OBU. HEVC uses the H.265 NAL path. H.264/HEVC headers are authenticated, including
 long parameter sets; native clear-prefix lengths use `size_t`, not `uint8_t`.
+The [encrypted H.264 capability check](../screen-sharing-quality.md#codec-defaults)
+keeps 0.1.104 phones on a compatible stream when they call an updated client.
 Annex B start codes are normalized before authentication, and escaped ciphertext
 is restored before extracting the IV/trailer. All clients retain HKDF and the
 existing `kaede-livekit-v1` salt. No key material should appear in native logs.

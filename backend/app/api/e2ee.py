@@ -58,11 +58,12 @@ from app.chat.guild_revision import (
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
-from app.chat.payloads import channel_payload, message_payload
+from app.chat.payloads import channel_payload, dm_channel_payload, message_payload
 from app.chat.permissions import get_permissions, require_permissions
 from app.chat.schemas import RequestModel
 from app.core.base64url import decode_base64url, encode_base64url
 from app.core.channel_types import is_message_capable_channel_type
+from app.core.dm import group_dm_key
 from app.core.permission_contract import required_permissions
 from app.core.permissions import Permission
 from app.core.settings import Settings, get_settings
@@ -82,6 +83,7 @@ from app.db.models import (
     Channel,
     ChannelFollow,
     DMConversation,
+    DMParticipant,
     E2EEAccountVault,
     E2EEAccountVaultDigest,
     E2EEControlRecord,
@@ -115,6 +117,7 @@ from app.federation.network import (
 )
 from app.federation.replication import profile_from_user
 from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
+from app.voice.state import get_active_call
 
 router = APIRouter(prefix="/api/v1/e2ee", tags=["end-to-end encryption"])
 REGISTRATION_CHALLENGE_TTL_SECONDS = 300
@@ -1641,6 +1644,282 @@ async def dm_encryption_consent(
     return {"request": consent}
 
 
+def continuation_context(
+    channel: Channel, conversation: DMConversation, participants: list[User]
+) -> dict[str, object]:
+    return {
+        "participants": sorted(f"{u.id}@{u.origin_domain}" for u in participants),
+        "state_version": str(conversation.state_version),
+        "generation": str(channel.encryption_policy_generation),
+        "group_id": channel.encryption_group_id,
+    }
+
+
+class ContinuationCommit(RequestModel):
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+
+
+@router.get("/channels/{channel_id}/previous-segment")
+async def previous_dm_segment(
+    channel_id: EntityRef,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    access = await load_channel_access(session, settings, auth.user, channel_id)
+    previous_id = access.channel.dm_previous_id
+    if previous_id is None:
+        return {"channel": None}
+    domain = access.channel.origin_domain
+    # Successor membership alone never grants access to its predecessor.
+    if (
+        await session.get(
+            DMParticipant, (previous_id, domain, auth.user.id, auth.user.origin_domain)
+        )
+        is None
+    ):
+        return {"channel": None}
+    previous = await load_channel_access(
+        session, settings, auth.user, EntityRef(f"{previous_id}@{domain}")
+    )
+    conversation = await session.get(DMConversation, (previous_id, domain))
+    recipients = [
+        user
+        for user in previous.participants
+        if (user.id, user.origin_domain) != (auth.user.id, auth.user.origin_domain)
+    ]
+    return {"channel": dm_channel_payload(previous.channel, recipients, conversation=conversation)}
+
+
+@router.post("/channels/{channel_id}/plaintext-continuation/commit")
+async def commit_dm_continuation(
+    channel_id: EntityRef,
+    payload: ContinuationCommit,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    snowflake: SnowflakeGenerator = Depends(get_snowflake),
+    redis: Redis = Depends(get_redis),
+) -> dict[str, object]:
+    key = channel_id.resolve(settings.domain)
+    if key[1] != settings.domain:
+        raise HTTPException(
+            status_code=409, detail={"code": "DM_CONTINUATION_INSTANCE_UNSUPPORTED"}
+        )
+    conversation = await session.get(
+        DMConversation, key, with_for_update=True, populate_existing=True
+    )
+    channel = await session.get(Channel, key, with_for_update=True, populate_existing=True)
+    if channel is None or conversation is None:
+        raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    access = await load_channel_access(session, settings, auth.user, channel_id)
+    proposal = conversation.plaintext_continuation_request or {}
+    if proposal.get("request_id") != payload.request_id:
+        raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+    if channel.dm_successor_id is not None:
+        return {"channel_ref": f"{channel.dm_successor_id}@{key[1]}"}
+    participants = access.participants
+    context = continuation_context(channel, conversation, participants)
+    if not participants or any(
+        u.origin_domain != settings.domain or u.account_type in {"bot", "system"}
+        for u in participants
+    ):
+        raise HTTPException(
+            status_code=409, detail={"code": "DM_CONTINUATION_INSTANCE_UNSUPPORTED"}
+        )
+    if (
+        channel.encryption_mode != "e2ee"
+        or channel.encryption_state != "active"
+        or proposal.get("status") != "approved"
+        or proposal["context"] != context
+        or proposal["approved_by"] != context["participants"]
+        or datetime.fromisoformat(proposal["expires_at"]) <= datetime.now(UTC)
+    ):
+        raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+
+    if settings.voice_enabled and await get_active_call(redis, channel.origin_domain, channel.id):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DM_CALL_ACTIVE",
+                "message": "End the call before turning off encryption.",
+            },
+        )
+
+    new_id = await snowflake.mint()
+    domain = channel.origin_domain
+    lookup = conversation.pair_key
+    if conversation.type == "direct":
+        # Keep ordinary open-by-contact lookups pointing at the current room.
+        conversation.pair_key = hashlib.sha256(
+            f"archived-dm/{domain}/{channel.id}".encode()
+        ).hexdigest()
+    else:
+        lookup = group_dm_key(domain, new_id)
+    channel.dm_successor_id = new_id
+    await session.flush()
+    current = Channel(
+        id=new_id,
+        origin_domain=domain,
+        type=1,
+        name=channel.name,
+        position=0,
+        created_floor_id=new_id,
+        dm_previous_id=channel.id,
+    )
+    successor = DMConversation(
+        id=new_id,
+        origin_domain=domain,
+        authority_domain=domain,
+        pair_key=lookup,
+        type=conversation.type,
+        owner_id=conversation.owner_id,
+        owner_domain=conversation.owner_domain,
+        state_version=1,
+    )
+    session.add_all([current, successor])
+    await session.flush()
+    session.add_all(
+        [
+            DMParticipant(
+                conversation_id=new_id,
+                conversation_domain=domain,
+                user_id=user.id,
+                user_domain=user.origin_domain,
+            )
+            for user in participants
+        ]
+    )
+    # Prepare recipient-specific payloads before commit so no expired ORM object
+    # is read between publishing the removal and the replacement.
+    updates = [
+        (
+            user.id,
+            dm_channel_payload(
+                current, [p for p in participants if p.id != user.id], conversation=successor
+            ),
+        )
+        for user in participants
+    ]
+    await session.commit()
+    for user_id, updated in updates:
+        topic = user_topic(domain, user_id)
+        await publish_dispatch(redis, topic, "CHANNEL_CREATE", updated)
+        await publish_dispatch(
+            redis,
+            topic,
+            "CHANNEL_DELETE",
+            {"id": str(key[0]), "origin_domain": domain, "dm_successor_id": str(new_id)},
+        )
+    return {"channel_ref": f"{new_id}@{domain}"}
+
+
+@router.post("/channels/{channel_id}/plaintext-continuation/consent")
+async def dm_plaintext_continuation_consent(
+    channel_id: EntityRef,
+    payload: DMEncryptionConsentRequest,
+    auth: AuthenticatedUser = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    redis: Redis = Depends(get_redis),
+) -> dict[str, object]:
+    access = await load_channel_access(session, settings, auth.user, channel_id)
+    channel = access.channel
+    if access.guild is not None or channel.type != 1:
+        raise HTTPException(status_code=400, detail={"code": "DM_REQUIRED"})
+    if channel.origin_domain != settings.domain:
+        return await proxy_room_e2ee_request(
+            session,
+            settings,
+            channel.origin_domain,
+            "/_kaede/v1/e2ee/rooms/continuation-consent",
+            channel=channel,
+            actor=auth.user,
+            body=payload.model_dump(),
+        )
+    # Group membership changes lock the conversation first. Re-read the roster
+    # under that same lock so a delayed vote cannot authorize a different group.
+    key = (channel.id, channel.origin_domain)
+    conversation = await session.get(
+        DMConversation, key, with_for_update=payload.action != "status", populate_existing=True
+    )
+    locked_channel = await session.get(
+        Channel, key, with_for_update=payload.action != "status", populate_existing=True
+    )
+    if conversation is None or locked_channel is None or locked_channel.unavailable:
+        raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+    access = await load_channel_access(session, settings, auth.user, channel_id)
+    channel = locked_channel
+    if getattr(channel, "dm_successor_id", None) is not None:
+        return {
+            "request": None,
+            "channel_ref": f"{channel.dm_successor_id}@{channel.origin_domain}",
+        }
+    if any(
+        u.origin_domain != settings.domain
+        or getattr(u, "account_type", "user") in {"bot", "system"}
+        for u in access.participants
+    ):
+        if payload.action == "status":
+            return {"request": None, "available": False}
+        raise HTTPException(
+            status_code=409, detail={"code": "DM_CONTINUATION_INSTANCE_UNSUPPORTED"}
+        )
+    if channel.encryption_mode != "e2ee" or channel.encryption_state != "active":
+        raise HTTPException(status_code=409, detail={"code": "ACTIVE_ENCRYPTED_DM_REQUIRED"})
+    roster = sorted(f"{u.id}@{u.origin_domain}" for u in access.participants)
+    actor = f"{auth.user.id}@{auth.user.origin_domain}"
+    if actor not in roster:
+        raise HTTPException(status_code=403, detail={"code": "MISSING_ACCESS"})
+    context = continuation_context(channel, conversation, access.participants)
+    proposal = dict(conversation.plaintext_continuation_request or {})
+    now = datetime.now(UTC)
+    if proposal and (
+        proposal["context"] != context or datetime.fromisoformat(proposal["expires_at"]) <= now
+    ):
+        proposal = {}
+    if payload.action == "status":
+        return {"request": proposal or None}
+    if payload.action == "request":
+        if proposal.get("status") in {"pending", "approved"}:
+            return {"request": proposal}
+        proposal = {
+            "request_id": encode_base64url(secrets.token_bytes(32)),
+            "requester": actor,
+            "requester_name": auth.user.username,
+            "context": context,
+            "expires_at": (now + timedelta(days=1)).isoformat(),
+            "approved_by": [actor],
+            "status": "approved" if roster == [actor] else "pending",
+        }
+    else:
+        if not proposal or proposal["request_id"] != payload.request_id:
+            raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+        if proposal["status"] == "declined":
+            if payload.action == "disagree":
+                return {"request": proposal}
+            raise HTTPException(status_code=409, detail={"code": "E2EE_DM_REQUEST_STALE"})
+        if payload.action == "disagree":
+            proposal["status"] = "declined"
+        else:
+            approved = sorted({*proposal["approved_by"], actor})
+            proposal["approved_by"] = approved
+            proposal["status"] = "approved" if approved == roster else "pending"
+    conversation.plaintext_continuation_request = proposal
+    recipients = [member.id for member in access.participants]
+    notice = {
+        "id": str(channel.id),
+        "origin_domain": channel.origin_domain,
+        "continuation_requester": proposal.get("requester_name", proposal["requester"])
+        if proposal["status"] in {"pending", "approved"}
+        else None,
+    }
+    await session.commit()
+    for user_id in recipients:
+        await publish_dispatch(redis, user_topic(key[1], user_id), "DM_CONSENT_UPDATE", notice)
+    return {"request": proposal}
+
+
 @router.get("/channels/{channel_id}/control-log")
 async def room_encryption_control_log(
     channel_id: EntityRef,
@@ -2721,6 +3000,8 @@ async def _propose_room_operation(
     automation_authorized: bool = False,
 ) -> dict[str, object]:
     access = await lock_local_channel_mutation(session, settings, access)
+    if getattr(access.channel, "dm_successor_id", None) is not None:
+        raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
     if not automation_authorized:
         await require_room_policy_authority(session, redis, settings, access, auth.user)
     if auth.user.origin_domain == settings.domain and not automation_authorized:
@@ -3127,6 +3408,11 @@ async def _commit_room_operation(
         ):
             raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_CONFLICT"})
         return _stored_response(operation.committed_response, "committed")
+    if access.guild is None:
+        # A continuation may have committed since the initial access check.
+        await session.refresh(channel, with_for_update=True)
+        if channel.dm_successor_id is not None:
+            raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
     if kind == "activate":
         await require_room_instance_capabilities(
             session,

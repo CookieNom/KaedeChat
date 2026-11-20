@@ -1,7 +1,12 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/auth/session_vault.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/role_colors.dart';
@@ -11,6 +16,10 @@ import 'package:kaede_mobile/src/features/home/mobile_shell.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'discord_settings_visual_test.dart'
+    show fixtureController, fixtureGuild, fixtureUser;
 
 KaedeUser _user(
         {String name = 'Maple',
@@ -224,6 +233,94 @@ void main() {
           isNull);
     });
   });
+
+  for (final size in [const Size(320, 640), const Size(1024, 768)]) {
+    testWidgets(
+        'shared profile reconciles an incoming request at ${size.width}px',
+        (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      FlutterSecureStorage.setMockInitialValues({});
+      SharedPreferences.setMockInitialValues({});
+
+      final viewer = fixtureUser();
+      final target = _user();
+      final list = Completer<void>();
+      final accept = Completer<void>();
+      var accepts = 0;
+      final dio = Dio()
+        ..interceptors
+            .add(InterceptorsWrapper(onRequest: (request, handler) async {
+          Object data;
+          if (request.path == '/api/v1/users/lookup') {
+            data = target.toJson();
+          } else if (request.method == 'GET') {
+            expect(request.path, '/api/v1/users/@me/relationships');
+            await list.future;
+            data = [
+              {'type': 'pending_in', 'user': target.toJson()}
+            ];
+          } else {
+            expect(request.method, 'PUT');
+            expect(request.path,
+                '/api/v1/users/@me/relationships/${target.ref.wire}');
+            accepts++;
+            await accept.future;
+            data = {'type': 'friend', 'user': target.toJson()};
+          }
+          handler.resolve(
+              Response(requestOptions: request, data: data, statusCode: 200));
+        }));
+      final controller = await fixtureController(
+          fixtureGuild(viewer), viewer, [],
+          httpClient: dio);
+      await controller.api.useTokens(SessionTokens(
+          instance: viewer.ref.domain,
+          userRef: viewer.ref,
+          accessToken: 'access',
+          refreshToken: 'refresh'));
+      controller.state = MobileState(phase: SessionPhase.ready, user: viewer);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+        child: MaterialApp(
+            theme: kaedeTheme(),
+            home: Scaffold(
+                body: Builder(
+                    builder: (context) => TextButton(
+                        onPressed: () => showUserProfile(
+                            context, target, PresenceStatus.offline),
+                        child: const Text('View profile'))))),
+      ));
+      await tester.tap(find.text('View profile'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Send friend request'), findsNothing);
+      expect(find.text('Accept'), findsNothing);
+      list.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Sent you a friend request'), findsOneWidget);
+      expect(find.text('Decline'), findsOneWidget);
+      await tester.tap(find.text('Accept'));
+      await tester.tap(find.text('Accept'));
+      await tester.pump();
+      expect(accepts, 1);
+      expect(
+          tester
+              .widget<OutlinedButton>(
+                  find.widgetWithText(OutlinedButton, 'Decline'))
+              .onPressed,
+          isNull);
+      accept.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Remove friend'), findsOneWidget);
+      expect(find.text('Accept'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    });
+  }
 
   group('layout holds on small phones', () {
     Future<void> pump(WidgetTester tester, Widget child) async {

@@ -532,6 +532,7 @@ final class MobileState {
     this.messageJump,
     this.incomingCall,
     this.pendingCallJoin,
+    this.friendsRequested = false,
     this.gatewayHealth = const GatewayHealth(
       GatewayConnectionPhase.offline,
       message: 'Realtime updates are not connected.',
@@ -581,6 +582,7 @@ final class MobileState {
   final MessageJumpRequest? messageJump;
   final IncomingCall? incomingCall;
   final IncomingCall? pendingCallJoin;
+  final bool friendsRequested;
   final GatewayHealth gatewayHealth;
   final Map<DegradedFeature, String> degradedWarnings;
   final String? gatewayProtocolWarning;
@@ -619,20 +621,24 @@ final class MobileState {
       ? const <GuildMember>[]
       : guildMembers[selectedGuild] ?? const <GuildMember>[];
 
-  bool isBlocked(KaedeUser? user) => _isBlockedRef(user?.ref);
+  String? relationshipType(EntityRef? user) {
+    if (user == null) return null;
+    for (final relationship in relationships) {
+      final target = relationship['user'];
+      if (target is Map &&
+          '${target['id']}' == user.id.value &&
+          target['origin_domain'] == user.domain.value) {
+        final type = relationship['type'];
+        return type is String ? type : null;
+      }
+    }
+    return null;
+  }
+
+  bool isBlocked(KaedeUser? user) => relationshipType(user?.ref) == 'blocked';
 
   bool isMessageBlocked(KaedeMessage? message) =>
-      _isBlockedRef(message?.authorRef);
-
-  bool _isBlockedRef(EntityRef? user) =>
-      user != null &&
-      relationships.any((item) {
-        final target = item['user'];
-        return item['type'] == 'blocked' &&
-            target is Map &&
-            '${target['id']}' == user.id.value &&
-            target['origin_domain'] == user.domain.value;
-      });
+      relationshipType(message?.authorRef) == 'blocked';
 
   List<KaedeMessage> get messages => selectedChannel == null
       ? const <KaedeMessage>[]
@@ -691,6 +697,7 @@ final class MobileState {
     bool clearIncomingCall = false,
     IncomingCall? pendingCallJoin,
     bool clearPendingCallJoin = false,
+    bool? friendsRequested,
     GatewayHealth? gatewayHealth,
     Map<DegradedFeature, String>? degradedWarnings,
     String? gatewayProtocolWarning,
@@ -747,6 +754,7 @@ final class MobileState {
         messageJump: clearMessageJump ? null : messageJump ?? this.messageJump,
         incomingCall:
             clearIncomingCall ? null : incomingCall ?? this.incomingCall,
+        friendsRequested: friendsRequested ?? this.friendsRequested,
         pendingCallJoin: clearPendingCallJoin
             ? null
             : pendingCallJoin ?? this.pendingCallJoin,
@@ -934,6 +942,7 @@ final class MobileController extends StateNotifier<MobileState> {
   StreamSubscription<PushDestination>? _pushDestinationSubscription;
   StreamSubscription<SystemCallEvent>? _pushCallSubscription;
   StreamSubscription<String?>? _pushHealthSubscription;
+  StreamSubscription<void>? _relationshipPushSubscription;
   StreamSubscription<SystemCallEvent>? _systemCallSubscription;
   StreamSubscription<void>? _sessionExpiredSubscription;
   Timer? _outboxTimer;
@@ -1000,6 +1009,8 @@ final class MobileController extends StateNotifier<MobileState> {
   var _conversationSelectionGeneration = 0;
   Future<void>? _navigationRefresh;
   var _navigationRefreshQueued = false;
+  var _relationshipRevision = 0;
+  ({int session, Future<void> result})? _relationshipRefresh;
   Future<void>? _notificationActivation;
   final _pushRegistration = PushRegistration();
   Future<void> _cacheWriteTail = Future<void>.value();
@@ -1536,6 +1547,7 @@ final class MobileController extends StateNotifier<MobileState> {
       _appLockTimer = null;
       unawaited(_lockAfterBackgroundIfNeeded());
       if (becameActive) {
+        _catchUpRelationships();
         unawaited(retryRealtime(foreground: true));
       }
       unawaited(_flushOutbox());
@@ -1999,10 +2011,11 @@ final class MobileController extends StateNotifier<MobileState> {
       repository.dms(),
     ]);
     if (generation != _sessionLoadGeneration) return;
-    final relationships = await _optional(
-      repository.relationships,
-      const <Map<String, Object?>>[],
-    );
+    final relationships = await _optional<List<Map<String, Object?>>?>(
+          repository.relationships,
+          null,
+        ) ??
+        await database.snapshots(resolved.accountKey, 'relationships');
     final authConfiguration = await _optional(
       () => repository.authConfig(resolved.instance),
       const <String, Object?>{},
@@ -2167,6 +2180,10 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushCallSubscription = push.callEvents.listen(
       (event) => unawaited(_onSystemCallAction(event)),
     );
+    await _relationshipPushSubscription?.cancel();
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    _relationshipPushSubscription =
+        push.relationshipUpdates.listen((_) => _catchUpRelationships());
     await _pushHealthSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     _pushHealthSubscription = push.health.listen(_setPushRemoteDeliveryWarning);
@@ -2734,6 +2751,11 @@ final class MobileController extends StateNotifier<MobileState> {
         offline: false,
         clearError: true,
       );
+      final continuation = state.dms
+          .where((dm) =>
+              dm.previousDm != null && dm.previousDm == state.selectedChannel)
+          .firstOrNull;
+      if (continuation != null) unawaited(selectDm(continuation));
       for (final guild in refreshedGuilds) {
         for (final channel in guild.channels) {
           _reconcileChannelHistoryAccess(
@@ -2750,7 +2772,7 @@ final class MobileController extends StateNotifier<MobileState> {
       _setDegradedWarning(DegradedFeature.readStates, null);
       _dirtyCacheGroups.addAll(_allCacheGroups);
       await _cacheLists();
-      unawaited(_refreshRelationships());
+      refreshRelationships().ignore();
       unawaited(_retryGuildNavigation());
     } on Object catch (error) {
       if (_sessionIsCurrent(accountKey, generation)) {
@@ -2759,43 +2781,107 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
+  Future<void> requestFriend(String handle) =>
+      _changeRelationship(() => repository.requestFriend(handle));
+
+  Future<void> acceptFriend(EntityRef target) =>
+      _changeRelationship(() => repository.acceptFriend(target));
+
+  Future<void> removeRelationship(EntityRef target) =>
+      _changeRelationship(() async {
+        await repository.removeRelationship(target);
+        return {
+          'type': 'none',
+          'user': {'id': target.id.value, 'origin_domain': target.domain.value},
+        };
+      }, preserveBlock: true);
+
   Future<void> setUserBlocked(KaedeUser user, bool blocked) async {
     if (user.ref == state.user?.ref) return;
-    final accountKey = api.tokens?.accountKey;
-    if (blocked) {
-      await repository.block(user.ref);
-    } else {
-      await repository.unblock(user.ref);
-    }
-    if (accountKey != api.tokens?.accountKey) return;
-    final relationships = state.relationships.where((item) {
-      final target = item['user'];
-      return target is! Map ||
-          '${target['id']}' != user.ref.id.value ||
-          target['origin_domain'] != user.ref.domain.value;
-    }).toList();
-    if (blocked) relationships.add({'type': 'blocked', 'user': user.toJson()});
-    state = state.copyWith(relationships: relationships);
-    _scheduleMetadataCache(const <String>{'relationships'});
+    await _changeRelationship(() async {
+      if (blocked) {
+        await repository.block(user.ref);
+      } else {
+        await repository.unblock(user.ref);
+      }
+      return {'type': blocked ? 'blocked' : 'none', 'user': user.toJson()};
+    });
   }
 
-  Future<void> _refreshRelationships() async {
+  Future<void> _changeRelationship(
+    Future<Map<String, Object?>> Function() change, {
+    bool preserveBlock = false,
+  }) async {
     final generation = _sessionLoadGeneration;
     final accountKey = api.tokens?.accountKey;
     if (accountKey == null || state.phase != SessionPhase.ready) return;
-    try {
+    final revision = _relationshipRevision;
+    final detail = await change();
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    final target = _relationshipTarget(detail);
+    if (target == null) {
+      await refreshRelationships();
+      return;
+    }
+    final current = state.relationshipType(target);
+    if (preserveBlock && current == 'blocked') return;
+    if (revision != _relationshipRevision &&
+        (current ?? 'none') != detail['type']) {
+      // Another device may have advanced this relationship while the write was in flight.
+      _relationshipRevision++;
+      await refreshRelationships();
+      return;
+    }
+    _applyRelationship(target, detail);
+  }
+
+  EntityRef? _relationshipTarget(Map<String, Object?> detail) {
+    final user = detail['user'];
+    return user is Map ? _entityRef(user['id'], user['origin_domain']) : null;
+  }
+
+  void _applyRelationship(EntityRef target, Map<String, Object?> detail) {
+    _relationshipRevision++;
+    state = state.copyWith(relationships: [
+      for (final item in state.relationships)
+        if (_relationshipTarget(item) != target) item,
+      if (detail['type'] != 'none') detail,
+    ]);
+    _scheduleMetadataCache(const {'relationships'});
+  }
+
+  void _catchUpRelationships() {
+    // Any list already in flight may predate the push or reconnect.
+    _relationshipRevision++;
+    refreshRelationships().ignore();
+  }
+
+  Future<void> refreshRelationships() {
+    final session = _sessionLoadGeneration;
+    final account = api.tokens?.accountKey;
+    if (account == null || state.phase != SessionPhase.ready) {
+      return Future.value();
+    }
+    final active = _relationshipRefresh;
+    if (active != null && active.session == session) return active.result;
+    final result = _loadRelationships(account, session).whenComplete(() {
+      if (_relationshipRefresh?.session == session) _relationshipRefresh = null;
+    });
+    _relationshipRefresh = (session: session, result: result);
+    return result;
+  }
+
+  Future<void> _loadRelationships(String account, int session) async {
+    while (_sessionReadyIsCurrent(account, session)) {
+      final revision = _relationshipRevision;
       final relationships = await repository.relationships();
-      if (generation != _sessionLoadGeneration ||
-          state.phase != SessionPhase.ready ||
-          api.tokens?.accountKey != accountKey) {
-        return;
-      }
+      if (!_sessionReadyIsCurrent(account, session)) return;
+      // A list fetched before a live event or a local write can already be stale.
+      if (revision != _relationshipRevision) continue;
+      _relationshipRevision++;
       state = state.copyWith(relationships: relationships);
-      _dirtyCacheGroups.add('relationships');
-      await _cacheLists();
-    } on Object {
-      // Relationships are optional navigation metadata. A temporary outage
-      // must not roll back otherwise-current guild and DM state.
+      _scheduleMetadataCache(const {'relationships'});
+      return;
     }
   }
 
@@ -3149,16 +3235,24 @@ final class MobileController extends StateNotifier<MobileState> {
     await preferences.setString(_lastConversationKey(accountKey), channel.wire);
   }
 
+  void didOpenFriends() => state = state.copyWith(friendsRequested: false);
+
   Future<bool> openPushDestination(PushDestination destination) async {
     if (state.phase != SessionPhase.ready) return false;
+    final channelRef = destination.channel;
+    if (channelRef == null) {
+      _catchUpRelationships();
+      state = state.copyWith(friendsRequested: true);
+      return true;
+    }
     KaedeChannel? channel;
     KaedeGuild? guild;
     for (final candidate in state.dms) {
-      if (candidate.ref == destination.channel) channel = candidate;
+      if (candidate.ref == channelRef) channel = candidate;
     }
     for (final candidateGuild in state.guilds) {
       for (final candidate in candidateGuild.channels) {
-        if (candidate.ref == destination.channel) {
+        if (candidate.ref == channelRef) {
           guild = candidateGuild;
           channel = candidate;
         }
@@ -3167,11 +3261,11 @@ final class MobileController extends StateNotifier<MobileState> {
     if (channel == null) {
       await refreshNavigation();
       for (final candidate in state.dms) {
-        if (candidate.ref == destination.channel) channel = candidate;
+        if (candidate.ref == channelRef) channel = candidate;
       }
       for (final candidateGuild in state.guilds) {
         for (final candidate in candidateGuild.channels) {
-          if (candidate.ref == destination.channel) {
+          if (candidate.ref == channelRef) {
             guild = candidateGuild;
             channel = candidate;
           }
@@ -3180,7 +3274,7 @@ final class MobileController extends StateNotifier<MobileState> {
     }
     if (channel == null) {
       try {
-        final direct = await repository.channel(destination.channel);
+        final direct = await repository.channel(channelRef);
         if (direct.isThread) {
           _upsertThread(direct);
           channel = direct;
@@ -3212,6 +3306,42 @@ final class MobileController extends StateNotifier<MobileState> {
     return true;
   }
 
+  Future<List<KaedeMessage>> previousDmMessages(
+      EntityRef visible, KaedeChannel source,
+      {EntityRef? before}) async {
+    final generation = _sessionLoadGeneration;
+    final account = api.tokens?.accountKey;
+    bool current() =>
+        account != null &&
+        _sessionIsCurrent(account, generation) &&
+        state.selectedChannel == visible;
+    if (!current()) return const [];
+    final initial = {
+      for (final m in state.messageStore[source.ref] ?? const <KaedeMessage>[])
+        m.ref: m
+    };
+    final page = await repository.messages(source.ref, before: before);
+    if (!current()) return const [];
+    for (final message in page) {
+      _acceptFreshSafetyMessage(message);
+    }
+    final rows =
+        await (await e2eeClient()).decryptMessages(source, page.reversed);
+    if (!current()) return const [];
+    final existing = {
+      for (final m in state.messageStore[source.ref] ?? const <KaedeMessage>[])
+        m.ref: m
+    };
+    for (final m in rows) {
+      if (identical(initial[m.ref], existing[m.ref]) &&
+          existing[m.ref]?.deletedAt == null) {
+        existing[m.ref] = m;
+      }
+    }
+    _setChannelMessages(source.ref, mergeMessages(existing.values.toList()));
+    return rows;
+  }
+
   Future<void> loadMessages(
       {bool older = false, bool newer = false, EntityRef? around}) async {
     final channel = state.activeChannel;
@@ -3233,6 +3363,7 @@ final class MobileController extends StateNotifier<MobileState> {
     final existing = state.messageStore[channelRef] ?? const <KaedeMessage>[];
     _setChannelLoading(channelRef, true);
     state = state.copyWith(clearError: true);
+    String? encryptionStep;
     try {
       final page = await repository.messages(
         channelRef,
@@ -3253,7 +3384,11 @@ final class MobileController extends StateNotifier<MobileState> {
         _acceptFreshSafetyMessage(message);
       }
       if (channel.encryptionMode == 'e2ee') {
-        ordered = await (await e2eeClient()).decryptMessages(channel, ordered);
+        encryptionStep = 'open_encryption';
+        final client = await e2eeClient();
+        encryptionStep = 'decrypt_history';
+        ordered = await client.decryptMessages(channel, ordered);
+        encryptionStep = null;
       }
       if (!_messageRequestIsCurrent(
         channelRef,
@@ -3355,10 +3490,25 @@ final class MobileController extends StateNotifier<MobileState> {
         accountKey,
         sessionGeneration,
       )) {
-        final restored = (state.messageStore[channelRef]?.isNotEmpty ?? false)
-            ? false
-            : await _restoreCachedMessages(
+        final offline = _isOffline(error);
+        final accessDenied = error is KaedeException &&
+            const {401, 403, 404, 410}.contains(error.status);
+        var restored = false;
+        if (encryptionStep != null) {
+          DebugLog.instance.record(DebugEvent.encryptedHistoryFailed,
+              step: encryptionStep,
+              error: error,
+              status: error is KaedeException ? error.status : null);
+        }
+        if (!accessDenied &&
+            (state.messageStore[channelRef]?.isEmpty ?? true)) {
+          try {
+            restored = await _restoreCachedMessages(
                 channelRef, accountKey, sessionGeneration);
+          } on Object {
+            // A failed cache read must not hide the reason the history request failed.
+          }
+        }
         if (!_messageRequestIsCurrent(
           channelRef,
           generation,
@@ -3368,9 +3518,16 @@ final class MobileController extends StateNotifier<MobileState> {
           return;
         }
         state = state.copyWith(
-          offline: restored || state.offline,
-          error:
-              restored ? 'Offline — showing saved messages.' : _message(error),
+          offline: offline,
+          error: offline && restored
+              ? 'Offline — showing saved messages.'
+              : encryptionStep == null
+                  ? _message(error)
+                  : userFacingError(error,
+                      summary:
+                          'Could not open encrypted messages on this device.',
+                      fallback:
+                          'Tap Retry. If this continues, turn on Debug logging in Settings under Troubleshooting and try again.'),
         );
       }
     } finally {
@@ -4018,6 +4175,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushCallSubscription = null;
     await _pushHealthSubscription?.cancel();
     _pushHealthSubscription = null;
+    await _relationshipPushSubscription?.cancel();
+    _relationshipPushSubscription = null;
     await _sessionExpiredSubscription?.cancel();
     _sessionExpiredSubscription = null;
     _outboxTimer?.cancel();
@@ -4541,6 +4700,8 @@ final class MobileController extends StateNotifier<MobileState> {
 
   void _applyGateway(GatewayEvent event) {
     if (event.name == 'READY' || event.name == 'RESUMED') {
+      // Catch requests received before the personal gateway subscription was active.
+      _catchUpRelationships();
       contentSafety.resetFreshAuthorizations();
       unawaited(reconcileContentSafety());
       final preference = event.data['presence_preference'];
@@ -5015,7 +5176,10 @@ final class MobileController extends StateNotifier<MobileState> {
       case 'GUILD_DELETE':
         _applyGuildDelete(event.data);
         break;
-      case 'GUILD_UPDATE' || 'CHANNEL_CREATE' || 'CHANNEL_DELETE':
+      case 'DM_CONSENT_UPDATE' ||
+            'GUILD_UPDATE' ||
+            'CHANNEL_CREATE' ||
+            'CHANNEL_DELETE':
         _scheduleNavigationRefresh();
         break;
       case 'CHANNEL_UPDATE':
@@ -5232,20 +5396,10 @@ final class MobileController extends StateNotifier<MobileState> {
         final relationship = event.data['relationship'];
         if (relationship is Map) {
           final detail = Map<String, Object?>.from(relationship);
-          final target = detail['user'];
-          if (target is Map &&
-              target['id'] != null &&
-              target['origin_domain'] != null) {
-            final relationships = state.relationships.where((item) {
-              final user = item['user'];
-              return user is! Map ||
-                  user['id'] != target['id'] ||
-                  user['origin_domain'] != target['origin_domain'];
-            }).toList();
-            if (detail['type'] != 'none') relationships.add(detail);
-            state = state.copyWith(relationships: relationships);
-            _scheduleMetadataCache(const <String>{'relationships'});
-          }
+          final target = _relationshipTarget(detail);
+          final changed = target != null &&
+              state.relationshipType(target) != detail['type'];
+          if (target != null) _applyRelationship(target, detail);
           final errorCode = detail['error_code'];
           if (errorCode is String && errorCode.isNotEmpty) {
             state = state.copyWith(
@@ -5255,7 +5409,9 @@ final class MobileController extends StateNotifier<MobileState> {
               ),
             );
           }
-          if (!_appActive) unawaited(_notifyRelationshipEvent(detail));
+          if (changed && (!_appActive || detail['type'] == 'pending_in')) {
+            unawaited(_notifyRelationshipEvent(target, detail));
+          }
         } else if (event.data['id'] != null &&
             event.data['origin_domain'] != null &&
             event.data['username'] != null) {
@@ -6450,23 +6606,40 @@ final class MobileController extends StateNotifier<MobileState> {
     ));
   }
 
-  Future<void> _notifyRelationshipEvent(Map<String, Object?> detail) async {
+  Future<void> _notifyRelationshipEvent(
+      EntityRef target, Map<String, Object?> detail) async {
+    if (state.presencePreference == PresenceStatus.dnd ||
+        state.notificationSettings['relationships'] == false) {
+      return;
+    }
     final type = '${detail['type'] ?? ''}';
     if (!{'pending_in', 'friend'}.contains(type)) return;
     final user = detail['user'];
     final name = user is Map
         ? '${user['display_name'] ?? user['username'] ?? 'Someone'}'
         : 'Someone';
-    await push.show(
-      id: stableNotificationId('relationship:$type:$name'),
-      kind: NotificationKind.activity,
-      title: type == 'pending_in'
-          ? 'New friend request'
-          : 'Friend request accepted',
-      body: type == 'pending_in'
-          ? '$name sent you a friend request.'
-          : 'You and $name are now friends.',
-    );
+    try {
+      await push.show(
+        id: stableNotificationId('relationship:${target.wire}:$type'),
+        kind: NotificationKind.relationship,
+        payload: const PushDestination.friends().encode(),
+        title: type == 'pending_in'
+            ? 'New friend request'
+            : 'Friend request accepted',
+        body: !notificationPreviewsEnabled(state.notificationSettings)
+            ? L10n.current.friends_push_open
+            : type == 'pending_in'
+                ? '$name sent you a friend request.'
+                : 'You and $name are now friends.',
+      );
+      _setPushLocalDisplayWarning(null);
+    } on Object catch (error) {
+      _setPushLocalDisplayWarning(userFacingError(
+        error,
+        summary:
+            'A friend notification could not be shown. Open Friends to view the update.',
+      ));
+    }
   }
 
   Future<void> _notifyModerationEvent(Map<String, Object?> data) async {
@@ -7522,6 +7695,7 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushTokenSubscription?.cancel();
     _pushDestinationSubscription?.cancel();
     _pushCallSubscription?.cancel();
+    _relationshipPushSubscription?.cancel();
     _pushHealthSubscription?.cancel();
     _systemCallSubscription?.cancel();
     _sessionExpiredSubscription?.cancel();
@@ -7613,6 +7787,8 @@ final class MobileController extends StateNotifier<MobileState> {
     _pushCallSubscription = null;
     await _pushHealthSubscription?.cancel();
     _pushHealthSubscription = null;
+    await _relationshipPushSubscription?.cancel();
+    _relationshipPushSubscription = null;
     await _gatewaySubscription?.cancel();
     await _gatewayHealthSubscription?.cancel();
     _gatewayHealthSubscription = null;

@@ -56,6 +56,41 @@ it.each([true, false])(
   }
 );
 
+it('loads earlier pages when the current page has no visible messages', async () => {
+  const props = $state({ items: [] as { key: string }[] });
+  const loadEarlier = vi
+    .fn()
+    .mockResolvedValueOnce(undefined)
+    .mockImplementationOnce(() => {
+      props.items = [{ key: 'message:10@chat.example' }];
+    });
+  component = mount(VirtualMessageList, {
+    target: document.body,
+    props: {
+      get items() {
+        return props.items;
+      },
+      hasEarlier: true,
+      onLoadEarlier: loadEarlier,
+      renderItem: createRawSnippet(() => ({ render: () => '<p>Earlier message</p>' }))
+    }
+  });
+  flushSync();
+  const button = document.querySelector<HTMLButtonElement>('.history-button')!;
+  const viewport = document.querySelector<HTMLElement>('.virtual-message-viewport')!;
+  Object.defineProperty(viewport, 'scrollHeight', { get: () => (props.items.length ? 900 : 180) });
+  viewport.scrollTo = vi.fn();
+  button.click();
+  await tick();
+  expect(document.querySelector('[data-virtual-key]')).toBeNull();
+  button.click();
+  await tick();
+  await tick();
+  expect(loadEarlier).toHaveBeenCalledTimes(2);
+  expect(document.querySelector('[data-virtual-key]')?.textContent).toBe('Earlier message');
+  expect(viewport.scrollTop).toBe(900);
+});
+
 it('jumps directly to latest history and keeps the saved-position control available', async () => {
   const latest = vi.fn();
   const saved = vi.fn();

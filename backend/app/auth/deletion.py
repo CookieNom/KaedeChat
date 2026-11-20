@@ -308,6 +308,11 @@ async def erase_private_account_state(
             await session.execute(
                 select(m.DMConversation.id, m.DMConversation.origin_domain)
                 .join(
+                    m.Channel,
+                    (m.Channel.id == m.DMConversation.id)
+                    & (m.Channel.origin_domain == m.DMConversation.origin_domain),
+                )
+                .join(
                     m.DMParticipant,
                     (m.DMParticipant.conversation_id == m.DMConversation.id)
                     & (m.DMParticipant.conversation_domain == m.DMConversation.origin_domain),
@@ -316,6 +321,7 @@ async def erase_private_account_state(
                     m.DMParticipant.user_id == user.id,
                     m.DMParticipant.user_domain == user.origin_domain,
                     m.DMConversation.type == "group",
+                    m.Channel.dm_successor_id.is_(None),
                 )
             )
         ).tuples()

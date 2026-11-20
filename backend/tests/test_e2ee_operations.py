@@ -960,3 +960,62 @@ async def test_activation_checks_each_remote_instance(monkeypatch, capabilities)
             await e2ee_api.require_room_instance_capabilities(session, settings, participants)
         assert caught.value.detail["code"] == "E2EE_INSTANCE_UNSUPPORTED"
     peer.assert_awaited_once_with(session, settings, "remote.example")
+
+
+async def test_plaintext_continuation_needs_every_current_participant(monkeypatch):
+    from app.core.types import EntityRef
+    from app.db.models import DMConversation
+
+    monkeypatch.setattr(e2ee_api, "publish_dispatch", AsyncMock())
+    members = [
+        SimpleNamespace(id=i, username=f"user{i}", origin_domain="home.example")
+        for i in range(1, 4)
+    ]
+    conversation = SimpleNamespace(state_version=1, plaintext_continuation_request=None)
+    channel = SimpleNamespace(
+        id=10,
+        origin_domain="home.example",
+        type=1,
+        unavailable=False,
+        encryption_mode="e2ee",
+        encryption_state="active",
+        encryption_policy_generation=1,
+        encryption_group_id="g",
+    )
+    access = SimpleNamespace(guild=None, channel=channel, participants=members)
+    monkeypatch.setattr(e2ee_api, "load_channel_access", AsyncMock(return_value=access))
+    session = AsyncMock()
+    session.get.side_effect = lambda model, *args, **kw: (
+        conversation if model is DMConversation else channel
+    )
+
+    async def act(actor, action, request_id=None):
+        result = await e2ee_api.dm_plaintext_continuation_consent(
+            EntityRef("10@home.example"),
+            e2ee_api.DMEncryptionConsentRequest(action=action, request_id=request_id),
+            SimpleNamespace(user=actor),
+            session,
+            SimpleNamespace(domain="home.example"),
+        )
+        return result["request"]
+
+    request = await act(members[0], "request")
+    token = request["request_id"]
+    assert request["requester_name"] == "user1"
+    assert e2ee_api.publish_dispatch.await_count == len(members)
+    for _ in range(2):
+        assert (await act(members[1], "agree", token))["status"] == "pending"
+    with pytest.raises(HTTPException, match="MISSING_ACCESS"):
+        await act(SimpleNamespace(id=9, origin_domain="home.example"), "agree", token)
+    assert (await act(members[2], "agree", token))["status"] == "approved"
+    assert (await act(members[0], "disagree", token))["status"] == "declined"
+    with pytest.raises(HTTPException, match="E2EE_DM_REQUEST_STALE"):
+        await act(members[1], "agree", token)
+    another = await act(members[1], "request")
+    assert another["request_id"] != token
+    # Leave/rejoin can restore an identical roster but changes its revision.
+    conversation.state_version += 2
+    assert await act(members[0], "status") is None
+    with pytest.raises(HTTPException, match="E2EE_DM_REQUEST_STALE"):
+        await act(members[2], "agree", another["request_id"])
+    assert channel.encryption_mode == "e2ee"

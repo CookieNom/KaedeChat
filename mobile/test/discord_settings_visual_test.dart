@@ -363,6 +363,13 @@ Dio _cannedClient(
         data = _stickerPayload;
       } else if (path == '/api/v1/guilds/1@chat.example/soundboard-sounds') {
         data = <String, Object?>{'items': _soundboardPayload};
+      } else if (method == 'PUT' &&
+          path ==
+              '/api/v1/guilds/1@chat.example/members/101@remote.example/roles') {
+        data = {
+          'user': fixtureRemoteAuditActor().toJson(),
+          'role_ids': (options.data as Map)['role_ids'],
+        };
       } else if (path == '/api/v1/guilds/1@chat.example/members') {
         final query =
             '${options.queryParameters['query'] ?? ''}'.trim().toLowerCase();
@@ -418,16 +425,18 @@ Future<MobileController> fixtureController(
   List<Map<String, Object?>> applicationInstallations = const [],
   Map<String, Object?>? onboarding,
   PushService? pushService,
+  Dio? httpClient,
 }) async {
   final api = KaedeApiClient(
     vault: const SessionVault(),
-    httpClient: _cannedClient(
-      guild,
-      user,
-      requestLog,
-      applicationInstallations: applicationInstallations,
-      onboarding: onboarding,
-    ),
+    httpClient: httpClient ??
+        _cannedClient(
+          guild,
+          user,
+          requestLog,
+          applicationInstallations: applicationInstallations,
+          onboarding: onboarding,
+        ),
   );
   final repository = KaedeRepository(api);
   final gateway = GatewayClient(
@@ -454,6 +463,65 @@ void main() {
       buildNumber: '1',
       buildSignature: 'test',
     );
+  });
+
+  test(
+      'a delayed Friends refresh preserves an accepted request and picks up other requests',
+      () async {
+    final user = fixtureUser();
+    final sender = fixtureRemoteAuditActor();
+    final other = fixturePagedAuditActor(101);
+    final pending = {'type': 'pending_in', 'user': sender.toJson()};
+    final accepted = {'type': 'friend', 'user': sender.toJson()};
+    final firstReadStarted = Completer<void>();
+    final finishFirstRead = Completer<void>();
+    var reads = 0;
+    final dio = Dio()
+      ..interceptors.add(InterceptorsWrapper(
+        onRequest: (request, handler) async {
+          Object data;
+          if (request.method == 'PUT') {
+            expect(request.path,
+                '/api/v1/users/@me/relationships/${sender.ref.wire}');
+            data = accepted;
+          } else {
+            expect(request.path, '/api/v1/users/@me/relationships');
+            if (++reads == 1) {
+              firstReadStarted.complete();
+              await finishFirstRead.future;
+              data = [pending];
+            } else {
+              data = [
+                accepted,
+                {'type': 'pending_in', 'user': other.toJson()},
+              ];
+            }
+          }
+          handler.resolve(
+              Response(requestOptions: request, data: data, statusCode: 200));
+        },
+      ));
+    final controller =
+        await fixtureController(fixtureGuild(user), user, [], httpClient: dio);
+    addTearDown(controller.dispose);
+    await controller.api.useTokens(SessionTokens(
+      instance: user.ref.domain,
+      userRef: user.ref,
+      accessToken: 'access',
+      refreshToken: 'refresh',
+    ));
+    controller.state = MobileState(
+        phase: SessionPhase.ready, user: user, relationships: [pending]);
+
+    final refresh = controller.refreshRelationships();
+    await firstReadStarted.future;
+    await controller.acceptFriend(sender.ref);
+    expect(controller.currentState.relationshipType(sender.ref), 'friend');
+    finishFirstRead.complete();
+    await refresh;
+    expect(controller.currentState.relationshipType(sender.ref), 'friend');
+    expect(controller.currentState.relationshipType(other.ref), 'pending_in');
+    expect(reads, 2);
   });
 
   testWidgets(
@@ -1035,6 +1103,55 @@ void main() {
     expect(find.text('Welcome to Kaede Guild'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final owner in [false, true]) {
+    testWidgets(
+        'guild profile role visibility and editing as ${owner ? 'owner' : 'member'}',
+        (tester) async {
+      final user = fixtureUser();
+      final target = fixtureRemoteAuditActor();
+      final guild = KaedeGuild.fromJson(
+          fixtureGuild(owner ? user : fixturePagedAuditActor(200)).toJson()
+            ..['permissions'] = '${Permission.viewChannel}');
+      final requests = <Map<String, Object?>>[];
+      final controller = await fixtureController(guild, user, requests);
+      controller.state = controller.currentState.copyWith(guilds: [guild]);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
+        child: MaterialApp(
+            theme: kaedeTheme(),
+            home: Scaffold(
+              body:
+                  GuildMemberProfileSection(guildRef: guild.ref, user: target),
+            )),
+      ));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      for (final width in [320.0, 1024.0]) {
+        await tester.binding.setSurfaceSize(Size(width, 740));
+        await tester.pumpAndSettle();
+        expect(find.widgetWithText(Chip, 'Moderator'), findsOneWidget);
+        for (final action in ['Manage roles', 'Timeout', 'Kick', 'Ban']) {
+          expect(find.text(action), owner ? findsOneWidget : findsNothing);
+        }
+        expect(tester.takeException(), isNull);
+      }
+      if (owner) {
+        await tester.tap(find.text('Manage roles'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(CheckboxListTile, 'Member'));
+        await tester.pump();
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+        expect(find.widgetWithText(Chip, 'Member'), findsOneWidget);
+        final write =
+            requests.singleWhere((request) => request['method'] == 'PUT');
+        expect(write['path'],
+            '/api/v1/guilds/${guild.ref.wire}/members/${target.ref.wire}/roles');
+        expect(
+            (write['data'] as Map)['role_ids'], unorderedEquals(['21', '22']));
+      }
+    });
+  }
 
   testWidgets('guild settings renders Discord-style list and tabs',
       (tester) async {

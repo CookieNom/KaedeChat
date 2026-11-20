@@ -435,6 +435,7 @@ async def list_direct_messages(
             .where(
                 DMParticipant.user_id == auth.user.id,
                 DMParticipant.user_domain == auth.user.origin_domain,
+                Channel.dm_successor_id.is_(None),
                 Channel.type == 1,
                 Channel.guild_id.is_(None),
                 Channel.unavailable.is_(False),

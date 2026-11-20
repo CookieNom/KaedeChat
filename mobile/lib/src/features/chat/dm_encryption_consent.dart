@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/e2ee/setup_retry.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 class DmEncryptionConsent extends ConsumerStatefulWidget {
   const DmEncryptionConsent({super.key, required this.channel});
@@ -69,6 +71,7 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
       _enabling = action != 'disagree';
       _error = null;
     });
+    var step = 'consent';
     try {
       final controller = ref.read(mobileControllerProvider.notifier);
       final account = ref.read(mobileControllerProvider).user?.ref.wire;
@@ -85,22 +88,29 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
       if (action != 'disagree') {
         // Starting the client and enabling the room both resume safely, so
         // retry here instead of asking the user to press the button again.
+        step = 'open_encryption';
         final client = await retryE2eeSetup(
           controller.e2eeClient,
           waitForBusyVault: true,
           keepTrying: () => mounted,
         );
+        step = 'enable_room';
         final updated = await client.enableRoom(
           widget.channel,
           waitForBusyVault: true,
           keepTrying: () => mounted,
         );
+        step = 'refresh';
         if (account != null) {
           await acknowledgeEncryptedRoom(account, updated.ref.wire);
         }
         await controller.refreshNavigation();
       }
     } on Object catch (caught) {
+      DebugLog.instance.record(DebugEvent.encryptionSetupFailed,
+          step: step,
+          error: caught,
+          status: caught is KaedeException ? caught.status : null);
       if (mounted) {
         setState(() => _error = userFacingError(caught,
             summary:
@@ -145,7 +155,7 @@ class _DmEncryptionConsentState extends ConsumerState<DmEncryptionConsent> {
               if (status == 'pending' || status == 'approved') ...[
                 const SizedBox(height: 8),
                 const Text(
-                    'Only you and the other participant can read future encrypted messages. Earlier messages stay unencrypted. Once enabled, encryption cannot be turned off in this conversation.'),
+                    'Only you and the other participant can read future encrypted messages. Earlier messages stay unencrypted. Messages sent with encryption stay encrypted.'),
                 const ExpansionTile(
                   tilePadding: EdgeInsets.zero,
                   title: Text('Read the warnings before agreeing'),
@@ -234,5 +244,211 @@ class _EnablingEncryptionCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class DmContinuationConsent extends ConsumerStatefulWidget {
+  const DmContinuationConsent(
+      {required this.channel,
+      required this.callActive,
+      this.settings = false,
+      super.key});
+  final bool callActive;
+  final bool settings;
+  final KaedeChannel channel;
+  @override
+  ConsumerState<DmContinuationConsent> createState() =>
+      _DmContinuationConsentState();
+}
+
+class _DmContinuationConsentState extends ConsumerState<DmContinuationConsent> {
+  Timer? _timer;
+  int _revision = 0;
+  bool _declined = false;
+  bool _busy = false, _reading = false, _available = false;
+  Map<String, Object?>? _proposal;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+    _timer = Timer.periodic(const Duration(seconds: 5), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant DmContinuationConsent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.channel.continuationRequester !=
+        widget.channel.continuationRequester) {
+      unawaited(_load());
+    }
+  }
+
+  Future<void> _apply(Map<String, Object?> result) async {
+    if (!mounted) return;
+    if (result['channel_ref'] != null) {
+      await ref.read(mobileControllerProvider.notifier).refreshNavigation();
+      return;
+    }
+    setState(() {
+      final oldStatus = _proposal?['status'];
+      final newStatus = (result['request'] as Map?)?['status'];
+      if (newStatus != 'declined') {
+        _declined = false;
+      } else if (oldStatus == 'pending' || oldStatus == 'approved') {
+        _declined = true;
+      }
+      _proposal = (result['request'] as Map?)?.cast<String, Object?>();
+      _available = result['available'] != false;
+    });
+  }
+
+  Future<void> _load() async {
+    if (_busy || _reading) return;
+    _reading = true;
+    final revision = _revision;
+    try {
+      final result = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .dmContinuation(widget.channel.ref, 'status');
+      if (mounted && revision == _revision) await _apply(result);
+    } on Object {
+      // Retry the status check on the next tick.
+    } finally {
+      _reading = false;
+    }
+  }
+
+  Future<void> _act(String action) async {
+    if (_busy ||
+        !_available ||
+        (action == 'commit' && widget.callActive) ||
+        (action != 'request' && _proposal == null)) {
+      return;
+    }
+    final token = _proposal?['request_id'] as String?;
+    final repo = ref.read(mobileControllerProvider.notifier).repository;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _revision++;
+    });
+    try {
+      if (action == 'request' || action == 'agree') {
+        final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+                    title: Text(L10n.of(context).dm_privacy_question),
+                    content: Text(L10n.of(context).dm_privacy_explain),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: Text(L10n.of(context).dm_privacy_cancel)),
+                      FilledButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          child: Text(action == 'request'
+                              ? L10n.of(context).dm_privacy_send
+                              : L10n.of(context).dm_privacy_agree))
+                    ]));
+        if (!mounted || confirmed != true) return;
+      }
+      final result = await repo.dmContinuation(widget.channel.ref, action,
+          requestId: token);
+      if (!mounted) return;
+      await _apply(result);
+      if (mounted &&
+          !widget.settings &&
+          !widget.callActive &&
+          _proposal?['status'] == 'approved' &&
+          action != 'commit') {
+        await _apply(await repo.dmContinuation(widget.channel.ref, 'commit',
+            requestId: _proposal!['request_id'] as String));
+      }
+    } on Object catch (e) {
+      if (mounted) setState(() => _error = userFacingError(e));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_available) return const SizedBox.shrink();
+    final status = _proposal?['status'];
+    final pending = status == 'pending' || status == 'approved';
+    if (widget.settings) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (!pending)
+          OutlinedButton(
+              onPressed: _busy ? null : () => _act('request'),
+              child: Text(L10n.of(context).dm_privacy_request))
+        else
+          Text(L10n.of(context).dm_privacy_asked(
+              '${_proposal?["requester_name"] ?? _proposal?["requester"] ?? ""}')),
+        if (_error != null)
+          Text(_error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      ]);
+    }
+    if (!pending && !_declined) return const SizedBox.shrink();
+    if (!pending) {
+      return ListTile(
+          dense: true,
+          title: Text(L10n.of(context).dm_privacy_declined),
+          trailing: IconButton(
+              tooltip: L10n.of(context).ui_close_cd86acc3,
+              icon: const Icon(Icons.close),
+              onPressed: () => setState(() => _declined = false)));
+    }
+    final votes = _proposal?['approved_by'] as List? ?? const [];
+    final mine =
+        votes.contains(ref.watch(mobileControllerProvider).user?.ref.wire);
+    final roster =
+        (_proposal?['context'] as Map?)?['participants'] as List? ?? const [];
+    return ConstrainedBox(
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * .32),
+        child: SingleChildScrollView(
+            child: ExpansionTile(
+                key: ValueKey(status),
+                initiallyExpanded: true,
+                title: Text(L10n.of(context).dm_privacy_asked(
+                    '${_proposal?["requester_name"] ?? _proposal?["requester"] ?? ""}')),
+                childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                children: [
+              Text(L10n.of(context)
+                  .dm_privacy_votes(votes.length, roster.length)),
+              if (status == 'approved' && widget.callActive)
+                Text(L10n.of(context).dm_privacy_end_call),
+              Wrap(spacing: 8, children: [
+                if (status == 'approved')
+                  FilledButton(
+                      onPressed: _busy || widget.callActive
+                          ? null
+                          : () => _act('commit'),
+                      child: Text(L10n.of(context).dm_privacy_finish))
+                else if (!mine)
+                  FilledButton(
+                      onPressed: _busy ? null : () => _act('agree'),
+                      child: Text(L10n.of(context).dm_privacy_agree)),
+                TextButton(
+                    onPressed: _busy ? null : () => _act('disagree'),
+                    child: Text(mine
+                        ? L10n.of(context).dm_privacy_withdraw
+                        : L10n.of(context).dm_privacy_decline)),
+              ]),
+              if (_error != null)
+                Text(_error!,
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error)),
+            ])));
   }
 }

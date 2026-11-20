@@ -1,5 +1,11 @@
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/protocol/generated.dart';
+
+bool canViewGuildMemberRoster(KaedeGuild guild, EntityRef? actor) =>
+    actor == guild.ownerRef ||
+    guild.allows(Permission.administrator) ||
+    guild.allows(Permission.viewChannel);
 
 /// Matches the backend's `(position, -snowflake id)` role ordering.
 int compareGuildRoleRank(KaedeRole left, KaedeRole right) {

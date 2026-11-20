@@ -583,7 +583,8 @@ export class VoiceSession extends EventTarget {
           if (source === Track.Source.ScreenShare) this.screen = false;
           if (source === Track.Source.Camera) this.camera = false;
           this.#changed();
-        }
+        },
+        expected.e2ee
       );
       this.#adaptiveVideo.start();
       this.#voiceMediaPolicy = {

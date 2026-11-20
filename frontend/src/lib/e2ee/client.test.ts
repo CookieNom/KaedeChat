@@ -358,3 +358,26 @@ it('keeps failed encrypted edits sealed for presentation', async () => {
   expect(sealed.e2ee_verified).toBe(false);
   expect(sealed.decrypted_content).toBeNull();
 });
+
+it('retries a failed encryption engine download in the same session', async () => {
+  vi.resetModules();
+  const { initializeE2EE } = await import('./client');
+  io.key.mockResolvedValue(null);
+  const download = vi
+    .spyOn(globalThis, 'fetch')
+    .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    .mockResolvedValueOnce(
+      new Response(new Uint8Array(readFileSync('src/lib/e2ee/wasm/kaede_e2ee_bg.wasm')), {
+        headers: { 'Content-Type': 'application/wasm' }
+      })
+    );
+  try {
+    await expect(initializeE2EE(user)).rejects.toThrow('Failed to fetch');
+    // Reaching the vault key check proves the retry initialized the real engine.
+    await expect(initializeE2EE(user)).rejects.toThrow('unlock end-to-end encryption');
+    await expect(initializeE2EE(user)).rejects.toThrow('unlock end-to-end encryption');
+    expect(download).toHaveBeenCalledTimes(2);
+  } finally {
+    download.mockRestore();
+  }
+});

@@ -1,3 +1,4 @@
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 
 const _maximumRetries = 3;
@@ -53,6 +54,13 @@ Future<T> retryE2eeSetup<T>(
             ? Duration.zero
             : Duration(seconds: 1 << (retries - 1));
       }
+      // Leaves a trace of why an attempt was repeated: codes only.
+      DebugLog.instance.record(
+        DebugEvent.encryptionSetupRetry,
+        error: error,
+        status: error.status,
+        attempt: retries + busyVaultRetries,
+      );
       if (delay > Duration.zero) await pause(delay);
       if (keepTrying != null && !keepTrying()) rethrow;
     }

@@ -162,8 +162,19 @@ channels keep their existing activation permissions. Every participant’s
 instance must advertise `e2ee-mls/1`; activation fails if an instance lacks
 support or its support cannot be verified.
 
-Once a generation becomes active, it can't return to plaintext. A user who
-wants an unencrypted conversation creates a new room. Every participating home
+In an encrypted DM or group DM between people on the same instance, open the encryption settings
+from the conversation header on web or conversation settings on mobile. Choose **Request to turn off encryption**. Every
+current participant must agree within 24 hours. A membership change cancels
+the request. End any active call before completing the switch. The inbox
+continues to show one conversation. A dated divider identifies where
+server-readable messages begin. Earlier encrypted messages remain in their
+original MLS room and decrypt on the device. An earlier draft can be moved
+into the new composer after confirmation. Queued sends retain their original
+destination. Cross-instance conversations require a compatible federation
+transition protocol and currently stay encrypted.
+
+The authority closes the original room to new messages and creates its
+plaintext successor in a single transaction. Every participating home
 must validate the exact mode, state, generation, protocol, suite, group ID, and
 epoch. Missing capability reduces availability; it never causes downgrade.
 
@@ -394,6 +405,10 @@ not from channel metadata alone. A move across plaintext/E2EE policy
 boundaries disconnects and requires a fresh, user-initiated join.
 
 ## Product disclosures
+
+In encrypted DMs and group DMs, open search in the conversation to find text in
+messages currently loaded on the device. Loading earlier messages expands the
+searchable window. Search terms and results stay on the device.
 
 The full activation confirmation spells out what changes:
 

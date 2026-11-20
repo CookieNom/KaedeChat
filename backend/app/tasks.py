@@ -186,6 +186,7 @@ from app.media.tombstones import (
     terminal_attachment_refs_for_messages,
 )
 from app.push.client import send_relay_wake
+from app.push.presentation import relationship_alerts_enabled
 from app.push.relay import (
     PUSH_WAKE_TTL_SECONDS,
     decrypt_provider_token,
@@ -965,6 +966,12 @@ async def mobile_push_activity(
     invalid_device_ids: list[str] = []
     try:
         async with sessionmaker() as session:
+            if kind == "relationship":
+                user_settings = await session.get(UserSettings, (user_id, user_domain))
+                if user_settings and not relationship_alerts_enabled(
+                    user_settings.notification_settings
+                ):
+                    return 0
             devices = list(
                 await session.scalars(
                     select(PushDevice).where(

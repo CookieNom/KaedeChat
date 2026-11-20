@@ -335,6 +335,8 @@ final class KaedeChannel {
     this.topic,
     this.nsfw = false,
     this.parentRef,
+    this.previousDm,
+    this.continuationRequester,
     this.lastMessageRef,
     this.recipients = const <KaedeUser>[],
     this.conversationType = 'direct',
@@ -412,6 +414,10 @@ final class KaedeChannel {
       position: _integer(json['position']),
       createdAt:
           createdAt == null ? null : DateTime.tryParse(createdAt)?.toUtc(),
+      continuationRequester: json['continuation_requester'] as String?,
+      previousDm: json['dm_previous_id'] is String
+          ? EntityRef(Snowflake(json['dm_previous_id']! as String), domain)
+          : null,
       parentRef: parentRef,
       permissions:
           BigInt.tryParse(_string(json['permissions']) ?? '0') ?? BigInt.zero,
@@ -502,6 +508,8 @@ final class KaedeChannel {
   final int position;
   final DateTime? createdAt;
   final EntityRef? parentRef;
+  final EntityRef? previousDm;
+  final String? continuationRequester;
   final BigInt permissions;
   final EntityRef? lastMessageRef;
   final List<KaedeUser> recipients;
@@ -595,6 +603,9 @@ final class KaedeChannel {
         'last_message_domain': lastMessageRef?.domain.value,
         'recipients': recipients.map((user) => user.toJson()).toList(),
         'conversation_type': conversationType,
+        if (previousDm != null) 'dm_previous_id': previousDm!.id.value,
+        if (continuationRequester != null)
+          'continuation_requester': continuationRequester,
         'owner_id': ownerRef?.id.value,
         'owner_domain': ownerRef?.domain.value,
         'rate_limit_per_user': slowModeSeconds,
@@ -687,6 +698,8 @@ final class KaedeChannel {
         lastMessageRef: lastMessageRef,
         recipients: recipients,
         conversationType: conversationType,
+        previousDm: previousDm,
+        continuationRequester: continuationRequester,
         ownerRef: ownerRef,
         slowModeSeconds: slowModeSeconds,
         bitrate: bitrate,
@@ -756,6 +769,8 @@ final class KaedeChannel {
           ],
         ),
         conversationType: conversationType,
+        previousDm: previousDm,
+        continuationRequester: continuationRequester,
         ownerRef: ownerRef,
         slowModeSeconds: slowModeSeconds,
         bitrate: bitrate,

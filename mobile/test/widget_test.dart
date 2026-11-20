@@ -2701,7 +2701,11 @@ void main() {
       });
 
       expect(envelope?.kind, NotificationKind.mention);
-      expect(envelope?.destination?.channel.wire, '42@chat.example');
+      expect(
+          envelope?.isVisibleConversation(
+              active: true, channel: EntityRef.parse('42@chat.example')),
+          isTrue);
+      expect(envelope?.destination?.channel?.wire, '42@chat.example');
       expect(envelope?.destination?.message?.wire, '73@remote.example');
       expect(envelope?.senderName, 'Turtle');
       expect(envelope?.senderRef?.wire, '9@remote.example');
@@ -2734,6 +2738,23 @@ void main() {
       );
     });
 
+    test('incoming friend requests alert on Home and open Friends when tapped',
+        () {
+      final notification = PushNotificationEnvelope.parse({
+        'kind': 'relationship',
+        'title': 'New friend request',
+        'body': 'Someone sent you a friend request.',
+        'event_ref': 'relationship:9@remote.example:pending_in',
+      })!;
+      expect(notification.kind, NotificationKind.relationship);
+      expect(notification.isVisibleConversation(active: true), isFalse);
+      final destination =
+          PushDestination.parse(notification.destination!.encode());
+      expect(destination, isNotNull);
+      expect(destination!.channel, isNull);
+      expect(destination.encode(), const PushDestination.friends().encode());
+    });
+
     test('notification IDs are deterministic and platform-safe', () {
       expect(stableNotificationId('73@remote.example'), 1372435255);
       expect(stableNotificationId('73@remote.example'),
@@ -2758,7 +2779,7 @@ void main() {
           destination.message);
       expect(
         PushDestination.parse(<String, String>{
-          'channel_ref': destination.channel.wire,
+          'channel_ref': destination.channel!.wire,
           'message_ref': destination.message!.wire,
         })?.message,
         destination.message,

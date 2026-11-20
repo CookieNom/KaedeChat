@@ -102,6 +102,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   E2EE_AUTHORITY_REMOTE:
     "Encrypted-room settings must be completed by the conversation's home instance.",
   E2EE_DM_CONSENT_REQUIRED: 'The other participant must agree before encryption can be enabled.',
+  DM_CALL_ACTIVE: 'End the current call before turning off encryption.',
+  DM_CONTINUED:
+    'This part of the conversation is closed. Open the current conversation to send a new message.',
   E2EE_DM_REQUEST_STALE: 'This encryption request expired or changed. Review the current request.',
   E2EE_DM_OTHER_PARTICIPANT_REQUIRED: 'Only the other participant can respond to this request.',
   E2EE_ALREADY_ENABLED: 'Encryption is already enabled for this conversation.',

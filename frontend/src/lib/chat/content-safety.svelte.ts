@@ -19,6 +19,8 @@ let attachments = $state<Record<string, Restriction>>({});
 let account = '';
 let cursor = '0';
 let sync: Promise<void> | null = null;
+let generation = 0;
+let syncingGeneration = 0;
 let resyncRequested = false;
 const freshMessages = new SvelteMap<string, string>();
 const freshAttachments = new SvelteSet<string>();
@@ -346,12 +348,28 @@ export async function reconcileSafetyReferences(
   }
 }
 
+export function invalidateContentSafety(): void {
+  generation += 1;
+  contentSafety.ready = false;
+  contentSafety.error = '';
+}
+
 export function syncContentSafety(user: UserSummary): Promise<void> {
+  const nextAccount = entityRef(user);
+  const requestedGeneration = generation;
   if (sync) {
+    if (syncingGeneration !== generation || account !== nextAccount) {
+      return sync
+        .catch(() => undefined)
+        .then(() => {
+          if (requestedGeneration === generation) return syncContentSafety(user);
+        });
+    }
     resyncRequested = true;
     return sync;
   }
-  if (!contentSafety.ready || account !== entityRef(user)) {
+  syncingGeneration = requestedGeneration;
+  if (!contentSafety.ready || account !== nextAccount) {
     freshMessages.clear();
     freshAttachments.clear();
     unavailableMessages.clear();
@@ -361,7 +379,6 @@ export function syncContentSafety(user: UserSummary): Promise<void> {
   contentSafety.ready = false;
   contentSafety.error = '';
   sync = (async () => {
-    const nextAccount = entityRef(user);
     if (account !== nextAccount) {
       account = nextAccount;
       resetMediaRestrictions();
@@ -399,6 +416,7 @@ export function syncContentSafety(user: UserSummary): Promise<void> {
           next_cursor: string;
           has_more: boolean;
         }>(`/safety/client-state?after=${encodeURIComponent(next)}&limit=200`);
+        if (requestedGeneration !== generation) return;
         if (
           !Array.isArray(page.items) ||
           !/^\d+$/.test(page.next_cursor) ||
@@ -415,12 +433,14 @@ export function syncContentSafety(user: UserSummary): Promise<void> {
       if (!(error instanceof ApiError && [404, 405].includes(error.status))) throw error;
     }
     const { chatEntities } = await import('$lib/stores/entities.svelte');
+    if (requestedGeneration !== generation) return;
     await reconcileSafetyReferences(
       chatEntities.messages.values.map(entityRef),
       chatEntities.messages.values.flatMap((message) => (message.attachments ?? []).map(entityRef))
     );
     const { purgeSafetyE2EEState } = await import('$lib/e2ee/client');
     do {
+      if (requestedGeneration !== generation) return;
       resyncRequested = false;
       await purgeSafetyE2EEState(user);
       if (isNativeDesktop()) {
@@ -430,14 +450,16 @@ export function syncContentSafety(user: UserSummary): Promise<void> {
         });
       }
     } while (resyncRequested);
+    if (requestedGeneration !== generation) return;
     chatEntities.messages.replace(chatEntities.messages.values.map(protectMessage));
     cursor = next;
     persist();
     contentSafety.ready = true;
   })()
     .catch((error) => {
-      contentSafety.error =
-        'Could not check removed content. Reconnect and try again to open your messages.';
+      if (requestedGeneration === generation)
+        contentSafety.error =
+          'Could not check removed content. Reconnect and try again to open your messages.';
       throw error;
     })
     .finally(() => {

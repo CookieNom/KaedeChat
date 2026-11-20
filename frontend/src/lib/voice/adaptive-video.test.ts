@@ -12,6 +12,8 @@ describe('adaptive video wire and sustained stats evidence', () => {
       health: { 'alice/camera': 'decode' }
     };
     expect(parseVideoMessage(encode(value))).toEqual(value);
+    expect(parseVideoMessage(encode({ ...value, encryptedH264: 2 }))?.encryptedH264).toBe(2);
+    expect(parseVideoMessage(encode({ ...value, encryptedH264: '2' }))).toEqual(value);
     expect(parseVideoMessage(encode({ ...value, codecs: ['unknown'] }))).toBeUndefined();
     expect(parseVideoMessage(encode({ ...value, codecs: ['vp8', 'h265'] }))).toBeUndefined();
     expect(
@@ -658,6 +660,174 @@ it('does not flip the fallback codec while a new viewer has not sent hints', () 
   expect(
     internals(['bob', 'old'], { bob: ['vp8', 'h264'], old: ['vp8'] }).fallback(state('h264'))
   ).toBe('vp8');
+});
+
+it('withdraws encrypted H.264 for legacy joiners and reconnects, and restores it for confirmed peers', async () => {
+  const changes: string[] = [];
+  let failVp8 = false;
+  const received = (codec: string) => ({
+    trackName: `kaede.video.v1:camera:${codec}`,
+    trackSid: codec,
+    source: Track.Source.Camera,
+    kind: Track.Kind.Video,
+    setSubscribed: vi.fn(),
+    setVideoFPS: vi.fn()
+  });
+  const h264 = received('h264');
+  const vp8 = received('vp8');
+  const mismatched = { ...received('vp8'), trackSid: 'substituted', mimeType: 'video/H264' };
+  const unknown = {
+    ...received('vp8'),
+    trackSid: 'unknown',
+    source: Track.Source.ScreenShare,
+    trackName: 'screen'
+  };
+  const modern = {
+    identity: 'modern',
+    trackPublications: new Map([
+      ['h264', h264],
+      ['vp8', vp8],
+      ['substituted', mismatched],
+      ['unknown', unknown]
+    ])
+  };
+  const legacy = { identity: 'legacy', trackPublications: new Map() };
+  const participants = new Map([[modern.identity, modern]]);
+  const sent: { codecs: string[]; encryptedH264?: number }[] = [];
+  const room = {
+    localParticipant: {
+      identity: 'local',
+      publishData: async (bytes: Uint8Array) =>
+        sent.push(JSON.parse(new TextDecoder().decode(bytes))),
+      publishTrack: async (track: LocalVideoTrack, options: { videoCodec: string }) => {
+        if (failVp8 && options.videoCodec === 'vp8') {
+          changes.push('vp8 failed');
+          throw new Error('VP8 publication failed');
+        }
+        track.sid = options.videoCodec;
+        changes.push('+' + track.sid);
+      },
+      unpublishTrack: async (track: LocalVideoTrack) => changes.push('-' + track.sid)
+    },
+    remoteParticipants: participants
+  } as unknown as Room;
+  const controller = new AdaptiveVideoController(room, undefined, undefined, true);
+  const internal = controller as unknown as {
+    message: { codecs: string[] };
+    connected(participant: unknown): void;
+    disconnected(participant: unknown): void;
+    reconnected(): void;
+    announce(): Promise<void>;
+    data(bytes: Uint8Array, participant: unknown, kind: undefined, topic: string): void;
+    pending: Promise<void>;
+  };
+  internal.message.codecs = ['vp8', 'h264', 'av1'];
+  const tell = (peer: unknown, marker?: number) =>
+    internal.data(
+      new TextEncoder().encode(
+        JSON.stringify({
+          v: 1,
+          codecs: ['vp8', 'h264', 'av1'],
+          demand: {},
+          health: {},
+          encryptedH264: marker
+        })
+      ),
+      peer,
+      undefined,
+      'kaede.video.v1'
+    );
+  const capture = new LocalVideoTrack({
+    getSettings: () => ({ width: 1280, height: 720, frameRate: 30 }),
+    addEventListener: vi.fn(),
+    clone: () => ({ stop: vi.fn() })
+  } as unknown as MediaStreamTrack);
+  capture.sid = 'vp8';
+  vi.mocked(webVideoCodecCapabilities).mockResolvedValueOnce({
+    decode: ['vp8', 'h264'],
+    encode: ['vp8', 'h264'],
+    hardware: ['h264']
+  });
+  await controller.managePublished({
+    source: Track.Source.Camera,
+    track: capture,
+    trackName: 'kaede.video.v1:camera:vp8'
+  } as unknown as LocalTrackPublication);
+
+  internal.connected(modern);
+  expect(sent.at(-1)).toMatchObject({ codecs: ['vp8', 'av1'], encryptedH264: 2 });
+  tell(modern, 2);
+  await internal.pending;
+  expect(sent.at(-1)?.codecs).toContain('h264');
+  expect(changes).toEqual(['+h264', '-vp8']);
+  expect(h264.setSubscribed).toHaveBeenLastCalledWith(true);
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + VIDEO_POLICY.hintExpiryMs + 1);
+  try {
+    await internal.announce();
+    expect(sent.at(-1)?.codecs).toEqual(['vp8', 'av1']);
+  } finally {
+    clock.mockRestore();
+  }
+
+  participants.set(legacy.identity, legacy);
+  internal.connected(legacy);
+  // 0.1.104 checks every viewer's legacy codecs list, ignoring the new marker.
+  tell(legacy);
+  await internal.pending;
+  expect(sent.at(-1)).toMatchObject({ codecs: ['vp8', 'av1'], encryptedH264: 2 });
+  expect(changes.slice(-2)).toEqual(['+vp8', '-h264']);
+  expect(h264.setSubscribed).toHaveBeenLastCalledWith(false);
+  expect(mismatched.setSubscribed).toHaveBeenLastCalledWith(false);
+  expect(unknown.setSubscribed).toHaveBeenLastCalledWith(false);
+  expect(vp8.setSubscribed).toHaveBeenLastCalledWith(true);
+
+  participants.delete(legacy.identity);
+  internal.disconnected(legacy);
+  await internal.pending;
+  expect(changes.slice(-2)).toEqual(['+h264', '-vp8']);
+  internal.reconnected();
+  await internal.pending;
+  expect(sent.at(-1)?.codecs).toEqual(['vp8', 'av1']);
+  expect(changes.slice(-2)).toEqual(['+vp8', '-h264']);
+
+  tell(modern, 2);
+  await internal.pending;
+  failVp8 = true;
+  internal.data(new Uint8Array(8193), modern, undefined, 'kaede.video.v1');
+  await internal.pending;
+  expect(sent.at(-1)?.codecs).toEqual(['vp8', 'av1']);
+  expect(changes.slice(-2)).toEqual(['vp8 failed', '-h264']);
+  failVp8 = false;
+  internal.reconnected();
+  await internal.pending;
+  expect(changes.at(-1)).toBe('+vp8');
+});
+
+it('keeps legacy-readable capability hints when call feedback exceeds the wire limits', async () => {
+  const publishData = vi.fn(async (_bytes: Uint8Array) => {});
+  const room = {
+    localParticipant: { publishData },
+    remoteParticipants: new Map()
+  } as unknown as Room;
+  const internal = new AdaptiveVideoController(room, undefined, undefined, true) as unknown as {
+    message: { codecs: string[]; demand: Record<string, string>; health: Record<string, string> };
+    announce(): Promise<void>;
+  };
+  internal.message.codecs = ['vp8', 'h264', 'av1'];
+  internal.message.demand = { ['é'.repeat(129)]: 'vp8', 'old/camera': 'h264' };
+  for (let n = 0; n < 100; n++) {
+    const key = `${n}@${'a'.repeat(80)}.example/camera`;
+    internal.message.demand[key] = 'vp8';
+    internal.message.health[key] = 'decode';
+  }
+  await internal.announce();
+  const bytes = publishData.mock.calls[0][0];
+  expect(bytes.byteLength).toBeLessThanOrEqual(8192);
+  const hint = parseVideoMessage(bytes)!;
+  expect(hint).toMatchObject({ codecs: ['vp8', 'av1'], encryptedH264: 2 });
+  expect(Object.keys(hint.demand)).toHaveLength(64);
+  expect(hint.demand).not.toHaveProperty('old/camera');
+  expect(hint.demand).not.toHaveProperty('é'.repeat(129));
 });
 
 it('withdraws software HEVC immediately during cooldown and requires a fresh hardware proof', async () => {

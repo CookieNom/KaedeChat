@@ -2,9 +2,12 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { api } from '$lib/api/client';
 import type { Message, Relationship, UserSummary } from '$lib/chat/types';
 import { reconcileMessage } from '$lib/chat/reconcile';
+import { contentSafety } from '$lib/chat/content-safety.svelte';
+import { purgeSafetyE2EEState } from '$lib/e2ee/client';
 import { chatEntities } from '$lib/stores/entities.svelte';
 
-vi.mock('$lib/api/client', () => ({ api: vi.fn() }));
+vi.mock('$lib/api/client', async () => ({ api: vi.fn(), ...(await import('$lib/api/errors')) }));
+vi.mock('$lib/e2ee/client', () => ({ purgeSafetyE2EEState: vi.fn() }));
 
 vi.mock('$lib/notifications/browser.svelte', () => ({
   browserNotifications: { notifyMessage: vi.fn() }
@@ -159,5 +162,129 @@ it('loads pending requests on sign-in and ignores a snapshot after sign-out', as
   authenticatedGateway.stop();
   finish([relationship]);
   await Promise.resolve();
+  expect(chatEntities.relationships.values).toEqual([]);
+});
+
+const resumedUser = { id: '1', origin_domain: 'chat.example' } as UserSummary;
+const blocked: Relationship = {
+  type: 'blocked',
+  user: { id: '2', origin_domain: 'chat.example' } as UserSummary,
+  created_at: '',
+  updated_at: ''
+};
+const safetyPage = { items: [], next_cursor: '0', has_more: false };
+
+function gatewayEvent(t: string, d: unknown = {}) {
+  authenticatedGateway.client.dispatchEvent(
+    new CustomEvent('dispatch', { detail: { t, d, s: 1 } })
+  );
+}
+
+it('restores a refreshed tab on RESUMED before opening checked messages', async () => {
+  let finish!: (items: Relationship[]) => void;
+  vi.mocked(api).mockImplementation(async (path) => {
+    if (path === '/users/@me') return resumedUser;
+    if (path === '/users/@me/relationships')
+      return new Promise<Relationship[]>((resolve) => (finish = resolve));
+    return safetyPage;
+  });
+  gatewayEvent('RESUMED');
+  const pending = authenticatedGateway.retryContentSafety();
+  expect(authenticatedGateway.retryContentSafety()).toBe(pending);
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  expect(contentSafety.ready).toBe(false);
+  expect(chatEntities.currentUser).toBeNull();
+  gatewayEvent('USER_UPDATE', { relationship: blocked });
+  finish([]);
+  await pending;
+  expect(chatEntities.currentUser).toEqual(resumedUser);
+  expect(chatEntities.isBlocked(blocked.user)).toBe(true);
+  expect(contentSafety.ready).toBe(true);
+  expect(vi.mocked(api).mock.calls.filter(([path]) => path === '/users/@me')).toHaveLength(1);
+});
+
+it.each(['READY', 'RESUMED'])(
+  'keeps messages closed if relationships fail on %s',
+  async (event) => {
+    let fail = true;
+    vi.mocked(api).mockImplementation(async (path) => {
+      if (path === '/users/@me') return resumedUser;
+      if (path === '/users/@me/relationships') {
+        if (fail) throw new Error('network failure');
+        return [blocked];
+      }
+      return safetyPage;
+    });
+    gatewayEvent(event, { user: resumedUser, guilds: [], dm_channels: [], read_states: [] });
+    await authenticatedGateway.retryContentSafety();
+    expect(chatEntities.currentUser).toEqual(event === 'READY' ? resumedUser : null);
+    expect(contentSafety.ready).toBe(false);
+    expect(contentSafety.error).toBeTruthy();
+    fail = false;
+    await authenticatedGateway.retryContentSafety();
+    expect(chatEntities.relationships.values).toEqual([blocked]);
+    expect(contentSafety.ready).toBe(true);
+  }
+);
+
+it.each(['READY', 'RESUMED'])(
+  'uses the gateway relationship snapshot when HTTP is unavailable on %s',
+  async (event) => {
+    vi.mocked(api).mockImplementation(async (path) => {
+      if (path === '/users/@me/relationships') throw new Error('offline');
+      if (path === '/users/@me') return resumedUser;
+      return safetyPage;
+    });
+    gatewayEvent(event, {
+      user: resumedUser,
+      guilds: [],
+      read_states: [],
+      dm_channels: [],
+      relationships: [blocked]
+    });
+    await vi.waitFor(() => expect(contentSafety.ready).toBe(true));
+    expect(chatEntities.isBlocked(blocked.user)).toBe(true);
+    expect(vi.mocked(api).mock.calls.some(([path]) => path === '/users/@me/relationships')).toBe(
+      false
+    );
+  }
+);
+
+it('purges again when a restriction arrives during the bootstrap purge', async () => {
+  const purge = vi.mocked(purgeSafetyE2EEState);
+  purge.mockClear();
+  const cleanup = Promise.withResolvers<void>();
+  purge.mockReturnValueOnce(cleanup.promise);
+  vi.mocked(api).mockImplementation(async (path) =>
+    path === '/users/@me' ? resumedUser : path === '/users/@me/relationships' ? [] : safetyPage
+  );
+  gatewayEvent('RESUMED');
+  await vi.waitFor(() => expect(purge).toHaveBeenCalledOnce());
+  gatewayEvent('CONTENT_SAFETY_UPDATE', {
+    state: 'hidden',
+    reason: 'Unavailable',
+    message_refs: ['12@chat.example'],
+    attachment_refs: []
+  });
+  cleanup.resolve();
+  await vi.waitFor(() => expect(contentSafety.ready).toBe(true));
+  expect(purge).toHaveBeenCalledTimes(2);
+});
+
+it.each(['stop', 'READY'])('discards a late cold-resume snapshot after %s', async (action) => {
+  let finish!: (items: Relationship[]) => void;
+  vi.mocked(api)
+    .mockResolvedValueOnce(resumedUser)
+    .mockImplementationOnce(() => new Promise<Relationship[]>((resolve) => (finish = resolve)))
+    .mockImplementation(async (path) => (path === '/users/@me/relationships' ? [] : safetyPage));
+  gatewayEvent('RESUMED');
+  const pending = authenticatedGateway.retryContentSafety();
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  const newUser = { ...resumedUser, id: '100' };
+  if (action === 'stop') authenticatedGateway.stop();
+  else gatewayEvent('READY', { user: newUser, guilds: [], dm_channels: [], read_states: [] });
+  finish([blocked]);
+  await pending;
+  expect(chatEntities.currentUser).toEqual(action === 'stop' ? null : newUser);
   expect(chatEntities.relationships.values).toEqual([]);
 });

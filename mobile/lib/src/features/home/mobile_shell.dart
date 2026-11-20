@@ -12,6 +12,8 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/announcements.dart';
+import 'package:kaede_mobile/src/domain/guild_hierarchy.dart'
+    show canViewGuildMemberRoster;
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/domain/role_colors.dart';
@@ -22,6 +24,7 @@ import 'package:kaede_mobile/src/e2ee/disclosures.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/dm_bot_e2ee_participation_screen.dart';
+import 'package:kaede_mobile/src/features/chat/dm_encryption_consent.dart';
 import 'package:kaede_mobile/src/features/chat/forum_channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/chat/read_inbox_screen.dart';
@@ -41,6 +44,9 @@ import 'package:kaede_mobile/src/l10n/language_controller.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:uuid/uuid.dart';
+
+export 'package:kaede_mobile/src/domain/guild_hierarchy.dart'
+    show canViewGuildMemberRoster;
 
 String conversationHeaderTitle(KaedeChannel channel) {
   if (channel.guildRef != null) {
@@ -89,11 +95,6 @@ bool canManageChannelSettings(
       Permission.manageChannels,
       isOwner: actor == guild.ownerRef,
     );
-
-bool canViewGuildMemberRoster(KaedeGuild guild, EntityRef? actor) =>
-    actor == guild.ownerRef ||
-    guild.allows(Permission.administrator) ||
-    guild.allows(Permission.viewChannel);
 
 KaedeGuild? liveGuildByRef(MobileState state, EntityRef ref) =>
     state.guilds.where((guild) => guild.ref == ref).firstOrNull;
@@ -245,6 +246,16 @@ Future<void> _showE2eeRoomSettings(
                               .ui_server_message_search_link_previews_server_si_725febb3,
                     ),
                   ],
+                  if (active &&
+                      channel.guildRef == null &&
+                      channel.ref.domain ==
+                          ref.read(mobileControllerProvider).user?.ref.domain &&
+                      channel.recipients.every((u) =>
+                          u.ref.domain == channel.ref.domain &&
+                          !u.isApplication &&
+                          !u.isSystem))
+                    DmContinuationConsent(
+                        channel: channel, callActive: false, settings: true),
                   if (safetyNumber != null) ...[
                     SizedBox(height: 14),
                     Text(
@@ -389,6 +400,24 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
   void initState() {
     super.initState();
     _pages = PageController();
+    ref.listenManual(
+      mobileControllerProvider.select((state) => state.friendsRequested),
+      (_, requested) {
+        if (!requested) return;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted ||
+              !ref.read(mobileControllerProvider).friendsRequested) {
+            return;
+          }
+          ref.read(mobileControllerProvider.notifier).didOpenFriends();
+          Navigator.of(context).popUntil(
+              (route) => route == ModalRoute.of(context) || route.isFirst);
+          _showSection(_ShellSection.friends);
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      },
+      fireImmediately: true,
+    );
   }
 
   @override
@@ -462,7 +491,9 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
                   onBack: () => _showSection(_ShellSection.messages),
                   child: _FriendsPage(onOpenChat: () {
                     _showSection(_ShellSection.messages);
-                    _openConversation();
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) _openConversation();
+                    });
                   }),
                 ),
               _ShellSection.settings => _SectionScreen(
@@ -1001,7 +1032,11 @@ final class _ConversationScreenState
                   routeRef.read(mobileControllerProvider.notifier).repository,
               scope: widget.channel.guildRef == null ? 'channel' : 'guild',
               scopeRef: widget.channel.guildRef ?? widget.channel.ref,
-              channel: widget.channel,
+              channel: active,
+              loadedMessages: historyAvailable ? state.messages : const [],
+              previousMessages: historyAvailable
+                  ? state.messageStore[active.previousDm] ?? const []
+                  : const [],
               channels: state.guilds
                       .where((guild) => guild.ref == widget.channel.guildRef)
                       .firstOrNull
@@ -1026,6 +1061,24 @@ final class _ConversationScreenState
                 if (!historyAvailable) return;
                 final controller =
                     routeRef.read(mobileControllerProvider.notifier);
+                if (result.message.channelRef != result.channel.ref) {
+                  final previous = await controller.repository
+                      .previousDmSegment(result.channel.ref);
+                  if (!searchContext.mounted ||
+                      !messageSearchRouteCanDismiss(searchContext) ||
+                      previous?.ref != result.message.channelRef ||
+                      routeRef.read(mobileControllerProvider).selectedChannel !=
+                          result.channel.ref) {
+                    return;
+                  }
+                  await Navigator.of(searchContext).push(
+                      MaterialPageRoute<void>(
+                          builder: (_) => ArchivedMessageContext(
+                              current: result.channel.ref,
+                              source: result.message.channelRef,
+                              target: result.message.ref)));
+                  return;
+                }
                 final opened = await controller.selectAndJumpToMessage(
                   result.channel,
                   result.message.ref,
@@ -1358,7 +1411,9 @@ final class _ConversationScreenState
                         .selectChannel(thread),
                   ),
                 )
-              : ChannelView(),
+              : ChannelView(
+                  key: ValueKey((widget.channel.ref, mobile.user?.ref)),
+                  callActive: _activeCall != null),
         ),
       ],
     );
@@ -3594,6 +3649,7 @@ final class _GroupDmSettingsState extends ConsumerState<_GroupDmSettings> {
                     context,
                     member,
                     mobile.presenceByUser[member.ref] ?? member.presence,
+                    onOpenChat: () => Navigator.of(context).pop(),
                   ),
                   trailing: member.ref == channel.ownerRef
                       ? Chip(label: Text(L10n.of(context).ui_owner_9b22be74))
@@ -3938,26 +3994,14 @@ final class _GuildMemberPaneState extends ConsumerState<_GuildMemberPane> {
                                         controller.presenceFor(user),
                                         memberOf: widget.guild.name,
                                         guildRef: widget.guild.ref,
+                                        guildMemberSection:
+                                            GuildMemberProfileSection(
+                                          guildRef: widget.guild.ref,
+                                          user: user,
+                                          member: member,
+                                        ),
                                         joinedAt: member.joinedAt,
-                                        actions: <Widget>[
-                                          if (user.profileResolved &&
-                                              user.ref != mobile.user?.ref)
-                                            ActionButton(
-                                              onPressed: () {
-                                                Navigator.pop(context);
-                                                _openDm(
-                                                  context,
-                                                  ref,
-                                                  user,
-                                                  widget.onBack,
-                                                );
-                                              },
-                                              icon: Icon(Icons
-                                                  .chat_bubble_outline_rounded),
-                                              label: Text(L10n.of(context)
-                                                  .ui_message_ae0ed984),
-                                            ),
-                                        ],
+                                        onOpenChat: widget.onBack,
                                       ),
                                     );
                                   },
@@ -4898,15 +4942,19 @@ final class _DirectMessageBrowser extends ConsumerWidget {
                           presence: presence,
                         ),
                         title: title,
-                        subtitle: group
-                            ? L10n.of(context).ui_value0_members_174769cf(
-                                (dm.recipients.length + 1).toString())
-                            : person?.customStatus?.trim().isNotEmpty == true
-                                ? person!.customStatus!.trim()
-                                : presence == null
-                                    ? L10n.of(context)
-                                        .ui_direct_message_6e16acb3
-                                    : presenceLabel(presence),
+                        subtitle: dm.continuationRequester != null
+                            ? L10n.of(context)
+                                .dm_privacy_asked(dm.continuationRequester!)
+                            : group
+                                ? L10n.of(context).ui_value0_members_174769cf(
+                                    (dm.recipients.length + 1).toString())
+                                : person?.customStatus?.trim().isNotEmpty ==
+                                        true
+                                    ? person!.customStatus!.trim()
+                                    : presence == null
+                                        ? L10n.of(context)
+                                            .ui_direct_message_6e16acb3
+                                        : presenceLabel(presence),
                         active: dm.ref == state.selectedChannel,
                         unread: state.unreadCounts[dm.ref] ?? 0,
                         mentions: state.mentionCounts[dm.ref] ?? 0,
@@ -6968,13 +7016,37 @@ bool _guildUnread(MobileState state, KaedeGuild guild) => guild.channels.any(
       (channel) => (state.unreadCounts[channel.ref] ?? 0) > 0,
     );
 
-final class _FriendsPage extends ConsumerWidget {
+final class _FriendsPage extends ConsumerStatefulWidget {
   const _FriendsPage({required this.onOpenChat});
 
   final VoidCallback onOpenChat;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_FriendsPage> createState() => _FriendsPageState();
+}
+
+final class _FriendsPageState extends ConsumerState<_FriendsPage> {
+  late Future<void> _load;
+
+  @override
+  void initState() {
+    super.initState();
+    _load = ref.read(mobileControllerProvider.notifier).refreshRelationships();
+  }
+
+  Future<void> _retry() async {
+    final load =
+        ref.read(mobileControllerProvider.notifier).refreshRelationships();
+    setState(() => _load = load);
+    try {
+      await load;
+    } on Object {
+      // The FutureBuilder displays the load error alongside any saved entries.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     ref.watch(mobileControllerProvider.select((state) => state.relationships));
     final state = ref.read(mobileControllerProvider);
     final sections = <String, List<Map<String, Object?>>>{
@@ -6987,70 +7059,79 @@ final class _FriendsPage extends ConsumerWidget {
       sections['${relationship['type']}']?.add(relationship);
     }
     final empty = sections.values.every((items) => items.isEmpty);
-    return RefreshIndicator(
-      onRefresh: ref.read(mobileControllerProvider.notifier).refreshNavigation,
-      child: ListView(
-        padding: EdgeInsets.fromLTRB(14, 12, 14, 32),
-        children: [
-          ActionButton(
-            onPressed: () => _textAction(
-                context, 'Add a friend', 'Username or username@server',
-                (value) async {
-              await ref
-                  .read(mobileControllerProvider.notifier)
-                  .repository
-                  .requestFriend(value);
-              await ref
-                  .read(mobileControllerProvider.notifier)
-                  .refreshNavigation();
-            }),
-            icon: Icon(Icons.person_add_alt_1_rounded),
-            label: Text(L10n.of(context).ui_add_friend_6a7bbb34),
-          ),
-          SizedBox(height: 6),
-          Padding(
-            padding: EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              L10n.of(context)
-                  .ui_friends_live_on_their_own_home_server_use_the_ac7f516d,
-              style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
+    return FutureBuilder<void>(
+      future: _load,
+      builder: (context, snapshot) => RefreshIndicator(
+        onRefresh: _retry,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: EdgeInsets.fromLTRB(14, 12, 14, 32),
+          children: [
+            ActionButton(
+              onPressed: () => _textAction(
+                  context,
+                  'Add a friend',
+                  'Username or username@server',
+                  ref.read(mobileControllerProvider.notifier).requestFriend),
+              icon: Icon(Icons.person_add_alt_1_rounded),
+              label: Text(L10n.of(context).ui_add_friend_6a7bbb34),
             ),
-          ),
-          if (empty)
+            SizedBox(height: 6),
             Padding(
-              padding: EdgeInsets.only(top: 40),
-              child: _EmptyNavigation(
-                icon: Icons.people_outline_rounded,
-                title: L10n.of(context).ui_no_friends_yet_07ad5fe9,
-                body: 'Send a request to start a conversation.',
+              padding: EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                L10n.of(context)
+                    .ui_friends_live_on_their_own_home_server_use_the_ac7f516d,
+                style: TextStyle(color: context.kaede.muted, fontSize: 12.5),
               ),
             ),
-          if (sections['pending_in']!.isNotEmpty)
-            _RelationshipSection(
-              title: L10n.of(context).ui_incoming_requests_8955d605,
-              relationships: sections['pending_in']!,
-              onOpenChat: onOpenChat,
-            ),
-          if (sections['pending_out']!.isNotEmpty)
-            _RelationshipSection(
-              title: L10n.of(context).ui_sent_requests_cfdb71db,
-              relationships: sections['pending_out']!,
-              onOpenChat: onOpenChat,
-            ),
-          if (sections['friend']!.isNotEmpty)
-            _RelationshipSection(
-              title: L10n.of(context).ui_friends_value0_af4de1cd(
-                  (sections['friend']!.length).toString()),
-              relationships: sections['friend']!,
-              onOpenChat: onOpenChat,
-            ),
-          if (sections['blocked']!.isNotEmpty)
-            _RelationshipSection(
-              title: L10n.of(context).ui_blocked_e378ac53,
-              relationships: sections['blocked']!,
-              onOpenChat: onOpenChat,
-            ),
-        ],
+            if (snapshot.hasError &&
+                snapshot.connectionState == ConnectionState.done)
+              _MemberListError(
+                message: userFacingError(snapshot.error!,
+                    summary: L10n.of(context).ui_could_not_load_value0_786258fa(
+                        L10n.of(context).ui_friends_63cc7b7a)),
+                onRetry: _retry,
+              )
+            else if (empty &&
+                snapshot.connectionState == ConnectionState.waiting)
+              const Center(child: ActionProgress())
+            else if (empty)
+              Padding(
+                padding: EdgeInsets.only(top: 40),
+                child: _EmptyNavigation(
+                  icon: Icons.people_outline_rounded,
+                  title: L10n.of(context).ui_no_friends_yet_07ad5fe9,
+                  body: 'Send a request to start a conversation.',
+                ),
+              ),
+            if (sections['pending_in']!.isNotEmpty)
+              _RelationshipSection(
+                title: L10n.of(context).ui_incoming_requests_8955d605,
+                relationships: sections['pending_in']!,
+                onOpenChat: widget.onOpenChat,
+              ),
+            if (sections['pending_out']!.isNotEmpty)
+              _RelationshipSection(
+                title: L10n.of(context).ui_sent_requests_cfdb71db,
+                relationships: sections['pending_out']!,
+                onOpenChat: widget.onOpenChat,
+              ),
+            if (sections['friend']!.isNotEmpty)
+              _RelationshipSection(
+                title: L10n.of(context).ui_friends_value0_af4de1cd(
+                    (sections['friend']!.length).toString()),
+                relationships: sections['friend']!,
+                onOpenChat: widget.onOpenChat,
+              ),
+            if (sections['blocked']!.isNotEmpty)
+              _RelationshipSection(
+                title: L10n.of(context).ui_blocked_e378ac53,
+                relationships: sections['blocked']!,
+                onOpenChat: widget.onOpenChat,
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -7119,7 +7200,8 @@ final class _RelationshipTile extends ConsumerWidget {
         color: context.kaede.panel,
         borderRadius: BorderRadius.circular(KaedeRadius.medium),
         child: InkWell(
-          onTap: () => _showProfile(context, ref, user, type, onOpenChat),
+          onTap: () =>
+              showUserProfile(context, user, presence, onOpenChat: onOpenChat),
           borderRadius: BorderRadius.circular(KaedeRadius.medium),
           child: Container(
             padding: EdgeInsets.fromLTRB(12, 9, 6, 9),
@@ -7186,10 +7268,8 @@ final class _RelationshipTile extends ConsumerWidget {
                             ),
                             onPressed: () => _relationshipAction(
                                 context,
-                                ref,
                                 () => ref
                                     .read(mobileControllerProvider.notifier)
-                                    .repository
                                     .acceptFriend(user.ref)),
                             icon: Icon(Icons.check_circle_rounded),
                           ),
@@ -7198,10 +7278,8 @@ final class _RelationshipTile extends ConsumerWidget {
                             tooltip: L10n.of(context).ui_decline_58eaef39,
                             onPressed: () => _relationshipAction(
                                 context,
-                                ref,
                                 () => ref
                                     .read(mobileControllerProvider.notifier)
-                                    .repository
                                     .removeRelationship(user.ref)),
                             icon: Icon(Icons.cancel_outlined),
                           ),
@@ -7219,7 +7297,6 @@ final class _RelationshipTile extends ConsumerWidget {
                         kind: ActionButtonKind.text,
                         onPressed: () => _relationshipAction(
                             context,
-                            ref,
                             () => ref
                                 .read(mobileControllerProvider.notifier)
                                 .setUserBlocked(user, false)),
@@ -7230,10 +7307,8 @@ final class _RelationshipTile extends ConsumerWidget {
                         tooltip: L10n.of(context).ui_cancel_request_28568fb6,
                         onPressed: () => _relationshipAction(
                             context,
-                            ref,
                             () => ref
                                 .read(mobileControllerProvider.notifier)
-                                .repository
                                 .removeRelationship(user.ref)),
                         icon: Icon(Icons.close_rounded),
                       ),
@@ -7257,11 +7332,10 @@ KaedeUser? _relationshipUser(Map<String, Object?> relationship) {
   }
 }
 
-Future<void> _relationshipAction(BuildContext context, WidgetRef ref,
-    Future<Object?> Function() action) async {
+Future<void> _relationshipAction(
+    BuildContext context, Future<void> Function() action) async {
   try {
     await action();
-    await ref.read(mobileControllerProvider.notifier).refreshNavigation();
   } on Object catch (error) {
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -7297,70 +7371,6 @@ Future<void> _openDm(BuildContext context, WidgetRef ref, KaedeUser user,
       ));
     }
   }
-}
-
-Future<void> _showProfile(BuildContext context, WidgetRef ref, KaedeUser user,
-    String relationshipType, VoidCallback onOpenChat) async {
-  final presence =
-      ref.read(mobileControllerProvider.notifier).presenceFor(user);
-  final profile = user;
-  await showUserProfile(
-    context,
-    profile,
-    presence,
-    actions: <Widget>[
-      if (profile.profileResolved)
-        ActionButton(
-          onPressed: () {
-            Navigator.pop(context);
-            _openDm(context, ref, profile, onOpenChat);
-          },
-          icon: Icon(Icons.chat_bubble_outline_rounded),
-          label: Text(L10n.of(context).ui_message_ae0ed984),
-        ),
-      if (profile.profileResolved &&
-          userProfileSupportsFriendshipActions(profile) &&
-          relationshipType != 'friend' &&
-          relationshipType != 'pending_out' &&
-          relationshipType != 'blocked')
-        ActionButton(
-          kind: ActionButtonKind.outlined,
-          onPressed: () {
-            Navigator.pop(context);
-            _relationshipAction(
-                context,
-                ref,
-                () => ref
-                    .read(mobileControllerProvider.notifier)
-                    .repository
-                    .requestFriend(profile.handle));
-          },
-          icon: Icon(Icons.person_add_alt_1_rounded),
-          label: Text(L10n.of(context).ui_send_friend_request_719d5c00),
-        ),
-      if (userProfileSupportsFriendshipActions(profile) &&
-          relationshipType == 'friend')
-        ActionButton(
-          kind: ActionButtonKind.outlined,
-          onPressed: () {
-            Navigator.pop(context);
-            _relationshipAction(
-                context,
-                ref,
-                () => ref
-                    .read(mobileControllerProvider.notifier)
-                    .repository
-                    .removeRelationship(profile.ref));
-          },
-          style: OutlinedButton.styleFrom(
-            foregroundColor: context.kaede.danger,
-            side: BorderSide(color: context.kaede.dangerSoft),
-          ),
-          icon: Icon(Icons.person_remove_alt_1_rounded),
-          label: Text(L10n.of(context).ui_remove_friend_1b6055cb),
-        ),
-    ],
-  );
 }
 
 final class _DmAvatar extends StatelessWidget {

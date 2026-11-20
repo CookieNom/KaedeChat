@@ -13,6 +13,7 @@ import 'package:kaede_mobile/src/api/rtc_routing.dart';
 import 'package:kaede_mobile/src/api/stage_instances_repository.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/app/providers.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
@@ -594,6 +595,7 @@ final class VoiceSession extends ChangeNotifier {
     EventsListener<RoomEvent>? candidateEvents;
     var backgroundServiceStarted = false;
     var connectedSuccessfully = false;
+    var step = 'start_voice';
     try {
       final isAndroid =
           !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -623,8 +625,10 @@ final class VoiceSession extends ChangeNotifier {
       }
       MobileE2EEClient? e2ee;
       if (target.encryptionMode == 'e2ee') {
+        step = 'open_encryption';
         e2ee = await _e2eeClient();
       }
+      step = 'request_voice_grant';
       final routing = await _repository.rtcHints(
           channel: target.ref,
           call: callRef,
@@ -681,6 +685,7 @@ final class VoiceSession extends ChangeNotifier {
       }
       E2EEOptions? e2eeOptions;
       if (encryptedGrant) {
+        step = 'prepare_encrypted_media';
         e2ee ??= await _e2eeClient();
         await e2ee.syncRoomState(target);
         final mediaKey = await e2ee.mediaKey(
@@ -714,6 +719,7 @@ final class VoiceSession extends ChangeNotifier {
       }
       if (generation != _generation) return;
 
+      step = 'connect_room';
       // Query the actual WebRTC build, not the device's file playback support.
       Iterable<String> videoCodecs = const [];
       try {
@@ -843,6 +849,7 @@ final class VoiceSession extends ChangeNotifier {
       _canSpeak = capabilities.canSpeak;
       _canStream = capabilities.canStream;
       _canUseVad = capabilities.canUseVad;
+      step = 'configure_audio';
       await selectAudioRoute(_audioRoute);
       // Route selection may yield to a newer join/leave while this connected
       // room is still only a local candidate. Never publish that stale room;
@@ -875,6 +882,7 @@ final class VoiceSession extends ChangeNotifier {
       }
 
       if (_canSpeak) {
+        step = 'start_microphone';
         final microphone = await permissions.Permission.microphone.request();
         if (generation != _generation || _room != room) return;
         if (microphone.isGranted) {
@@ -903,6 +911,7 @@ final class VoiceSession extends ChangeNotifier {
         _camera = false;
         _screen = false;
       } else if (_appActive && (requestedCamera || requestedScreen)) {
+        step = 'restore_video';
         await _restorePublishedMedia(
           room,
           cameraRequested: requestedCamera,
@@ -923,7 +932,9 @@ final class VoiceSession extends ChangeNotifier {
             _ => 'another device',
           };
         }
-        final error = _friendly(exception);
+        DebugLog.instance
+            .record(DebugEvent.voiceJoinFailed, step: step, error: exception);
+        final error = _friendly(exception, step: step);
         if (_room != null) await _disposeRoom(notify: false);
         ++_microphoneGeneration;
         _canSpeak = false;
@@ -1123,7 +1134,8 @@ final class VoiceSession extends ChangeNotifier {
       videoPublishOptions: _room == null
           ? null
           : AdaptiveVideo.publishOptions(
-              _room!, TrackSource.camera, _mediaQuality),
+              _room!, TrackSource.camera, _mediaQuality,
+              controller: _adaptiveVideo),
       cameraCaptureOptions:
           cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
     );
@@ -1183,7 +1195,8 @@ final class VoiceSession extends ChangeNotifier {
       await participant.setScreenShareEnabled(
         true,
         videoPublishOptions: AdaptiveVideo.publishOptions(
-            room, TrackSource.screenShareVideo, quality),
+            room, TrackSource.screenShareVideo, quality,
+            controller: _adaptiveVideo),
         captureScreenAudio: false,
         screenShareCaptureOptions: quality.screenCaptureOptions(
           useIosBroadcastExtension:
@@ -1694,7 +1707,8 @@ final class VoiceSession extends ChangeNotifier {
         await participant.setCameraEnabled(
           true,
           videoPublishOptions: AdaptiveVideo.publishOptions(
-              room, TrackSource.camera, _mediaQuality),
+              room, TrackSource.camera, _mediaQuality,
+              controller: _adaptiveVideo),
           cameraCaptureOptions:
               cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
         );
@@ -1707,7 +1721,8 @@ final class VoiceSession extends ChangeNotifier {
         await participant.setScreenShareEnabled(
           true,
           videoPublishOptions: AdaptiveVideo.publishOptions(
-              room, TrackSource.screenShareVideo, _mediaQuality),
+              room, TrackSource.screenShareVideo, _mediaQuality,
+              controller: _adaptiveVideo),
           captureScreenAudio: false,
           screenShareCaptureOptions: _mediaQuality.screenCaptureOptions(
             useIosBroadcastExtension:
@@ -1880,8 +1895,14 @@ final class VoiceSession extends ChangeNotifier {
     if (notify) notifyListeners();
   }
 
-  String _friendly(Object exception) {
-    if (exception is KaedeException) return userFacingError(exception);
+  String _friendly(Object exception, {required String step}) {
+    if (exception is KaedeException || exception is UserInputException) {
+      return userFacingError(exception);
+    }
+    if (step == 'open_encryption' || step == 'prepare_encrypted_media') {
+      return userFacingError(exception,
+          fallback: L10n.current.encrypted_voice_setup_failed);
+    }
     final text = '$exception';
     if (text.contains('403') || text.toLowerCase().contains('forbidden')) {
       return 'You do not have permission to join this voice channel.';

@@ -1,4 +1,55 @@
 {
+  "dm_privacy_asked": "{name} requested to turn off encryption",
+  "@dm_privacy_asked": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "device_search": "Search on this device",
+  "device_search_hint": "Search messages loaded in this conversation. Your search stays on this device.",
+  "device_search_none": "No matching messages",
+  "friends_push_open": "Open Friends to view this update.",
+  "dm_privacy_new_messages": "New messages can be read by participating servers.",
+  "dm_privacy_divider": "End-to-end encryption was turned off. Servers can read messages sent from here.",
+  "dm_privacy_draft_question": "Move earlier encrypted draft?",
+  "dm_privacy_draft_explain": "You can review it before sending it as a server-readable message.",
+  "dm_privacy_draft_move": "Move draft",
+  "dm_privacy_draft_review": "Review earlier draft",
+  "dm_privacy_mixed_search": "Search terms go to the server. Text searches also check earlier messages loaded on this device.",
+  "dm_privacy_local_results": "Earlier messages found on this device",
+  "dm_privacy_title": "Conversation privacy",
+  "dm_privacy_request": "Request to turn off encryption",
+  "dm_privacy_question": "Turn off end-to-end encryption?",
+  "dm_privacy_explain": "If everyone agrees, participating servers can read and search future messages. Earlier encrypted messages stay encrypted.",
+  "dm_privacy_agree": "Agree",
+  "dm_privacy_decline": "Decline",
+  "dm_privacy_withdraw": "Withdraw agreement",
+  "dm_privacy_finish": "Finish turning off encryption",
+  "dm_privacy_send": "Send request",
+  "dm_privacy_cancel": "Cancel",
+  "dm_privacy_declined": "The request was declined.",
+  "dm_privacy_end_call": "End the call to finish turning off encryption.",
+  "dm_privacy_votes": "{approved} of {total} agreed.",
+  "dm_privacy_error": "Could not update encryption. Please try again.",
+  "@dm_privacy_votes": {
+    "placeholders": {
+      "approved": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "profile_request_sent": "Friend request sent",
+  "profile_edit": "Edit profile",
+  "profile_copy_username": "Copy username",
+  "profile_username_copied": "Username copied",
+  "profile_loading_relationship": "Checking friend status",
+  "profile_retry_relationship": "Couldn’t load friend status. Retry",
+  "profile_incoming_friend_request": "Sent you a friend request",
   "profile_block": "Block user",
   "profile_block_help": "Blocking hides their messages and removes them as a friend.",
 
@@ -4316,6 +4367,8 @@
   "@ui_could_not_add_this_app_to_the_server_e6821d4e": {
     "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
   },
+  "ui_add_bot_to_a_guild_f3f28629": "Add bot to a server",
+  "ui_view_app_profile_d6423864": "View app profile",
   "ui_add_app_57813d5f": "Add App",
   "@ui_add_app_57813d5f": {
     "description": "Interface text in lib/src/features/shared/remote_media.dart"
@@ -4886,6 +4939,8 @@
   "@ui_the_voice_grant_did_not_match_this_channel_po_62de3a23": {
     "description": "Interface text in lib/src/features/voice/voice_session.dart"
   },
+  "encryption_component_unavailable": "This version of Kaede cannot open end-to-end encryption. Update the app to use encrypted messages and calls.",
+  "encrypted_voice_setup_failed": "Kaede couldn’t open the encryption keys for this call. Open the encrypted conversation and try joining again.",
   "ui_voice_connection_interrupted_reconnecting_6458068c": "Voice connection interrupted. Reconnecting…",
   "@ui_voice_connection_interrupted_reconnecting_6458068c": {
     "description": "Interface text in lib/src/features/voice/voice_session.dart"
@@ -8299,7 +8354,7 @@
   "@ui_encryption_is_optional_and_cannot_be_turned_o_0a0475ce": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },
-  "ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": "Encryption is optional and cannot be turned off after it is enabled for this conversation.",
+  "ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": "Encryption applies to future messages. Messages sent with encryption stay encrypted.",
   "@ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },

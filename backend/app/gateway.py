@@ -37,6 +37,7 @@ from app.chat.payloads import (
     dm_channel_payload,
     guild_payload,
     member_payload,
+    relationship_snapshot,
     user_payload,
 )
 from app.chat.permissions import get_permissions
@@ -894,6 +895,7 @@ async def identify(
                 .where(
                     DMParticipant.user_id == user.id,
                     DMParticipant.user_domain == user.origin_domain,
+                    Channel.dm_successor_id.is_(None),
                     Channel.type == 1,
                     Channel.guild_id.is_(None),
                     Channel.unavailable.is_(False),
@@ -961,6 +963,7 @@ async def accessible_read_states(
             .where(
                 ReadState.user_id == user.id,
                 ReadState.user_domain == user.origin_domain,
+                Channel.dm_successor_id.is_(None),
                 Channel.unavailable.is_(False),
             )
         )
@@ -1146,6 +1149,13 @@ def ready_payload(
     }
 
 
+async def gateway_relationships(
+    sessionmaker: async_sessionmaker[AsyncSession], user: User
+) -> list[dict[str, object]]:
+    async with sessionmaker() as session:
+        return await relationship_snapshot(session, user)
+
+
 async def hydrated_ready_payload(
     sessionmaker: async_sessionmaker[AsyncSession],
     redis: Redis,
@@ -1159,7 +1169,7 @@ async def hydrated_ready_payload(
     presence_preference = await current_presence_preference(sessionmaker, redis, user)
     history_statuses = await guild_history_sync_statuses(redis, user, guilds)
     presences = await contact_presence_snapshot(sessionmaker, redis, user, dm_channels)
-    return ready_payload(
+    payload = ready_payload(
         user,
         guilds,
         states,
@@ -1169,6 +1179,9 @@ async def hydrated_ready_payload(
         history_statuses,
         presences,
     )
+
+    payload["relationships"] = await gateway_relationships(sessionmaker, user)
+    return payload
 
 
 async def next_pubsub(pubsub: GatewaySubscription) -> dict[str, Any] | None:
@@ -2792,6 +2805,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
                     "d": {
                         "session_id": gateway_session_id,
                         "replayed": sequence - start_sequence - 1,
+                        "relationships": await gateway_relationships(sessionmaker, user),
                         "presence_preference": presence_preference,
                         "presences": presences,
                     },

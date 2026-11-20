@@ -106,6 +106,7 @@ export class BrowserNotifications {
   #pendingMessages = new SvelteMap<string, Message>();
   #deliveryInFlight = new SvelteSet<string>();
   #deliveryFailures = new SvelteSet<string>();
+  #dismissedPrompts = new SvelteSet<string>();
   #healthIssues = new SvelteMap<string, string>();
   #generation = 0;
 
@@ -167,6 +168,26 @@ export class BrowserNotifications {
     } catch {
       // Private browsing modes can make localStorage unavailable. The in-memory
       // flag still prevents the prompt from repeating during this page load.
+    }
+  }
+
+  isPromptDismissed(user: UserSummary): boolean {
+    const key = `kaede:notification-prompt:${entityKey(user)}`;
+    if (this.#dismissedPrompts.has(key)) return true;
+    try {
+      return window.localStorage.getItem(key) === 'dismissed';
+    } catch {
+      return false;
+    }
+  }
+
+  dismissPrompt(user: UserSummary): void {
+    const key = `kaede:notification-prompt:${entityKey(user)}`;
+    this.#dismissedPrompts.add(key);
+    try {
+      window.localStorage.setItem(key, 'dismissed');
+    } catch {
+      // Keep the account's decision in memory when browser storage is unavailable.
     }
   }
 

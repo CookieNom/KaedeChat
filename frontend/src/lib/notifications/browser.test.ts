@@ -81,6 +81,27 @@ describe('browser notification settings', () => {
     expect(shouldOfferBrowserNotificationPrompt(true, 'granted', false, true, true)).toBe(false);
   });
 
+  it('keeps Not now for the same account when notification settings are missing', () => {
+    const stored = new Map<string, string>();
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => stored.get(key) ?? null,
+        setItem: (key: string, value: string) => stored.set(key, value)
+      }
+    });
+    const notifications = new BrowserNotifications();
+    notifications.apply({});
+    notifications.dismissPrompt(currentUser);
+    expect(notifications.isPromptDismissed(currentUser)).toBe(true);
+    const reload = new BrowserNotifications();
+    reload.apply({});
+    expect(reload.isPromptDismissed(currentUser)).toBe(true);
+    expect(reload.isPromptDismissed({ ...currentUser, origin_domain: 'other.test' })).toBe(false);
+    vi.stubGlobal('window', {});
+    reload.dismissPrompt(currentUser);
+    expect(reload.isPromptDismissed(currentUser)).toBe(true);
+  });
+
   it('notifies for DMs and explicit guild mentions, but never for the sender’s own message', () => {
     expect(shouldNotifyForMessage(message, currentUser, true)).toBe(true);
     expect(shouldNotifyForMessage(message, currentUser, false)).toBe(false);

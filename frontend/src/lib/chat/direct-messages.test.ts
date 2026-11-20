@@ -89,5 +89,7 @@ describe('direct-message presentation', () => {
     const active = channel({ id: '10', name: 'Updated' });
 
     expect(promoteDirectMessage([older, channel()], active)).toEqual([active, older]);
+    const successor = channel({ id: '11', dm_previous_id: active.id });
+    expect(promoteDirectMessage([active, older], successor)).toEqual([successor, older]);
   });
 });

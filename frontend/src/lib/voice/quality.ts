@@ -241,7 +241,7 @@ export function webCameraDefaults(videoQualityMode: 1 | 2): {
 
 /** Safe initial publication until the asynchronous, settings-specific probe finishes. */
 export function webVideoCodecOptions(encrypted: boolean): TrackPublishOptions {
-  // Encryption belongs to the room and never selects a different codec policy.
+  // Start both plaintext and encrypted rooms on VP8 while viewers announce their codecs.
   void encrypted;
   return { videoCodec: 'vp8', backupCodec: false };
 }

@@ -108,7 +108,7 @@
     {#if request.status === 'pending' || request.status === 'approved'}
       <p>
         Only you and the other participant can read future encrypted messages. Earlier messages stay
-        unencrypted. Once enabled, encryption cannot be turned off in this conversation.
+        unencrypted. Messages sent with encryption stay encrypted.
       </p>
       <details>
         <summary>Read the warnings before agreeing</summary>

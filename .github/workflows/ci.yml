@@ -276,6 +276,7 @@ jobs:
           Path("ios/Runner/GoogleService-Info.plist").write_bytes(plistlib.dumps({"BUNDLE_ID": "chat.kaede.mobile"}))
           PYTHON
           flutter build ios --release --no-codesign
+          bash tool/check_ios_e2ee_exports.sh build/ios/iphoneos/Runner.app/Runner
           git diff --exit-code -- pubspec.lock ios/Podfile.lock
 
   frontend:

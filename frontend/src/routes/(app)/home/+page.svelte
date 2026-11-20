@@ -1,6 +1,7 @@
 <script lang="ts">
   import PresenceIndicator from '$lib/components/PresenceIndicator.svelte';
   import AccountPanel from '$lib/components/AccountPanel.svelte';
+  import { chatEntities } from '$lib/stores/entities.svelte';
   import { t } from '$lib/ui/locale';
 
   import { resolve } from '$app/paths';
@@ -167,13 +168,24 @@
       if (directMessage) directMessages = promoteDirectMessage(directMessages, directMessage);
     } else if (dispatch.t === 'CHANNEL_CREATE') {
       const channel = dispatch.d as Channel;
-      if (channel.type === 1 && !directMessages.some((item) => sameEntity(item, channel))) {
+      if (
+        (channel.type === 1 || channel.type === 3) &&
+        !directMessages.some((item) => sameEntity(item, channel))
+      ) {
         directMessages = promoteDirectMessage(directMessages, channel);
-        notice = $t('ui_your_direct_message_request_is_ready_6e7d0a8c');
+        if (!channel.dm_previous_id && channel.type === 1)
+          notice = $t('ui_your_direct_message_request_is_ready_6e7d0a8c');
       }
+    } else if (dispatch.t === 'DM_CONSENT_UPDATE') {
+      const update = dispatch.d as Channel;
+      directMessages = directMessages.map((room) =>
+        sameEntity(room, update)
+          ? { ...room, continuation_requester: update.continuation_requester }
+          : room
+      );
     } else if (dispatch.t === 'CHANNEL_UPDATE') {
       const channel = dispatch.d as Channel;
-      if (channel.type === 1) {
+      if (channel.type === 1 || channel.type === 3) {
         directMessages = promoteDirectMessage(directMessages, channel);
       }
     } else if (dispatch.t === 'CHANNEL_DELETE') {
@@ -316,7 +328,9 @@
           api<Guild[]>('/users/@me/guilds'),
           api<Channel[]>('/users/@me/channels'),
           api<ReadStateStatus[]>('/users/@me/read-states'),
-          api<Relationship[]>('/users/@me/relationships'),
+          chatEntities.currentUser
+            ? [...chatEntities.relationships.values]
+            : api<Relationship[]>('/users/@me/relationships'),
           api<UserSummary>('/users/@me')
         ]);
       if (routeGeneration !== loadGeneration || snapshot !== snapshotGeneration) return;
@@ -736,7 +750,12 @@
               <PresenceIndicator user={recipient} />
             {/if}
           </span>
-          <strong>{dmTitle(channel)}</strong>
+          <span class="dm-list-label"
+            ><strong>{dmTitle(channel)}</strong>
+            {#if channel.continuation_requester}<small
+                >{$t('dm_privacy_asked', { name: channel.continuation_requester })}</small
+              >{/if}</span
+          >
           {#if unreadFor(channel)?.unread}
             <small class="unread-badge">{Math.max(1, unreadFor(channel)?.mention_count ?? 0)}</small
             >

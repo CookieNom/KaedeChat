@@ -233,6 +233,11 @@ final class KaedeException implements Exception {
           'A member’s server could not be reached to verify encryption support. Try again later.',
       'E2EE_INSTANCE_UNSUPPORTED':
           'A member’s server does not support encrypted channels yet.',
+      'DM_CALL_ACTIVE': 'End the current call before turning off encryption.',
+      'DM_CONTINUED':
+          'This part of the conversation is closed. Open the current conversation to send a new message.',
+      'E2EE_DM_REQUEST_STALE':
+          'This request expired or changed. Review the current request.',
       'DM_PRIVACY_REJECTED':
           'That user’s privacy settings do not allow this direct message.',
       'CANNOT_DM_SELF': 'You cannot open a direct message with yourself.',
@@ -570,7 +575,7 @@ final class KaedeException implements Exception {
 /// Converts exceptions into safe, actionable copy for snackbars and error
 /// states. Unknown exception text is intentionally not displayed because it
 /// can contain implementation details, local paths, or response fragments.
-String userFacingError(Object error, {String? summary}) {
+String userFacingError(Object error, {String? summary, String? fallback}) {
   final String reason;
   String? traceId;
   if (error is KaedeException) {
@@ -604,7 +609,7 @@ String userFacingError(Object error, {String? summary}) {
   } else if (error is String && _safeLocalMessage(error)) {
     reason = _sentence(error);
   } else {
-    reason =
+    reason = fallback ??
         'Something unexpected went wrong. Try again. If it keeps happening, restart Kaede.';
   }
 

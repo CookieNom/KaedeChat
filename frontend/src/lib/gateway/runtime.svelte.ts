@@ -2,6 +2,7 @@ import { entityKey } from '$lib/chat/refs';
 import {
   applyContentSafetyUpdate,
   contentSafety,
+  invalidateContentSafety,
   protectMessage,
   syncContentSafety
 } from '$lib/chat/content-safety.svelte';
@@ -54,6 +55,7 @@ type ReadyPayload = {
   user: UserSummary;
   guilds: Guild[];
   dm_channels: Channel[];
+  relationships?: Relationship[];
   presences?: Array<{
     user_id: string;
     user_domain: string;
@@ -67,21 +69,18 @@ const guildProjectionRefreshGenerations = new SvelteMap<string, number>();
 let guildProjectionSession = 0;
 let relationshipSnapshotUpdates: Map<string, Relationship | null> | null = null;
 
-function refreshRelationships(): void {
+function refreshRelationships(): Promise<void> {
   const session = guildProjectionSession;
   const updates = new SvelteMap<string, Relationship | null>();
   relationshipSnapshotUpdates = updates;
-  void api<Relationship[]>('/users/@me/relationships')
+  return api<Relationship[]>('/users/@me/relationships')
     .then((relationships) => {
-      if (session !== guildProjectionSession) return;
+      if (session !== guildProjectionSession || relationshipSnapshotUpdates !== updates) return;
       chatEntities.relationships.replace(relationships);
       for (const [key, relationship] of updates) {
         if (relationship) chatEntities.relationships.upsert(relationship);
         else chatEntities.relationships.remove(key);
       }
-    })
-    .catch(() => {
-      // Keep live updates when offline; the next READY retries the snapshot.
     })
     .finally(() => {
       if (relationshipSnapshotUpdates === updates) relationshipSnapshotUpdates = null;
@@ -138,12 +137,19 @@ function applyOwnPresencePreference(
 
 function applyEntityDispatch(dispatch: Dispatch): void {
   const eventName = dispatch.t as string;
+  if (eventName === 'DM_CONSENT_UPDATE') {
+    const update = dispatch.d as Channel;
+    chatEntities.channels.update(entityKey(update), (room) => ({
+      ...room,
+      continuation_requester: update.continuation_requester
+    }));
+    return;
+  }
   if (eventName === 'CONTENT_SAFETY_UPDATE') {
     try {
       applyContentSafetyUpdate(dispatch.d);
       chatEntities.messages.replace(chatEntities.messages.values.map(protectMessage));
-      if (chatEntities.currentUser)
-        void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
+      authenticatedGateway.resyncAfterUpdate();
     } catch {
       contentSafety.ready = false;
       contentSafety.error = 'Could not apply a content safety update. Reconnect and try again.';
@@ -171,8 +177,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       // all member data before the new READY is applied. Likewise, preserve
       // history that HTTP may have loaded before the initial READY arrives.
       chatEntities.beginGatewaySession(ready.user);
-      void syncContentSafety(ready.user).catch(() => undefined);
-      refreshRelationships();
+      authenticatedGateway.applyRelationships(ready.relationships);
+      void authenticatedGateway.retryContentSafety();
       chatEntities.ingestGuilds(ready.guilds);
       chatEntities.ingestDirectMessages(ready.dm_channels);
       chatEntities.ingestPresences(ready.presences ?? []);
@@ -181,8 +187,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       return;
     }
     case 'RESUMED': {
-      if (chatEntities.currentUser)
-        void syncContentSafety(chatEntities.currentUser).catch(() => undefined);
+      authenticatedGateway.applyRelationships((dispatch.d as ReadyPayload).relationships);
+      void authenticatedGateway.retryContentSafety();
       const resumed = dispatch.d as {
         presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
         presences?: Array<{
@@ -284,6 +290,14 @@ function applyEntityDispatch(dispatch: Dispatch): void {
     case 'CHANNEL_UPDATE':
     case 'CHANNEL_ACCESS_GRANTED': {
       const channel = dispatch.d as Channel;
+      if (channel.guild_id === null && channel.dm_previous_id) {
+        const previous = entityKey({
+          id: channel.dm_previous_id,
+          origin_domain: channel.origin_domain
+        });
+        chatEntities.channels.remove(previous);
+        chatEntities.readStates.remove(previous);
+      }
       chatEntities.upsertGuildChannel(channel);
       return;
     }
@@ -324,6 +338,13 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         guild_id?: string;
         guild_domain?: string;
       };
+      if ('dm_successor_id' in channel && typeof channel.dm_successor_id === 'string') {
+        // Retirement keeps authorized history in the timeline. A membership
+        // revocation still takes the normal deletion path below.
+        chatEntities.channels.remove(entityKey(channel));
+        chatEntities.readStates.remove(entityKey(channel));
+        return;
+      }
       const current = chatEntities.channels.get(entityKey(channel));
       cancelGuildProjectionRefresh(
         channel.guild_id ?? current?.guild_id ?? undefined,
@@ -639,9 +660,16 @@ class AuthenticatedGatewayRuntime {
   readonly client = new GatewayClient();
   status = $state<GatewayStatus>({ state: 'connecting', message: '' });
   #started = false;
+  #safetyBootstrap: Promise<void> | null = null;
+  #relationshipsReady = false;
   #readStateSync: BroadcastChannel | null = null;
   #reduce = (event: Event) => {
     const dispatch = (event as CustomEvent<Dispatch>).detail;
+    if (dispatch.t === 'READY') {
+      this.#safetyBootstrap = null;
+      this.#relationshipsReady = false;
+      invalidateContentSafety();
+    }
     applyEntityDispatch(dispatch);
     if (dispatch.t === 'MESSAGE_CREATE') {
       if (!chatEntities.isMessageBlocked(dispatch.d as Message)) {
@@ -658,14 +686,74 @@ class AuthenticatedGatewayRuntime {
   };
   #updateStatus = (event: Event) => {
     this.status = (event as CustomEvent<GatewayStatus>).detail;
-    if (['connecting', 'reconnecting', 'offline'].includes(this.status.state))
-      contentSafety.ready = false;
+    if (['connecting', 'reconnecting', 'offline'].includes(this.status.state)) {
+      invalidateContentSafety();
+      if (this.#safetyBootstrap) {
+        this.#safetyBootstrap = null;
+        relationshipSnapshotUpdates = null;
+      }
+    }
   };
+
+  applyRelationships(snapshot?: Relationship[]): void {
+    if (!Array.isArray(snapshot)) return;
+    relationshipSnapshotUpdates = null;
+    chatEntities.relationships.replace(snapshot);
+    this.#relationshipsReady = true;
+  }
+
+  resyncAfterUpdate(): void {
+    const pending = this.#safetyBootstrap;
+    if (this.#relationshipsReady && chatEntities.currentUser) {
+      void this.retryContentSafety();
+    } else if (pending) {
+      const session = guildProjectionSession;
+      void pending.then(() => {
+        if (session === guildProjectionSession && contentSafety.ready)
+          void this.retryContentSafety();
+      });
+    } else if (chatEntities.currentUser) void this.retryContentSafety();
+  }
+
+  retryContentSafety(): Promise<void> {
+    if (!this.#started) return Promise.resolve();
+    if (this.#relationshipsReady && chatEntities.currentUser)
+      return syncContentSafety(chatEntities.currentUser).catch(() => undefined);
+    if (this.#safetyBootstrap) return this.#safetyBootstrap;
+
+    // A reloaded tab can resume its socket without receiving READY's account snapshot.
+    const session = guildProjectionSession;
+    contentSafety.ready = false;
+    contentSafety.error = '';
+    const identity = chatEntities.currentUser ?? api<UserSummary>('/users/@me');
+    const current = () => this.#safetyBootstrap === pending && session === guildProjectionSession;
+    const pending: Promise<void> = Promise.all([
+      identity,
+      this.#relationshipsReady ? undefined : refreshRelationships()
+    ])
+      .then(async ([user]) => {
+        if (!current()) return;
+        if (!chatEntities.currentUser) {
+          chatEntities.ingestCurrentUser({ ...user, ...chatEntities.users.get(entityKey(user)) });
+        }
+        this.#relationshipsReady = true;
+        await syncContentSafety(user);
+      })
+      .catch(() => {
+        if (current() && !contentSafety.error)
+          contentSafety.error = 'Could not check message availability. Try again.';
+      })
+      .finally(() => {
+        if (this.#safetyBootstrap === pending) this.#safetyBootstrap = null;
+      });
+    this.#safetyBootstrap = pending;
+    return pending;
+  }
 
   start(): void {
     if (this.#started) return;
     this.#started = true;
-    contentSafety.ready = false;
+    invalidateContentSafety();
     this.client.addEventListener('dispatch', this.#reduce);
     this.client.addEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     if (typeof BroadcastChannel !== 'undefined') {
@@ -682,7 +770,9 @@ class AuthenticatedGatewayRuntime {
   stop(): void {
     if (!this.#started) return;
     this.#started = false;
-    contentSafety.ready = false;
+    this.#safetyBootstrap = null;
+    this.#relationshipsReady = false;
+    invalidateContentSafety();
     this.client.removeEventListener('dispatch', this.#reduce);
     this.client.removeEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     this.client.close();

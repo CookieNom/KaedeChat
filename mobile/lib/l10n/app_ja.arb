@@ -1,4 +1,45 @@
 {
+  "dm_privacy_asked": "{name}さんが暗号化の解除をリクエストしました",
+  "@dm_privacy_asked": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "device_search": "この端末で検索",
+  "device_search_hint": "この会話の読み込み済みメッセージを検索します。検索内容はサーバーに送信されません。",
+  "device_search_none": "一致するメッセージはありません",
+  "friends_push_open": "フレンドを開いて更新を確認してください。",
+  "dm_privacy_new_messages": "今後のメッセージはサーバーで読み取ることができます。",
+  "dm_privacy_divider": "エンドツーエンド暗号化が解除されました。ここから先のメッセージはサーバーで読み取ることができます。",
+  "dm_privacy_draft_question": "暗号化された会話の下書きを移動しますか？",
+  "dm_privacy_draft_explain": "送信前に下書きを確認できます。送信するとサーバーで読み取れるようになります。",
+  "dm_privacy_draft_move": "下書きを移動",
+  "dm_privacy_draft_review": "以前の下書きを確認",
+  "dm_privacy_mixed_search": "検索語はサーバーに送信されます。テキスト検索では、この端末に読み込み済みの過去のメッセージも検索します。",
+  "dm_privacy_local_results": "この端末で見つかった過去のメッセージ",
+  "dm_privacy_title": "会話のプライバシー",
+  "dm_privacy_request": "暗号化の解除をリクエスト",
+  "dm_privacy_question": "エンドツーエンド暗号化を解除しますか？",
+  "dm_privacy_explain": "全員が同意すると、今後のメッセージはサーバーで読み取り・検索できるようになります。過去に暗号化したメッセージは暗号化されたままです。",
+  "dm_privacy_agree": "同意する",
+  "dm_privacy_decline": "拒否する",
+  "dm_privacy_withdraw": "同意を取り消す",
+  "dm_privacy_finish": "暗号化の解除を完了",
+  "dm_privacy_send": "リクエストを送信",
+  "dm_privacy_cancel": "キャンセル",
+  "dm_privacy_declined": "リクエストは拒否されました。",
+  "dm_privacy_end_call": "暗号化の解除を完了するには通話を終了してください。",
+  "dm_privacy_votes": "{total}人中{approved}人が同意しました。",
+  "dm_privacy_error": "暗号化設定を更新できませんでした。もう一度お試しください。",
+  "profile_request_sent": "フレンド申請を送信しました",
+  "profile_edit": "プロフィールを編集",
+  "profile_copy_username": "ユーザー名をコピー",
+  "profile_username_copied": "ユーザー名をコピーしました",
+  "profile_loading_relationship": "フレンドの状態を確認中",
+  "profile_retry_relationship": "フレンドの状態を読み込めませんでした。再試行",
+  "profile_incoming_friend_request": "フレンド申請が届いています",
   "profile_block": "ユーザーをブロック",
   "profile_block_help": "ブロックすると相手のメッセージが非表示になり、フレンドから削除されます。",
 
@@ -2282,6 +2323,8 @@
   "@ui_could_not_add_this_app_to_the_server_e6821d4e": {
     "description": "Interface text in lib/src/features/auth/deep_link_screen.dart"
   },
+  "ui_add_bot_to_a_guild_f3f28629": "ボットをサーバーに追加",
+  "ui_view_app_profile_d6423864": "アプリのプロフィールを表示",
   "ui_add_app_57813d5f": "アプリを追加",
   "@ui_add_app_57813d5f": {
     "description": "Interface text in lib/src/features/shared/remote_media.dart"
@@ -3036,7 +3079,7 @@
   "@ui_encryption_is_optional_and_cannot_be_turned_o_0a0475ce": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },
-  "ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": "暗号化は任意ですが、この会話で有効にすると解除できません。",
+  "ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": "暗号化は今後のメッセージに適用されます。暗号化して送信したメッセージは暗号化されたままです。",
   "@ui_encryption_is_optional_and_cannot_be_turned_o_4aeafe26": {
     "description": "Interface text in lib/src/features/home/mobile_shell.dart"
   },
@@ -5462,6 +5505,8 @@
   "@ui_the_voice_grant_did_not_match_this_channel_po_62de3a23": {
     "description": "Interface text in lib/src/features/voice/voice_session.dart"
   },
+  "encryption_component_unavailable": "このバージョンのKaedeではエンドツーエンド暗号化を使用できません。暗号化されたメッセージと通話を利用するには、アプリを更新してください。",
+  "encrypted_voice_setup_failed": "この通話の暗号鍵を開けませんでした。暗号化された会話を開いて、もう一度通話に参加してください。",
   "ui_voice_connection_interrupted_reconnecting_6458068c": "音声接続が中断されました。再接続中…",
   "@ui_voice_connection_interrupted_reconnecting_6458068c": {
     "description": "Interface text in lib/src/features/voice/voice_session.dart"

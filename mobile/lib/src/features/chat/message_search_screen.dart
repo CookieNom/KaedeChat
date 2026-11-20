@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
+import 'package:kaede_mobile/src/domain/content_safety.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/remote_media.dart';
@@ -182,6 +183,8 @@ final class MessageSearchScreen extends StatefulWidget {
     required this.channel,
     required this.accountRef,
     this.historyAvailable = true,
+    this.loadedMessages = const <KaedeMessage>[],
+    this.previousMessages = const <KaedeMessage>[],
     this.isMessageBlocked,
     this.channels = const <KaedeChannel>[],
     this.users = const <KaedeUser>[],
@@ -196,6 +199,8 @@ final class MessageSearchScreen extends StatefulWidget {
   final List<KaedeChannel> channels;
   final EntityRef? accountRef;
   final bool historyAvailable;
+  final List<KaedeMessage> loadedMessages;
+  final List<KaedeMessage> previousMessages;
   final bool Function(KaedeMessage message)? isMessageBlocked;
   final List<KaedeUser> users;
   final Future<void> Function(MessageSearchResult result) onJump;
@@ -207,6 +212,9 @@ final class MessageSearchScreen extends StatefulWidget {
 final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   final _query = TextEditingController();
   final _queryFocus = FocusNode();
+  String _deviceQuery = '';
+  String _previousQuery = '';
+  EntityRef? _authorizedPrevious;
   var _sort = 'relevance';
   EntityRef? _selectedChannelRef;
 
@@ -299,6 +307,12 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
   @override
   void didUpdateWidget(covariant MessageSearchScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.accountRef != widget.accountRef ||
+        oldWidget.channel?.ref != widget.channel?.ref ||
+        oldWidget.channel?.encryptionMode != widget.channel?.encryptionMode ||
+        !widget.historyAvailable) {
+      _deviceQuery = '';
+    }
     if (oldWidget.historyAvailable && !widget.historyAvailable) {
       _searchRequestGeneration += 1;
       _page = null;
@@ -605,6 +619,21 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
       _error = null;
     });
     try {
+      final current = widget.channel;
+      EntityRef? previous;
+      if (current?.previousDm != null &&
+          widget.scope == 'channel' &&
+          widget.previousMessages.isNotEmpty &&
+          criteria.has.isEmpty &&
+          criteria.author == null &&
+          criteria.mention == null &&
+          criteria.pinned == null &&
+          criteria.authorType == null &&
+          criteria.after == null &&
+          criteria.before == null) {
+        previous =
+            (await widget.repository.previousDmSegment(current!.ref))?.ref;
+      }
       final next = await widget.repository.searchMessages(
         query: criteria.query,
         scope: criteria.scope,
@@ -634,6 +663,8 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         return;
       }
       setState(() {
+        _authorizedPrevious = previous;
+        _previousQuery = criteria.query.trim().toLowerCase();
         _page = more
             ? MessageSearchPage(
                 results: <MessageSearchResult>[
@@ -742,8 +773,101 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
         selected.isEmpty ? null : EntityRef.parse(selected));
   }
 
+  List<MessageSearchResult> _localResults(KaedeChannel channel,
+      EntityRef source, List<KaedeMessage> messages, String needle) {
+    final matches = <MessageSearchResult>[];
+    if (needle.isNotEmpty) {
+      for (final raw in messages) {
+        final message = contentSafety.protect(raw);
+        if (message.channelRef != source ||
+            message.contentUnavailable ||
+            message.deletedAt != null ||
+            message.safetyState != null ||
+            message.safetyLocked ||
+            widget.isMessageBlocked?.call(message) == true ||
+            (message.e2ee != null && !message.e2eeVerified)) {
+          continue;
+        }
+        final snippet = messageSearchSafeSnippet(message.content ?? '');
+        if (snippet.toLowerCase().contains(needle)) {
+          matches.add(MessageSearchResult(
+              message: message, channel: channel, snippet: snippet));
+        }
+      }
+    }
+    return matches;
+  }
+
+  Widget _deviceSearch(KaedeChannel channel) {
+    final needle = _deviceQuery.trim().toLowerCase();
+    final matches =
+        _localResults(channel, channel.ref, widget.loadedMessages, needle);
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            key: ValueKey((channel.ref, widget.accountRef)),
+            enableIMEPersonalizedLearning: false,
+            autofocus: true,
+            enableSuggestions: false,
+            autocorrect: false,
+            onChanged: (value) => setState(() => _deviceQuery = value),
+            decoration: InputDecoration(
+                labelText: L10n.of(context).device_search,
+                prefixIcon: Icon(Icons.search)),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Text(L10n.of(context).device_search_hint,
+                style: TextStyle(color: context.kaede.muted)),
+          ),
+          if (needle.isNotEmpty && matches.isEmpty)
+            Text(L10n.of(context).device_search_none,
+                style: TextStyle(color: context.kaede.muted)),
+          Expanded(
+              child: ListView.builder(
+                  itemCount: matches.length,
+                  itemBuilder: (context, index) =>
+                      _resultTile(context, matches[index]))),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final channel = widget.channel;
+    final earlier = channel == null ||
+            _authorizedPrevious == null ||
+            _page == null ||
+            !widget.historyAvailable
+        ? const <MessageSearchResult>[]
+        : _localResults(channel, _authorizedPrevious!, widget.previousMessages,
+            _previousQuery);
+    final hits = [
+      ...?_page?.results
+          .where((r) => widget.isMessageBlocked?.call(r.message) != true),
+      ...earlier,
+    ];
+    if (earlier.isNotEmpty && _sort != 'relevance') {
+      hits.sort((a, b) =>
+          a.message.createdAt.compareTo(b.message.createdAt) *
+          (_sort == 'oldest' ? 1 : -1));
+    }
+    if (widget.scope == 'channel' &&
+        widget.accountRef != null &&
+        widget.historyAvailable &&
+        channel != null &&
+        channel.guildRef == null &&
+        channel.encryptionMode == 'e2ee') {
+      return Scaffold(
+        appBar:
+            AppBar(title: Text(L10n.of(context).ui_search_messages_7bf8a493)),
+        body: _deviceSearch(channel),
+      );
+    }
     return Scaffold(
       appBar: AppBar(
         title: Text(L10n.of(context).ui_search_messages_7bf8a493),
@@ -1152,7 +1276,16 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                             child: Text(L10n.of(context)
                                 .ui_encrypted_conversations_were_excluded_from_th_c0f982fb),
                           ),
-                        if (_page != null && _page!.results.isEmpty)
+                        if (channel?.previousDm != null)
+                          Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              child: Text(
+                                  L10n.of(context).dm_privacy_mixed_search,
+                                  style:
+                                      TextStyle(color: context.kaede.muted))),
+                        if (_page != null &&
+                            _page!.results.isEmpty &&
+                            earlier.isEmpty)
                           Padding(
                             padding: EdgeInsets.all(24),
                             child: Text(
@@ -1161,12 +1294,7 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
                               textAlign: TextAlign.center,
                             ),
                           ),
-                        for (final result in (_page?.results ??
-                                const <MessageSearchResult>[])
-                            .where((result) =>
-                                widget.isMessageBlocked?.call(result.message) !=
-                                true))
-                          _resultTile(context, result),
+                        for (final result in hits) _resultTile(context, result),
                         if (_page?.nextCursor != null)
                           ActionButton(
                             kind: ActionButtonKind.text,
@@ -1275,19 +1403,15 @@ final class _MessageSearchScreenState extends State<MessageSearchScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Text(
-                      contextLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: context.kaede.muted,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+                Text(
+                  contextLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: context.kaede.muted,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 SizedBox(height: 8),
                 Row(

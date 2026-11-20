@@ -44,6 +44,8 @@ import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
 import 'package:kaede_mobile/src/features/chat/spotify_preview.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/chat/voice_message_recorder.dart';
+import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart'
+    show GuildMemberProfileSection;
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/attachment_picker.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
@@ -476,15 +478,27 @@ List<KaedeMessage> visibleChannelMessages(
     (canReadRetainedChannelHistory(channel)
             ? threadTimelineMessages(channel, state.messages)
             : state.messages)
-        .where((message) =>
-            message.deletedAt == null &&
-            !state.isMessageBlocked(message) &&
-            !(message.messageType == 7 &&
-                message.e2ee?['version'] == 2 &&
-                message.e2ee?['protocol'] == 'mls10' &&
-                (message.e2ee?['operation'] == 'welcome' ||
-                    message.e2ee?['operation'] == 'commit')))
+        .where((message) => _visibleTimelineMessage(state, message))
         .toList();
+
+bool _visibleTimelineMessage(MobileState state, KaedeMessage message) =>
+    message.deletedAt == null &&
+    !state.isMessageBlocked(message) &&
+    !(message.messageType == 7 &&
+        message.e2ee?['version'] == 2 &&
+        message.e2ee?['protocol'] == 'mls10' &&
+        (message.e2ee?['operation'] == 'welcome' ||
+            message.e2ee?['operation'] == 'commit'));
+
+bool _groupMessages(
+        KaedeMessage previous, KaedeMessage message, bool startsNewDay) =>
+    previous.createdAtAvailable &&
+    message.createdAtAvailable &&
+    !startsNewDay &&
+    previous.authorRef == message.authorRef &&
+    previous.reference == null &&
+    message.reference == null &&
+    message.createdAt.difference(previous.createdAt).inMinutes < 7;
 
 /// Discord type-21 thread starters carry the source message only in
 /// `referenced_message`. A missing projection is a deliberate unavailable
@@ -1055,7 +1069,8 @@ typedef _ActiveEphemeralResponse = ({
 });
 
 final class ChannelView extends ConsumerStatefulWidget {
-  const ChannelView({super.key});
+  const ChannelView({this.callActive = false, super.key});
+  final bool callActive;
 
   @override
   ConsumerState<ChannelView> createState() => _ChannelViewState();
@@ -1340,6 +1355,70 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       content = Column(
         children: [
           if (channel.guildRef == null &&
+              channel.encryptionState == 'active' &&
+              !systemConversation &&
+              state.user?.ref.domain == channel.ref.domain &&
+              channel.recipients.every((u) =>
+                  u.ref.domain == channel.ref.domain && !u.isApplication))
+            DmContinuationConsent(
+                key: ValueKey((channel.ref, state.user?.ref)),
+                callActive: widget.callActive,
+                channel: channel),
+          if (channel.previousDm != null &&
+              channel.encryptionMode == 'plaintext' &&
+              (state.drafts[channel.previousDm] ?? '').isNotEmpty &&
+              _composer.text.isEmpty &&
+              composerReady)
+            Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      child: Text(L10n.of(context).dm_privacy_new_messages,
+                          style: TextStyle(color: context.kaede.muted))),
+                  if ((state.drafts[channel.previousDm] ?? '').isNotEmpty &&
+                      _composer.text.isEmpty &&
+                      composerReady)
+                    TextButton(
+                        onPressed: () async {
+                          final confirmed = await showDialog<bool>(
+                              context: context,
+                              builder: (context) => AlertDialog(
+                                      title: Text(L10n.of(context)
+                                          .dm_privacy_draft_question),
+                                      content: Text(L10n.of(context)
+                                          .dm_privacy_draft_explain),
+                                      actions: [
+                                        TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(context, false),
+                                            child: Text(L10n.of(context)
+                                                .dm_privacy_cancel)),
+                                        FilledButton(
+                                            onPressed: () =>
+                                                Navigator.pop(context, true),
+                                            child: Text(L10n.of(context)
+                                                .dm_privacy_draft_move))
+                                      ]));
+                          if (!mounted ||
+                              confirmed != true ||
+                              _composerChannel != channel.ref ||
+                              _composer.text.isNotEmpty) {
+                            return;
+                          }
+                          final draft = ref
+                                  .read(mobileControllerProvider)
+                                  .drafts[channel.previousDm] ??
+                              '';
+                          _composer.text = draft;
+                          _controller.setDraft(channel.ref, draft);
+                          _controller.setDraft(channel.previousDm!, '');
+                        },
+                        child: Text(L10n.of(context).dm_privacy_draft_review)),
+                ]),
+          if (channel.guildRef == null &&
               channel.conversationType == 'direct' &&
               channel.encryptionMode == 'plaintext' &&
               !systemConversation)
@@ -1489,7 +1568,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                   child: messages.isEmpty &&
                           pending.isEmpty &&
                           !state.loadingMessages &&
-                          !channel.historyTruncated
+                          !channel.historyTruncated &&
+                          channel.previousDm == null
                       ? canReadHistory
                           ? _ConversationStart(channel: channel)
                           : const SizedBox.shrink()
@@ -1510,7 +1590,8 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                           itemCount: messages.length +
                               pending.length +
                               (canReadHistory &&
-                                      (state.channelsWithOlderMessages
+                                      (channel.previousDm != null ||
+                                          state.channelsWithOlderMessages
                                               .contains(channel.ref) ||
                                           (channel.historyTruncated &&
                                               messages.isEmpty) ||
@@ -1536,6 +1617,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                             if (messageIndex < 0) {
                               if (!state.channelsWithOlderMessages
                                   .contains(channel.ref)) {
+                                if (channel.previousDm != null) {
+                                  return _PreviousDmHistory(
+                                      key: ValueKey(channel.ref),
+                                      channel: channel);
+                                }
                                 return _HistoryBoundary(
                                   complete: messages.isEmpty
                                       ? channel.historyRemoteAvailable &&
@@ -1602,16 +1688,7 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
                                 !detached &&
                                 previous != null &&
                                 previous.ref != detachedStarter?.ref &&
-                                previous.createdAtAvailable &&
-                                message.createdAtAvailable &&
-                                !startsNewDay &&
-                                previous.authorRef == message.authorRef &&
-                                previous.reference == null &&
-                                message.reference == null &&
-                                message.createdAt
-                                        .difference(previous.createdAt)
-                                        .inMinutes <
-                                    7;
+                                _groupMessages(previous, message, startsNewDay);
                             final key = _messageKeys.putIfAbsent(
                                 message.ref.wire, GlobalKey.new);
                             void reply() => setState(() {
@@ -4407,6 +4484,11 @@ final class _ChannelViewState extends ConsumerState<ChannelView>
       user,
       ref.read(mobileControllerProvider.notifier).presenceFor(user),
       guildRef: channel?.guildRef,
+      guildMemberSection: channel?.guildRef == null
+          ? null
+          : GuildMemberProfileSection(guildRef: channel!.guildRef!, user: user),
+      offerMessage:
+          channel?.guildRef != null || channel?.conversationType == 'group',
       actions: [
         if (channel != null && commands.isNotEmpty)
           ActionButton(
@@ -7004,6 +7086,181 @@ final class MessageGestureSurface extends StatelessWidget {
         onDoubleTap: onDoubleTapReaction,
         child: child,
       );
+}
+
+Widget _archivedMessageRow(
+    MobileState state, List<KaedeMessage> messages, int index) {
+  final message = messages[index];
+  final previous = index == 0 ? null : messages[index - 1];
+  final newDay = message.createdAtAvailable &&
+      (previous == null ||
+          !previous.createdAtAvailable ||
+          !sameCalendarDay(previous.createdAt, message.createdAt));
+  return Column(children: [
+    if (newDay) _DayDivider(day: message.createdAt),
+    _MessageTile(
+        message: message,
+        state: state,
+        compact: previous != null &&
+            previous.channelRef == message.channelRef &&
+            _groupMessages(previous, message, newDay)),
+  ]);
+}
+
+class ArchivedMessageContext extends ConsumerWidget {
+  const ArchivedMessageContext(
+      {required this.current,
+      required this.source,
+      required this.target,
+      super.key});
+  final EntityRef current, source, target;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(mobileControllerProvider);
+    final rows = state.activeChannel?.ref == current &&
+            state.activeChannel?.previousDm == source
+        ? (state.messageStore[source] ?? const <KaedeMessage>[])
+            .where((m) => _visibleTimelineMessage(state, m))
+            .toList()
+        : const <KaedeMessage>[];
+    final index = rows.indexWhere((m) => m.ref == target);
+    const center = ValueKey('selected-message');
+    return Scaffold(
+        appBar: AppBar(title: Text(L10n.of(context).dm_privacy_local_results)),
+        body: index < 0
+            ? Center(child: Text(L10n.of(context).device_search_none))
+            : CustomScrollView(center: center, anchor: .3, slivers: [
+                SliverList.builder(
+                    itemCount: index,
+                    itemBuilder: (_, i) =>
+                        _archivedMessageRow(state, rows, index - i - 1)),
+                SliverList.builder(
+                    key: center,
+                    itemCount: rows.length - index,
+                    itemBuilder: (_, i) =>
+                        _archivedMessageRow(state, rows, index + i)),
+              ]));
+  }
+}
+
+final class _PreviousDmHistory extends ConsumerStatefulWidget {
+  const _PreviousDmHistory({required this.channel, super.key});
+  final KaedeChannel channel;
+  @override
+  ConsumerState<_PreviousDmHistory> createState() => _PreviousDmHistoryState();
+}
+
+class _PreviousDmHistoryState extends ConsumerState<_PreviousDmHistory>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+  ScrollPosition? _position;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _position?.removeListener(_scrolled);
+    _position = Scrollable.maybeOf(context)?.position;
+    _position?.addListener(_scrolled);
+  }
+
+  void _scrolled() {
+    if (_position!.extentAfter <= 24 && _error == null && mounted) {
+      unawaited(_load());
+    }
+  }
+
+  @override
+  void dispose() {
+    _position?.removeListener(_scrolled);
+    super.dispose();
+  }
+
+  KaedeChannel? _source;
+  late EntityRef _parent = widget.channel.ref;
+  EntityRef? _before;
+  final _refs = <(EntityRef, EntityRef)>[];
+  bool _busy = false, _more = true;
+  String? _error;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_load());
+    });
+  }
+
+  Future<void> _load() async {
+    if (_busy || !_more) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final controller = ref.read(mobileControllerProvider.notifier);
+      final source =
+          _source ?? await controller.repository.previousDmSegment(_parent);
+      if (!mounted) return;
+      if (source == null) {
+        _more = false;
+        return;
+      }
+      final rows = await controller
+          .previousDmMessages(widget.channel.ref, source, before: _before);
+      if (!mounted) return;
+      _refs.insertAll(0, rows.map((m) => (source.ref, m.ref)));
+      if (rows.length == 50) {
+        _source = source;
+        _before = rows.first.ref;
+      } else {
+        _source = null;
+        _before = null;
+        _parent = source.ref;
+        _more = source.previousDm != null;
+      }
+    } on Object catch (e) {
+      if (mounted) _error = userFacingError(e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final state = ref.watch(mobileControllerProvider);
+    final pages = {
+      for (final source in _refs.map((r) => r.$1).toSet())
+        source: {
+          for (final m in state.messageStore[source] ?? const <KaedeMessage>[])
+            m.ref: m
+        }
+    };
+    final visible = [
+      for (final (source, reference) in _refs)
+        if (pages[source]?[reference] case final message?
+            when _visibleTimelineMessage(state, message))
+          message,
+    ];
+    return Column(children: [
+      if (_more)
+        TextButton(
+            onPressed: _busy ? null : _load,
+            child: Text(_busy
+                ? L10n.of(context).ui_loading_earlier_messages_1afc1067
+                : L10n.of(context).ui_load_earlier_messages_1d3e3ff7)),
+      if (_error != null)
+        Text(_error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      for (var i = 0; i < visible.length; i++)
+        _archivedMessageRow(state, visible, i),
+      Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(
+              '${widget.channel.createdAt == null ? '' : '${MaterialLocalizations.of(context).formatShortDate(widget.channel.createdAt!.toLocal())} · '}${L10n.of(context).dm_privacy_divider}',
+              textAlign: TextAlign.center)),
+    ]);
+  }
 }
 
 final class _MessageTile extends StatelessWidget {

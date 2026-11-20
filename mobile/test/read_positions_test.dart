@@ -10,6 +10,7 @@ import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/debug_log.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
 import 'package:kaede_mobile/src/features/chat/channel_view.dart';
@@ -30,7 +31,7 @@ EntityRef messageRef(int id) => EntityRef.parse('$id@chat.example');
 final channelRef = messageRef(500);
 
 Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
-    {bool deleteAnchor = false}) async {
+    {bool deleteAnchor = false, int Function()? historyStatus}) async {
   FlutterSecureStorage.setMockInitialValues({});
   SharedPreferences.setMockInitialValues({});
   final log = <RequestOptions>[];
@@ -53,6 +54,19 @@ Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
       log.add(request);
       Object? data = <Object?>[];
       if (request.path.endsWith('/messages')) {
+        final status = historyStatus?.call() ?? 200;
+        if (status != 200) {
+          handler.reject(DioException(
+            requestOptions: request,
+            type: status == 0
+                ? DioExceptionType.connectionError
+                : DioExceptionType.badResponse,
+            response: status == 0
+                ? null
+                : Response(requestOptions: request, statusCode: status),
+          ));
+          return;
+        }
         var selected = messages.toList();
         final query = request.queryParameters;
         int id(Object? ref) => int.parse('$ref'.split('@').first);
@@ -167,6 +181,55 @@ Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
 }
 
 void main() {
+  test(
+      'cached encrypted history distinguishes local key failures from offline retries',
+      () async {
+    var historyStatus = 200;
+    final (controller, _, _) =
+        await fixture(historyStatus: () => historyStatus);
+    final channel =
+        controller.state.dms.single.copyWith(encryptionMode: 'e2ee');
+    final saved = KaedeMessage(
+        ref: messageRef(1),
+        channelRef: channelRef,
+        authorRef: messageRef(900),
+        content: 'Saved message',
+        createdAt: DateTime.utc(2026));
+    await controller.database.putSnapshot(controller.api.tokens!.accountKey,
+        'messages:${channelRef.wire}', saved.ref.wire, saved.toJson());
+    controller.state =
+        controller.state.copyWith(dms: [channel], selectedChannel: channelRef);
+    final debugLog = DebugLog.instance;
+    await debugLog.setEnabled(true);
+    addTearDown(() => debugLog.setEnabled(false));
+
+    // The fixture has a valid session and a successful history response, but no vault key.
+    await controller.loadMessages();
+    expect(controller.state.offline, isFalse);
+    expect(
+        controller.state.error, contains('Could not open encrypted messages'));
+    expect(controller.state.messages.single.content, saved.content);
+    expect(
+        debugLog.text, contains('encryptedHistoryFailed step=open_encryption'));
+    expect(debugLog.text, isNot(contains(saved.content)));
+
+    historyStatus = 0;
+    await controller.loadMessages();
+    expect(controller.state.offline, isTrue);
+    historyStatus = 200;
+    await controller.loadMessages();
+    expect(controller.state.offline, isFalse);
+    expect(
+        controller.state.error, contains('Could not open encrypted messages'));
+    expect(controller.state.messages.single.content, saved.content);
+
+    historyStatus = 403;
+    controller.state = controller.state.copyWith(messageStore: {});
+    await controller.loadMessages();
+    expect(controller.state.messages, isEmpty);
+    expect(controller.state.offline, isFalse);
+  });
+
   testWidgets('Inbox opens from the account bar immediately left of Settings',
       (tester) async {
     final fonts = FontLoader('Inter');

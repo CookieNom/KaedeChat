@@ -937,6 +937,8 @@ async fn run_room(
     let mut priority_push_to_talk_active = false;
     let mut restart_requested = false;
     let local_identity = room.local_participant().identity().to_string();
+    let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
+    let allow_h264 = Arc::new(AtomicBool::new(!encrypted));
     let mut capture_tick = time::interval(AUDIO_FRAME_TIME);
     let mut playback_tick = time::interval(AUDIO_FRAME_TIME);
     let mut screen_share: Option<PublishedVideo> = None;
@@ -1057,8 +1059,11 @@ async fn run_room(
                     limits.apply(None);
                 }
                 let now = Instant::now();
-                let participant_count = room.remote_participants().len();
-                let identities: Vec<String> = room.remote_participants().keys().map(ToString::to_string).collect();
+                let identities: BTreeSet<String> = room.remote_participants().keys().map(ToString::to_string).collect();
+                let participant_count = identities.len();
+                video_peers.retain(|identity, _| identities.contains(identity));
+                let h264_ready = room_allows_h264(encrypted, identities.iter().map(|id| video_peers.get(id)));
+                allow_h264.store(h264_ready, Ordering::Release);
                 first_seen.retain(|identity, _| identities.contains(identity));
                 for identity in &identities { first_seen.entry(identity.clone()).or_insert(now); }
                 // Hold premium changes during hint grace, while restoring VP8 for unknown viewers.
@@ -1069,20 +1074,33 @@ async fn run_room(
                         && let Some(task) = video.adjustment.take()
                         && let Ok(Some((track, codec))) = task.await
                     {
+                        if video.track.rtc_track().id() != track.rtc_track().id() {
+                            video.h264_withdrawn = false;
+                        }
                         video.track = track;
                         video.compatible_codec = codec;
                     }
-                    if video.adjustment.is_some() || (pending && video.compatible_codec != VideoCodec::VP9) { continue; }
+                    if !h264_ready && video.compatible_codec == VideoCodec::H264 && video.track.is_enabled() {
+                        video.track.disable();
+                        video.h264_withdrawn = true;
+                    } else if h264_ready && video.h264_withdrawn {
+                        if !video.track.is_muted() { video.track.enable(); }
+                        video.h264_withdrawn = false;
+                    }
+                    let needs_compatible_track = video.compatible_codec == VideoCodec::VP9
+                        || (!h264_ready && video.compatible_codec == VideoCodec::H264);
+                    if video.adjustment.is_some() || (pending && !needs_compatible_track) { continue; }
                     let demand_key = format!("{}/{}", local_identity, if video.source == TrackSource::Screenshare { "screen_share" } else { "camera" });
-                    let blocked = ["av1", "h265", "h264", "vp9"].into_iter().filter(|codec| {
+                    let mut blocked: BTreeSet<String> = ["av1", "h265", "h264", "vp9"].into_iter().filter(|codec| {
                         variant_backoff.lock().map_or(true, |backoff| backoff.blocked(&variant_key(video, codec), now))
                     }).map(str::to_owned).collect();
+                    if !h264_ready { blocked.insert("h264".to_owned()); }
                     let context = VariantContext { level: budget.level, upload_constrained: upload.constrained, cpu_spare: encode_headroom.has_spare(now), cpu_recovered: budget.healthy >= video_policy::RECOVER_SAMPLES, blocked };
                     let desired = preferred_native_variant(&video_peers, participant_count, &demand_key, &context);
                     let compatible = if pending { VideoCodec::VP8 } else { preferred_native_compatible(&video_peers, participant_count, &demand_key, video.compatible_codec, &context) };
                     // A late legacy viewer needs the compatible publication restored first.
                     if video.compatible_codec != compatible || !room.local_participant().track_publications().contains_key(&video.track.sid()) {
-                        video.adjustment = Some(change_video_codec(&room, video, compatible, true, variant_backoff.clone()));
+                        video.adjustment = Some(change_video_codec(&room, video, compatible, true, variant_backoff.clone(), allow_h264.clone()));
                         continue;
                     }
                     let current = video.variants.lock().ok().and_then(|tracks| tracks.first().map(LocalVideoTrack::name));
@@ -1107,7 +1125,7 @@ async fn run_room(
                         continue;
                     }
                     if current.is_none() && let Some(codec) = desired {
-                        video.adjustment = Some(change_video_codec(&room, video, codec, false, variant_backoff.clone()));
+                        video.adjustment = Some(change_video_codec(&room, video, codec, false, variant_backoff.clone(), allow_h264.clone()));
                     }
                 }
                 if performance_job.as_ref().is_none_or(JoinHandle::is_finished) {
@@ -1257,13 +1275,17 @@ async fn run_room(
 
                 // Hints go out when they change, on membership events, and otherwise
                 // every ANNOUNCE_EVERY instead of on every two-second sample.
-                let payload = native_video_capabilities(&receiver_health);
+                let payload = native_video_capabilities(&receiver_health, encrypted, h264_ready);
                 if force_announce || payload != last_announced || last_announce_at.is_none_or(|at| now.duration_since(at) >= video_policy::ANNOUNCE_EVERY) {
                     force_announce = false;
                     last_announced.clone_from(&payload);
                     last_announce_at = Some(now);
                     let local = room.local_participant();
+                    let allow_h264 = allow_h264.clone();
                     tokio::spawn(async move {
+                        if encrypted && h264_ready && !allow_h264.load(Ordering::Acquire) {
+                            return;
+                        }
                         let _ = local.publish_data(DataPacket {
                             payload, topic: Some("kaede.video.v1".to_owned()), reliable: true,
                             ..DataPacket::default()
@@ -1292,7 +1314,7 @@ async fn run_room(
                     let _ = stop_published_video(&room, camera.take()).await;
                     send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), None, message);
                 }
-                reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
+                reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible, &video_peers);
             }
             _ = playback_tick.tick() => {
                 let frame = playback_mixer.drain((VOICE_SAMPLE_RATE / 100) as usize);
@@ -1325,7 +1347,7 @@ async fn run_room(
                     Some(VoiceCommand::SetVideoVisible(visible)) => {
                         if video_visible == visible { continue; }
                         video_visible = visible;
-                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
+                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible, &video_peers);
                     }
                     Some(VoiceCommand::SetMuted(muted)) => {
                         explicitly_muted = muted;
@@ -1568,11 +1590,12 @@ async fn run_room(
                         let Some(participant) = participant else { continue };
                         let identity = participant.identity().to_string();
                         if topic.as_deref() == Some("kaede.video.v1") {
-                            if payload.len() <= 8192
-                                && let Ok(peer) = serde_json::from_slice::<VideoPeer>(&payload)
-                                && peer.valid()
-                            {
-                                video_peers.insert(identity, peer);
+                            if room.remote_participants().get(&participant.identity()).is_some_and(|current| current.sid() == participant.sid())
+                                && let Some(compatible) = update_peer_video_hint(&mut video_peers, identity, &payload)
+                                && encrypted {
+                                if !compatible { allow_h264.store(false, Ordering::Release); }
+                                capability_tick.reset_immediately();
+                                video_tick.reset_immediately();
                             }
                             continue;
                         }
@@ -1650,7 +1673,14 @@ async fn run_room(
                     }
                     Some(RoomEvent::ParticipantConnected(participant)) => {
                         // A new viewer needs our hints before its publishers choose codecs.
-                        first_seen.insert(participant.identity().to_string(), Instant::now());
+                        let identity = participant.identity().to_string();
+                        video_peers.remove(&identity);
+                        first_seen.insert(identity, Instant::now());
+                        if encrypted {
+                            allow_h264.store(false, Ordering::Release);
+                            capability_tick.reset_immediately();
+                            video_tick.reset_immediately();
+                        }
                         force_announce = true;
                     }
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
@@ -1658,6 +1688,10 @@ async fn run_room(
                         playback_mixer.remove_participant(&identity);
                         video_peers.remove(&identity);
                         first_seen.remove(&identity);
+                        if encrypted {
+                            capability_tick.reset_immediately();
+                            video_tick.reset_immediately();
+                        }
                         for screen_share in [false, true] {
                             if let Some((_, reader)) = video_readers.remove(&(identity.clone(), screen_share)) {
                                 reader.abort();
@@ -1679,6 +1713,7 @@ async fn run_room(
                     Some(RoomEvent::Reconnecting) => {
                         video_degraded.store(false, Ordering::Release);
                         video_peers.clear();
+                        allow_h264.store(!encrypted, Ordering::Release);
                         // Everyone re-announces after reconnecting: grace, not VP8-only.
                         first_seen.clear();
                         force_announce = true;
@@ -1692,8 +1727,14 @@ async fn run_room(
                         let _ = status.send(VoiceStatus::Reconnecting);
                     }
                     Some(RoomEvent::Reconnected) => {
+                        if encrypted {
+                            video_peers.clear();
+                            allow_h264.store(false, Ordering::Release);
+                            force_announce = true;
+                        }
                         subscriptions.clear();
-                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible);
+                        capability_tick.reset_immediately();
+                        reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible, &video_peers);
                         let _ = status.send(VoiceStatus::Connected {
                             room: room.name(),
                             can_speak,
@@ -2290,6 +2331,7 @@ fn change_video_codec(
     codec: VideoCodec,
     compatible: bool,
     backoff: Arc<Mutex<VideoBackoff>>,
+    allow_h264: Arc<AtomicBool>,
 ) -> JoinHandle<Option<(LocalVideoTrack, VideoCodec)>> {
     let participant = room.local_participant();
     let stop = video.stop.clone();
@@ -2313,6 +2355,9 @@ fn change_video_codec(
     let profile_bitrate = video.encoding.max_bitrate;
     let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
     tokio::spawn(async move {
+        // A viewer can arrive while probing or publishing a track.
+        let allowed =
+            |codec: VideoCodec| codec != VideoCodec::H264 || allow_h264.load(Ordering::Acquire);
         let fail = || {
             if let Ok(mut backoff) = backoff.lock() {
                 backoff.fail(&key, Instant::now());
@@ -2330,6 +2375,9 @@ fn change_video_codec(
         let mut supported = codec == VideoCodec::VP8;
         if !supported {
             for candidate in modes {
+                if !allowed(codec) || (!compatible && !allowed(original_codec)) {
+                    return None;
+                }
                 if native_video_probe::codec_supported(
                     codec.as_str(),
                     dimensions.width,
@@ -2354,6 +2402,9 @@ fn change_video_codec(
             fail();
             return None;
         }
+        if !allowed(codec) || (!compatible && !allowed(original_codec)) {
+            return None;
+        }
         // H.264 only replaces VP8 when it brings proven acceleration.
         if codec == VideoCodec::H264
             && native_video_probe::hardware_codec(
@@ -2368,7 +2419,7 @@ fn change_video_codec(
             fail();
             return None;
         }
-        if stop.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) || !allowed(codec) {
             return None;
         }
         let source_name = if track_source == TrackSource::Screenshare {
@@ -2417,17 +2468,18 @@ fn change_video_codec(
                 }
             }
         }
-        if publish_budgeted_video(
-            &participant,
-            &track,
-            options,
-            &send_budget,
-            &budget_source,
-            profile_bitrate,
-        )
-        .await
-        .is_ok()
-        {
+        let published = allowed(codec)
+            && publish_budgeted_video(
+                &participant,
+                &track,
+                options,
+                &send_budget,
+                &budget_source,
+                profile_bitrate,
+            )
+            .await
+            .is_ok();
+        if published && allowed(codec) {
             if compatible {
                 Some((track, codec))
             } else {
@@ -2437,15 +2489,25 @@ fn change_video_codec(
                 None
             }
         } else {
-            fail();
-            if compatible {
+            if published
+                && unpublish_budgeted_video(&participant, &track, &send_budget)
+                    .await
+                    .is_err()
+            {
+                // The incompatible H.264 track still exists; let the next tick retry its replacement.
+                return Some((track, codec));
+            }
+            if allowed(codec) {
+                fail();
+            }
+            if compatible && allowed(original_codec) {
                 // Restore the previous compatible publication after a failed replacement.
                 let restore = restore_options.unwrap_or_else(|| TrackPublishOptions {
                     source: track_source,
                     video_codec: original_codec,
                     ..video_publish_options(encrypted, encoding)
                 });
-                let _ = publish_budgeted_video(
+                let restored = publish_budgeted_video(
                     &participant,
                     &original,
                     restore,
@@ -2453,7 +2515,11 @@ fn change_video_codec(
                     &budget_source,
                     profile_bitrate,
                 )
-                .await;
+                .await
+                .is_ok();
+                if restored && !allowed(original_codec) {
+                    let _ = unpublish_budgeted_video(&participant, &original, &send_budget).await;
+                }
                 Some((original, original_codec))
             } else {
                 None
@@ -2468,11 +2534,26 @@ struct VideoPeer {
     codecs: Vec<String>,
     #[serde(default, rename = "extendedCodecs")]
     extended_codecs: Vec<String>,
+    #[serde(default, rename = "encryptedH264")]
+    encrypted_h264: serde_json::Value,
+    #[serde(skip, default = "Instant::now")]
+    received_at: Instant,
     #[serde(default)]
     demand: BTreeMap<String, String>,
+    #[serde(default)]
+    health: BTreeMap<String, String>,
 }
 
 impl VideoPeer {
+    fn supports_encrypted_h264(&self) -> bool {
+        self.encrypted_h264.as_u64() == Some(2)
+    }
+
+    fn current_encrypted_h264(&self, now: Instant) -> bool {
+        self.supports_encrypted_h264()
+            && now.saturating_duration_since(self.received_at) <= Duration::from_secs(25)
+    }
+
     fn supports(&self, codec: &str) -> bool {
         self.codecs.iter().any(|entry| entry == codec)
             || (EXTENDED_VIDEO_CODECS.contains(&codec)
@@ -2481,7 +2562,7 @@ impl VideoPeer {
 
     fn valid(&self) -> bool {
         self.v == 1
-            && !self.codecs.is_empty()
+            && (!self.codecs.is_empty() || self.supports_encrypted_h264())
             && self.codecs.len() <= 3
             && self
                 .codecs
@@ -2493,7 +2574,48 @@ impl VideoPeer {
             && self.demand.iter().all(|(key, codec)| {
                 key.len() <= 256 && LEGACY_VIDEO_CODECS.contains(&codec.as_str())
             })
+            && self
+                .health
+                .values()
+                .all(|value| matches!(value.as_str(), "healthy" | "download" | "decode"))
     }
+}
+
+// Only a current valid announcement authorizes the H.264 framing change.
+fn update_peer_video_hint(
+    peers: &mut BTreeMap<String, VideoPeer>,
+    identity: String,
+    payload: &[u8],
+) -> Option<bool> {
+    let previous = peers
+        .get(&identity)
+        .is_some_and(|peer| peer.current_encrypted_h264(Instant::now()));
+    let compatible = if payload.len() <= 8192
+        && let Ok(peer) = serde_json::from_slice::<VideoPeer>(payload)
+        && peer.valid()
+    {
+        let compatible = peer.supports_encrypted_h264();
+        peers.insert(identity, peer);
+        compatible
+    } else {
+        if let Some(peer) = peers.get_mut(&identity) {
+            peer.encrypted_h264 = serde_json::Value::Null;
+        }
+        false
+    };
+    (previous != compatible).then_some(compatible)
+}
+
+// The marker describes framing support even when H.264 is withheld from the codec list.
+fn room_allows_h264<'a>(
+    encrypted: bool,
+    current_viewers: impl Iterator<Item = Option<&'a VideoPeer>>,
+) -> bool {
+    let mut viewers = current_viewers.peekable();
+    let now = Instant::now();
+    !encrypted
+        || (viewers.peek().is_some()
+            && viewers.all(|peer| peer.is_some_and(|peer| peer.current_encrypted_h264(now))))
 }
 
 #[derive(Default)]
@@ -2582,12 +2704,17 @@ impl ReceiverHealth {
     }
 }
 
-fn native_video_capabilities(receiver_health: &Mutex<BTreeMap<String, ReceiverHealth>>) -> Vec<u8> {
+fn native_video_capabilities(
+    receiver_health: &Mutex<BTreeMap<String, ReceiverHealth>>,
+    encrypted: bool,
+    allow_h264: bool,
+) -> Vec<u8> {
     let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
         .pc_factory()
         .get_rtp_receiver_capabilities(livekit::webrtc::MediaType::Video);
     let codecs: Vec<_> = LEGACY_VIDEO_CODECS
         .into_iter()
+        .filter(|codec| *codec != "h264" || allow_h264)
         .filter(|codec| {
             capabilities.codecs.iter().any(|entry| {
                 entry
@@ -2624,9 +2751,26 @@ fn native_video_capabilities(receiver_health: &Mutex<BTreeMap<String, ReceiverHe
             }
         }
     }
-    serde_json::json!({"v": 1, "codecs": codecs, "extendedCodecs": extended_codecs, "demand": demand, "health": health})
-        .to_string()
-        .into_bytes()
+    encode_video_hints(&codecs, &extended_codecs, &demand, &health, encrypted)
+}
+
+fn encode_video_hints(
+    codecs: &[&str],
+    extended: &[&str],
+    demand: &BTreeMap<String, &str>,
+    health: &BTreeMap<String, &str>,
+    encrypted: bool,
+) -> Vec<u8> {
+    let mut hints = serde_json::json!({"v": 1, "encryptedH264": 2, "codecs": codecs, "extendedCodecs": extended, "demand": demand, "health": health});
+    let encoded = hints.to_string().into_bytes();
+    if encrypted
+        && (encoded.len() > 8192 || demand.len() > 64 || demand.keys().any(|key| key.len() > 256))
+    {
+        hints["demand"] = serde_json::json!({});
+        hints["health"] = serde_json::json!({});
+        return hints.to_string().into_bytes();
+    }
+    encoded
 }
 
 // Select one publication per logical source. Audio is explicitly retained when
@@ -2636,12 +2780,19 @@ fn reconcile_video_subscriptions(
     subscribed: &mut BTreeSet<String>,
     receiver_health: &Mutex<BTreeMap<String, ReceiverHealth>>,
     video_visible: bool,
+    peers: &BTreeMap<String, VideoPeer>,
 ) {
+    let encrypted = room.e2ee_manager().encryption_type() != EncryptionType::None;
     let capabilities = livekit::rtc_engine::lk_runtime::LkRuntime::instance()
         .pc_factory()
         .get_rtp_receiver_capabilities(livekit::webrtc::MediaType::Video);
     let mut next = BTreeSet::new();
-    for participant in room.remote_participants().values() {
+    let participants = room.remote_participants();
+    let allow_h264 = room_allows_h264(
+        encrypted,
+        participants.keys().map(|id| peers.get(&id.to_string())),
+    );
+    for participant in participants.values() {
         let publications = participant.track_publications();
         let mut selected = BTreeMap::new();
         for publication in publications.values() {
@@ -2652,7 +2803,26 @@ fn reconcile_video_subscriptions(
             if !video_visible {
                 continue;
             }
-            let mime = publication.mime_type().to_ascii_lowercase();
+            let mut mime = publication.mime_type().to_ascii_lowercase();
+            let name = publication.name();
+            if !allow_h264 {
+                let named_codec = name
+                    .strip_prefix("kaede.video.v1:")
+                    .and_then(|name| name.split_once(':'))
+                    .filter(|(source, codec)| {
+                        matches!(*source, "camera" | "screen_share")
+                            && (LEGACY_VIDEO_CODECS.contains(codec)
+                                || EXTENDED_VIDEO_CODECS.contains(codec))
+                    })
+                    .map(|(_, codec)| codec);
+                if mime == "video/h264" || named_codec == Some("h264") {
+                    continue;
+                }
+                if mime.is_empty() {
+                    let Some(codec) = named_codec else { continue };
+                    mime = format!("video/{codec}");
+                }
+            }
             if mime == "video/h265" && !native_video_probe::hardware_hevc_decode() {
                 continue;
             }
@@ -2694,8 +2864,7 @@ fn reconcile_video_subscriptions(
                     if decode_overload { 0 } else { 4 }
                 } else if mime == "video/vp9" {
                     3
-                } else if mime == "video/h264" && publication.name().starts_with("kaede.video.v1:")
-                {
+                } else if mime == "video/h264" && name.starts_with("kaede.video.v1:") {
                     2
                 } else {
                     1
@@ -2763,6 +2932,7 @@ struct PublishedVideo {
     capture_level: Arc<AtomicU32>,
     variants: Arc<Mutex<Vec<LocalVideoTrack>>>,
     compatible_codec: VideoCodec,
+    h264_withdrawn: bool,
     stop: Arc<AtomicBool>,
     capture_thread: Option<thread::JoinHandle<()>>,
 }
@@ -2770,7 +2940,7 @@ struct PublishedVideo {
 // The pinned native SDK reports codec MIME support and backend availability,
 // not hardware support for a codec at the requested dimensions/framerate.
 // Unknown premium acceleration must therefore use the interoperable single encode.
-// Encryption belongs to the Room and never participates in codec selection.
+// Every room starts with VP8 while the adaptive controller gathers codec and framing support.
 fn video_publish_options(_encrypted: bool, encoding: VideoEncoding) -> TrackPublishOptions {
     TrackPublishOptions {
         video_encoding: Some(encoding),
@@ -2944,6 +3114,7 @@ async fn publish_screen_share(
         capture_level,
         variants: Arc::new(Mutex::new(Vec::new())),
         compatible_codec: VideoCodec::VP8,
+        h264_withdrawn: false,
         track,
         stop,
         capture_thread: Some(capture_thread),
@@ -3281,6 +3452,7 @@ async fn publish_camera(
         capture_level,
         variants: Arc::new(Mutex::new(Vec::new())),
         compatible_codec: VideoCodec::VP8,
+        h264_withdrawn: false,
         track,
         stop,
         capture_thread: Some(capture_thread),
@@ -3970,7 +4142,10 @@ mod tests {
             v: 1,
             codecs: codecs.iter().map(|codec| (*codec).to_owned()).collect(),
             extended_codecs: extended.iter().map(|codec| (*codec).to_owned()).collect(),
+            encrypted_h264: serde_json::Value::Null,
+            received_at: std::time::Instant::now(),
             demand: std::collections::BTreeMap::new(),
+            health: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4268,6 +4443,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("invalid fixture: {error}"));
         assert!(legacy.valid());
         assert!(!legacy.supports("h265"));
+        assert!(!legacy.supports_encrypted_h264());
         let extended: super::VideoPeer = serde_json::from_str(r#"{"v":1,"codecs":["vp8","h264","av1"],"extendedCodecs":["h265","vp9","future"],"futureField":true}"#).unwrap_or_else(|error| panic!("invalid fixture: {error}"));
         assert!(extended.valid());
         assert!(extended.supports("h265"));
@@ -4275,6 +4451,79 @@ mod tests {
         assert!(!wrong_field.valid());
         let too_many = video_peer(&["vp8"], &["h265"; 9]);
         assert!(!too_many.valid());
+    }
+
+    #[test]
+    fn encrypted_h264_requires_a_marker_from_every_current_viewer() -> Result<(), serde_json::Error>
+    {
+        use std::collections::BTreeMap;
+        assert!(!super::room_allows_h264(true, std::iter::empty()));
+        let mut peer = video_peer(&["vp8", "h264"], &[]);
+        peer.encrypted_h264 = serde_json::json!("2");
+        assert!(super::room_allows_h264(false, [Some(&peer)].into_iter()));
+        assert!(!super::room_allows_h264(true, [Some(&peer)].into_iter()));
+        // A new viewer can announce the marker before either side advertises H.264.
+        let hint = super::encode_video_hints(&[], &[], &BTreeMap::new(), &BTreeMap::new(), true);
+        let updated: super::VideoPeer = serde_json::from_slice(&hint)?;
+        assert!(
+            updated
+                .current_encrypted_h264(updated.received_at + std::time::Duration::from_secs(24))
+        );
+        assert!(
+            !updated
+                .current_encrypted_h264(updated.received_at + std::time::Duration::from_secs(26))
+        );
+        assert!(updated.valid() && updated.supports_encrypted_h264() && !updated.supports("h264"));
+        assert!(!super::room_allows_h264(
+            true,
+            [Some(&updated), Some(&peer)].into_iter()
+        ));
+        assert!(super::room_allows_h264(true, [Some(&updated)].into_iter()));
+        assert!(!super::room_allows_h264(
+            true,
+            [Some(&updated), None].into_iter()
+        ));
+        let mut peers = BTreeMap::new();
+        let oversized = vec![b' '; 8193];
+        for invalid in [b"malformed".as_slice(), oversized.as_slice()] {
+            assert_eq!(
+                super::update_peer_video_hint(&mut peers, "viewer".into(), &hint),
+                Some(true)
+            );
+            assert_eq!(
+                super::update_peer_video_hint(&mut peers, "viewer".into(), invalid),
+                Some(false)
+            );
+            assert!(!super::room_allows_h264(
+                true,
+                [peers.get("viewer")].into_iter()
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crowded_encrypted_rooms_still_announce_the_compatible_codecs()
+    -> Result<(), serde_json::Error> {
+        use std::collections::BTreeMap;
+        let demand = BTreeMap::from([("x".repeat(257), "vp8")]);
+        let health = BTreeMap::from([("x".repeat(8192), "download")]);
+        let crowded = (0..65)
+            .map(|i| (format!("viewer{i}/camera"), "vp8"))
+            .collect();
+        for (demand, health) in [
+            (demand, BTreeMap::new()),
+            (crowded, BTreeMap::new()),
+            (BTreeMap::new(), health),
+        ] {
+            let hint = super::encode_video_hints(&["vp8"], &["vp9"], &demand, &health, true);
+            assert!(hint.len() <= 8192);
+            let peer: super::VideoPeer = serde_json::from_slice(&hint)?;
+            assert!(peer.valid() && peer.supports_encrypted_h264());
+            assert!(peer.supports("vp8") && peer.supports("vp9") && !peer.supports("h264"));
+            assert!(peer.demand.is_empty());
+        }
+        Ok(())
     }
 
     #[test]

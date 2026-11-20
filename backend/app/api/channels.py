@@ -2511,6 +2511,8 @@ async def slowmode_retry_after_ms(redis: Redis, key: str) -> int:
 async def require_dm_send(session: AsyncSession, access: ChannelAccess, actor: User) -> None:
     if access.guild is not None:
         return
+    if getattr(access.channel, "dm_successor_id", None) is not None:
+        raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
     if any(user.account_type == "system" for user in access.participants):
         raise HTTPException(status_code=403, detail={"code": "SYSTEM_CONVERSATION_READ_ONLY"})
     conversation = await session.get(
@@ -4553,6 +4555,24 @@ async def lock_message_create_access(
             guild=None,
             participants=access.participants,
         )
+
+    if (
+        conversation is not None
+        and access.channel.origin_domain == settings.domain
+        and access.channel.encryption_mode == "e2ee"
+    ):
+        # Serialize new sends against closing this segment. Both ordinary
+        # sends and the INSERT guard use NO KEY UPDATE before advancing last_message_id.
+        current = await session.get(
+            Channel,
+            (access.channel.id, access.channel.origin_domain),
+            with_for_update={"key_share": True},
+            populate_existing=True,
+        )
+        if current is None or current.unavailable:
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+        if current.dm_successor_id is not None:
+            raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
 
     # Message publication and PhotoDNA terminalization share this canonical
     # fence. Acquire it before finalize_attachment takes FOR UPDATE so a

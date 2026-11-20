@@ -90,6 +90,7 @@ fn challenge_url(challenge: &TurnstileChallenge) -> Result<Url, PlatformError> {
         .join("/api/v1/auth/native-challenge")
         .map_err(|error| PlatformError::Other(error.to_string()))?;
     url.query_pairs_mut()
+        .append_pair("native_registration", "2")
         .append_pair("action", &challenge.action)
         .append_pair("request_id", &challenge.request_id);
     Ok(url)
@@ -228,6 +229,7 @@ mod tests {
                 .collect::<std::collections::BTreeMap<_, _>>(),
             std::collections::BTreeMap::from([
                 ("action".to_owned(), challenge.action),
+                ("native_registration".to_owned(), "2".to_owned()),
                 ("request_id".to_owned(), challenge.request_id)
             ])
         );

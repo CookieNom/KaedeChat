@@ -53,6 +53,7 @@ enum NotificationKind {
   guildMessage,
   call,
   moderation,
+  relationship,
   activity,
 }
 
@@ -179,6 +180,12 @@ final class PushNotificationEnvelope {
   final DateTime? sentAt;
   final String? eventRef;
 
+  bool isVisibleConversation({required bool active, EntityRef? channel}) =>
+      active &&
+      channel != null &&
+      kind != NotificationKind.call &&
+      destination?.channel == channel;
+
   Uri? get senderAvatarUri => senderRef == null
       ? null
       : publicAssetUri(
@@ -195,12 +202,14 @@ final class PushNotificationEnvelope {
         'guild_message' => NotificationKind.guildMessage,
         'call' => NotificationKind.call,
         'moderation' => NotificationKind.moderation,
-        'relationship' => NotificationKind.activity,
+        'relationship' => NotificationKind.relationship,
         _ => null,
       };
       final title = json['title'];
       final body = json['body'];
-      final destination = PushDestination.parse(json);
+      final destination = kind == NotificationKind.relationship
+          ? const PushDestination.friends()
+          : PushDestination.parse(json);
       final rawSenderName = json['sender_name'];
       final rawSenderRef = json['sender_ref'];
       final senderName =
@@ -270,25 +279,29 @@ int stableNotificationId(String value) {
 }
 
 final class PushDestination {
-  const PushDestination({required this.channel, this.message});
+  const PushDestination({required EntityRef this.channel, this.message});
+  const PushDestination.friends()
+      : channel = null,
+        message = null;
 
-  final EntityRef channel;
+  final EntityRef? channel;
   final EntityRef? message;
 
-  String encode() => jsonEncode(<String, String>{
-        'channel_ref': channel.wire,
+  Map<String, String> get _parameters => {
+        if (channel case final ref?)
+          'channel_ref': ref.wire
+        else
+          'screen': 'friends',
         if (message != null) 'message_ref': message!.wire,
-      });
+      };
+
+  String encode() => jsonEncode(_parameters);
 
   Uri toUri() => Uri(
-        scheme: 'kaede',
-        host: 'app',
-        path: '/open',
-        queryParameters: <String, String>{
-          'channel_ref': channel.wire,
-          if (message != null) 'message_ref': message!.wire,
-        },
-      );
+      scheme: 'kaede',
+      host: 'app',
+      path: '/open',
+      queryParameters: _parameters);
 
   static PushDestination? fromUri(Uri uri) {
     if (uri.scheme != 'kaede' || uri.host != 'app' || uri.path != '/open') {
@@ -301,6 +314,11 @@ final class PushDestination {
     if (value == null) return null;
     try {
       if (value case final Map<Object?, Object?> map) {
+        if (map['screen'] == 'friends' &&
+            map['channel_ref'] == null &&
+            map['message_ref'] == null) {
+          return const PushDestination.friends();
+        }
         final channel = '${map['channel_ref'] ?? ''}';
         if (channel.isEmpty) return null;
         final message = '${map['message_ref'] ?? ''}';
@@ -567,6 +585,8 @@ final class PushService {
   EntityRef? _visibleChannel;
 
   Stream<PushDestination> get destinations => _destinations.stream;
+  final _relationshipUpdates = StreamController<void>.broadcast();
+  Stream<void> get relationshipUpdates => _relationshipUpdates.stream;
   Stream<String?> get health => _healthEvents.stream;
   Stream<SystemCallEvent> get callEvents => _callEvents.stream;
   bool get remotePushAvailable => _firebaseReady;
@@ -677,6 +697,9 @@ final class PushService {
     AndroidNotificationChannel('kaede_activity', 'Background activity',
         description: 'Generic fallback alerts when secure sync is unavailable',
         importance: Importance.high),
+    AndroidNotificationChannel('kaede_relationships', 'Friend requests',
+        description: 'Incoming and accepted friend requests',
+        importance: Importance.high),
   ];
 
   static const _darwinCategories = <DarwinNotificationCategory>[
@@ -686,6 +709,7 @@ final class PushService {
     DarwinNotificationCategory('kaede_calls'),
     DarwinNotificationCategory('kaede_moderation'),
     DarwinNotificationCategory('kaede_activity'),
+    DarwinNotificationCategory('kaede_relationships'),
   ];
 
   static Future<PushService> create() async {
@@ -796,9 +820,12 @@ final class PushService {
       final notification = redemption.notification;
       if (notification != null) {
         _reportHealth(null);
-        if (_appActive &&
-            notification.kind != NotificationKind.call &&
-            notification.destination?.channel == _visibleChannel) {
+        if (notification.kind == NotificationKind.relationship &&
+            !_relationshipUpdates.isClosed) {
+          _relationshipUpdates.add(null);
+        }
+        if (notification.isVisibleConversation(
+            active: _appActive, channel: _visibleChannel)) {
           return;
         }
         await _displayRedeemedNotification(_local, notification);
@@ -1006,6 +1033,7 @@ final class PushService {
     await _tokenRefreshBridge?.close();
     await _destinations.close();
     await _healthEvents.close();
+    await _relationshipUpdates.close();
     await _callEvents.close();
   }
 }
@@ -1017,15 +1045,15 @@ Future<void> _displayRedeemedNotification(
   final id = stableNotificationId(
     notification.eventRef ??
         notification.destination?.message?.wire ??
-        notification.destination?.channel.wire ??
+        notification.destination?.channel?.wire ??
         '${notification.kind}:${notification.title}:${notification.sentAt}',
   );
   final callPayload = notification.kind == NotificationKind.call &&
           notification.eventRef != null &&
-          notification.destination != null
+          notification.destination?.channel != null
       ? PushCallPayload.parse(<String, String>{
           'call_ref': notification.eventRef!,
-          'channel_ref': notification.destination!.channel.wire,
+          'channel_ref': notification.destination!.channel!.wire,
           'caller_name': notification.title,
         })
       : null;
@@ -1209,12 +1237,14 @@ Future<void> _showLocalNotification(
     NotificationKind.call => PushService._androidChannels[3],
     NotificationKind.moderation => PushService._androidChannels[4],
     NotificationKind.activity => PushService._androidChannels[5],
+    NotificationKind.relationship => PushService._androidChannels[6],
   };
   final interruptionLevel = switch (kind) {
     NotificationKind.call => InterruptionLevel.timeSensitive,
     NotificationKind.directMessage ||
     NotificationKind.mention ||
     NotificationKind.moderation ||
+    NotificationKind.relationship ||
     NotificationKind.activity =>
       InterruptionLevel.active,
     NotificationKind.guildMessage => InterruptionLevel.passive,

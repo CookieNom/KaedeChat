@@ -11,6 +11,12 @@ def notification_previews_enabled(preferences: Mapping[str, object]) -> bool:
     return bool(preferences.get("show_notification_previews", True))
 
 
+def relationship_alerts_enabled(preferences: Mapping[str, object]) -> bool:
+    return preferences.get("relationships", True) is not False and (
+        preferences.get("presence_preference") != "dnd"
+    )
+
+
 def push_body(message: Message, has_attachment: bool) -> str:
     if message.e2ee is not None:
         return "Sent an encrypted message"

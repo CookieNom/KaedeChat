@@ -825,6 +825,8 @@ jobs:
           mkdir -p release-assets
           ipa="$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print -quit)"
           test -n "$ipa"
+          unzip -p "$ipa" Payload/Runner.app/Runner > "$RUNNER_TEMP/Runner.ipa-executable"
+          bash tool/check_ios_e2ee_exports.sh "$RUNNER_TEMP/Runner.ipa-executable"
           destination="release-assets/Kaede-Chat-${GITHUB_REF_NAME}-ios.ipa"
           cp "$ipa" "$destination"
           (cd release-assets && shasum -a 256 "$(basename "$destination")" > "$(basename "$destination").sha256")

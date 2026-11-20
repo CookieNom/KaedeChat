@@ -49,6 +49,8 @@ export const VIDEO_POLICY = {
   hintGraceMs: 8_000,
   /** Re-announce unchanged hints at this interval; changes are sent immediately. */
   announceMs: 4_000,
+  /** A silent participant must confirm its encrypted H.264 framing again. */
+  hintExpiryMs: 25_000,
   /** Retry delays after an premium attempt failed; afterwards the session stops retrying. */
   backoffMs: [60_000, 300_000, 900_000],
   bitrateStep: 0.72,
@@ -69,6 +71,7 @@ export interface VideoMessage {
   v: 1;
   codecs: string[];
   extendedCodecs?: string[];
+  encryptedH264?: 2;
   demand: Record<string, string>;
   health: Record<string, Health>;
 }
@@ -111,6 +114,7 @@ export function parseVideoMessage(bytes: Uint8Array): VideoMessage | undefined {
       value.extendedCodecs = value.extendedCodecs.filter((codec: Codec) =>
         EXTENDED_CODECS.includes(codec)
       );
+    if (value.encryptedH264 !== 2) delete value.encryptedH264;
     return value;
   } catch {
     return;
@@ -127,6 +131,21 @@ export function managedCodec(
     CODECS.includes(parts[2] as Codec)
     ? (parts[2] as Codec)
     : undefined;
+}
+
+function publicationMime(publication: Pick<TrackPublication, 'mimeType'>): string | undefined {
+  return publication?.mimeType?.split(';', 1)[0].trim().toLowerCase();
+}
+
+function safeWithoutH264(publication: TrackPublication): boolean {
+  const named = managedCodec(publication);
+  const mime = publicationMime(publication);
+  return (
+    named !== 'h264' &&
+    (mime
+      ? CODECS.some((codec) => codec !== 'h264' && mime === `video/${codec}`)
+      : named !== undefined)
+  );
 }
 
 /** Name for the initial SDK publication so the controller can adopt it as the VP8 fallback. */
@@ -276,13 +295,22 @@ export class AdaptiveVideoController {
     this.selectSubscriptions();
     void this.announce(true);
   };
-  private connected = (participant: RemoteParticipant) => {
-    this.seen.set(participant.identity, Date.now());
+  private audienceChanged = () => {
     this.event();
     void this.enqueue(async () => {
       if (this.stopped) return;
       for (const state of this.sources.values()) await this.reconcile(state);
     }).catch(() => {});
+  };
+  private connected = (participant: RemoteParticipant) => {
+    this.peers.delete(participant.identity);
+    this.seen.set(participant.identity, Date.now());
+    this.audienceChanged();
+  };
+  private reconnected = () => {
+    this.peers.clear();
+    this.seen.clear();
+    this.audienceChanged();
   };
   private disconnected = (participant: RemoteParticipant) => {
     this.peers.delete(participant.identity);
@@ -301,7 +329,7 @@ export class AdaptiveVideoController {
       for (const key of this.previous.keys())
         if (key.startsWith(`${publication.trackSid}/`)) this.previous.delete(key);
     }
-    this.event();
+    this.audienceChanged();
   };
   private data = (
     bytes: Uint8Array,
@@ -309,17 +337,55 @@ export class AdaptiveVideoController {
     _kind?: unknown,
     topic?: string
   ) => {
-    if (topic !== VIDEO_TOPIC || !participant) return;
+    if (
+      topic !== VIDEO_TOPIC ||
+      !participant ||
+      this.room.remoteParticipants.get(participant.identity) !== participant
+    )
+      return;
     const message = parseVideoMessage(bytes);
-    if (!message) return;
-    this.peers.set(participant.identity, message);
-    this.selectSubscriptions();
+    const allowed = this.h264Allowed();
+    if (message) {
+      this.peers.set(participant.identity, message);
+      this.seen.set(participant.identity, Date.now());
+    } else if (this.encrypted) this.peers.delete(participant.identity);
+    else return;
+    if (allowed !== this.h264Allowed()) this.audienceChanged();
+    else this.selectSubscriptions();
   };
   constructor(
     private room: Room,
     private notice: (degraded: boolean) => void = () => {},
-    private onSourceEnded: (source: Track.Source) => void | Promise<void> = () => {}
+    private onSourceEnded: (source: Track.Source) => void | Promise<void> = () => {},
+    private readonly encrypted = room.isE2EEEnabled === true
   ) {}
+
+  private h264Allowed(): boolean {
+    if (!this.encrypted) return true;
+    const participants = this.room.remoteParticipants;
+    const oldest = Date.now() - VIDEO_POLICY.hintExpiryMs;
+    return (
+      participants.size > 0 &&
+      [...participants.keys()].every(
+        (identity) =>
+          this.peers.get(identity)?.encryptedH264 === 2 &&
+          (this.seen.get(identity) ?? -Infinity) >= oldest
+      )
+    );
+  }
+
+  private advertisedCodecs(): string[] {
+    return this.h264Allowed()
+      ? this.message.codecs
+      : this.message.codecs.filter((codec) => codec !== 'h264');
+  }
+
+  private requestFallback(key: string): void {
+    const codecs = this.advertisedCodecs();
+    if (codecs.includes('vp8')) this.message.demand[key] = 'vp8';
+    else if (codecs.includes('h264')) this.message.demand[key] = 'h264';
+    else delete this.message.demand[key];
+  }
 
   private reportNotice(): void {
     const degraded =
@@ -340,7 +406,7 @@ export class AdaptiveVideoController {
     this.room.on(RoomEvent.TrackSubscribed, this.event);
     this.room.on(RoomEvent.ParticipantConnected, this.connected);
     this.room.on(RoomEvent.ParticipantDisconnected, this.disconnected);
-    this.room.on(RoomEvent.Reconnected, this.event);
+    this.room.on(RoomEvent.Reconnected, this.reconnected);
     const capabilities = globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs ?? [];
     this.message.codecs = LEGACY_CODECS.filter((codec) =>
       capabilities.some((c) => c.mimeType.toLowerCase() === `video/${codec}`)
@@ -356,6 +422,8 @@ export class AdaptiveVideoController {
     void this.probePremiumDecode().catch(() => {});
     this.event();
     this.timer = setInterval(() => {
+      // Keep peers informed even if sampling or replacing a track is slow.
+      void this.announce();
       void this.tick();
     }, VIDEO_POLICY.sampleMs);
   }
@@ -419,7 +487,7 @@ export class AdaptiveVideoController {
   }
 
   private receiveCodecs(): string[] {
-    return [...this.message.codecs, ...(this.message.extendedCodecs ?? [])];
+    return [...this.advertisedCodecs(), ...(this.message.extendedCodecs ?? [])];
   }
 
   private playbackBlocked(key: string, now: number): boolean {
@@ -609,9 +677,15 @@ export class AdaptiveVideoController {
           !(track instanceof LocalVideoTrack) ||
           track !== initial.capture ||
           (track.codec && track.codec !== 'vp8') ||
+          (!this.h264Allowed() && publicationMime(publication) === 'video/h264') ||
           track.mediaStreamTrack.readyState === 'ended'
-        )
+        ) {
+          if (track && track !== initial?.capture) {
+            await this.room.localParticipant.unpublishTrack(track, true).catch(() => {});
+            track.stop();
+          }
           throw new Error('Initial video publication did not use the reserved compatible encoder');
+        }
         if (track.sender) this.baselines.set(track.sender, this.trackBaselines.get(track)!);
         initial.publishedAt.set('vp8', Date.now());
         return publication;
@@ -710,10 +784,18 @@ export class AdaptiveVideoController {
     const viewers = this.viewers();
     const current = [...state.variants.keys()].find((codec) => !isPremiumCodec(codec));
     // Do not flip the fallback for a viewer whose hints have not arrived yet.
-    if (current && current !== 'vp9' && viewers.some((viewer) => viewer.pending)) return current;
+    const h264 = this.h264Allowed();
+    if (
+      current &&
+      current !== 'vp9' &&
+      (current !== 'h264' || h264) &&
+      viewers.some((viewer) => viewer.pending)
+    )
+      return current;
     const key = `${this.room.localParticipant.identity}/${state.options.source}`;
     const supported = (codec: string) =>
       state.encode.includes(codec) &&
+      (codec !== 'h264' || h264) &&
       viewers.every(
         (viewer) =>
           viewer.codecs.includes(codec) &&
@@ -742,6 +824,7 @@ export class AdaptiveVideoController {
   private async publishVariant(state: SourceState, codec: Codec): Promise<void> {
     if (state.variants.has(codec)) return;
     const captureEnded = () => state.capture.mediaStreamTrack.readyState === 'ended';
+    const codecAllowed = () => codec !== 'h264' || this.h264Allowed();
     if (this.stopped || captureEnded()) throw new Error('Capture ended');
     const media = state.capture.mediaStreamTrack.clone();
     media.contentHint = state.capture.mediaStreamTrack.contentHint;
@@ -773,10 +856,14 @@ export class AdaptiveVideoController {
         ...capped[index]
       }));
       this.trackBaselines.set(track, initial);
-      await this.room.localParticipant.publishTrack(track, options);
+      if (!codecAllowed()) throw new Error('The call no longer supports encrypted H.264');
+      const publication = await this.room.localParticipant.publishTrack(track, options);
       if (track.sender) this.baselines.set(track.sender, initial);
       published = true;
-      if (track.codec && track.codec !== codec)
+      if (
+        (track.codec && track.codec !== codec) ||
+        (codec !== 'h264' && publicationMime(publication) === 'video/h264')
+      )
         throw new Error('Server substituted an unproven video codec');
       if (this.stopped || captureEnded()) {
         throw new Error('Capture ended');
@@ -784,6 +871,8 @@ export class AdaptiveVideoController {
       state.variants.set(codec, track);
       state.publishedAt.set(codec, Date.now());
       await this.applyBudget(state, codec, track, state.variants.size, true);
+      // A legacy participant can join while publication is in flight. Keep the old fallback.
+      if (!codecAllowed()) throw new Error('The call no longer supports encrypted H.264');
     } catch (error) {
       if (published) await this.room.localParticipant.unpublishTrack(track, true).catch(() => {});
       state.variants.delete(codec);
@@ -808,6 +897,16 @@ export class AdaptiveVideoController {
   }
 
   private async reconcile(state: SourceState): Promise<void> {
+    try {
+      await this.reconcileVariants(state);
+    } finally {
+      // A failed VP8 replacement must not leave incompatible encrypted H.264 streaming.
+      if (state.variants.has('h264') && !this.h264Allowed())
+        await this.retireVariant(state, 'h264');
+    }
+  }
+
+  private async reconcileVariants(state: SourceState): Promise<void> {
     const now = Date.now();
     const fallback = this.fallback(state);
     const key = `${this.room.localParticipant.identity}/${state.options.source}`;
@@ -894,6 +993,7 @@ export class AdaptiveVideoController {
   private selectSubscriptions(): void {
     this.selected.clear();
     const activeSources = new Set<string>();
+    const h264Allowed = this.h264Allowed();
     for (const participant of this.room.remoteParticipants.values()) {
       const groups = new Map<
         Track.Source,
@@ -905,7 +1005,7 @@ export class AdaptiveVideoController {
           continue;
         }
         if (publication.kind !== Track.Kind.Video) continue;
-        if (!this.videoVisible) {
+        if (!this.videoVisible || (!h264Allowed && !safeWithoutH264(publication))) {
           publication.setSubscribed(false);
           continue;
         }
@@ -940,7 +1040,7 @@ export class AdaptiveVideoController {
           !this.capabilityDemand.has(key) &&
           !this.premiumPlayable(managedCodec(premium)!, premium.dimensions)
         ) {
-          this.message.demand[key] = this.message.codecs.includes('vp8') ? 'vp8' : 'h264';
+          this.requestFallback(key);
           this.capabilityDemand.add(key);
         }
         if (premium && !this.receiverEvidence.has(key)) premium.setVideoFPS(30);
@@ -955,7 +1055,7 @@ export class AdaptiveVideoController {
           compatible.find((p) => managedCodec(p) === codec)
         ).find(Boolean);
         if (!this.message.demand[key] && !availablePremium && this.playbackBlocked(key, Date.now()))
-          this.message.demand[key] = this.message.codecs.includes('vp8') ? 'vp8' : 'h264';
+          this.requestFallback(key);
         const wanted = this.message.demand[key];
         const selected =
           compatible.find((p) => managedCodec(p) === wanted) ??
@@ -994,7 +1094,35 @@ export class AdaptiveVideoController {
   /** Sends hints when they change, on membership events, and otherwise every `announceMs`. */
   private async announce(force = false): Promise<void> {
     if (this.stopped) return;
-    const payload = JSON.stringify(this.message);
+    const hint: VideoMessage = {
+      ...this.message,
+      codecs: this.advertisedCodecs(),
+      encryptedH264: 2
+    };
+    // Old publishers select H.264 from the legacy codecs list. Preserve that signal
+    // even when a large room's health or demand map exceeds their parser limits.
+    const encoder = new TextEncoder();
+    const demand = Object.entries(hint.demand);
+    hint.demand = Object.fromEntries(
+      demand
+        .filter(
+          ([key, value]) =>
+            encoder.encode(key).length <= 256 && (value !== 'h264' || hint.codecs.includes('h264'))
+        )
+        .slice(0, 64)
+    );
+    let payload = JSON.stringify(hint);
+    let bytes = encoder.encode(payload);
+    if (bytes.length > 8192) {
+      hint.health = {};
+      payload = JSON.stringify(hint);
+      bytes = encoder.encode(payload);
+      if (bytes.length > 8192) {
+        hint.demand = {};
+        payload = JSON.stringify(hint);
+        bytes = encoder.encode(payload);
+      }
+    }
     const now = Date.now();
     if (
       !force &&
@@ -1005,7 +1133,7 @@ export class AdaptiveVideoController {
     this.lastAnnounced = payload;
     this.lastAnnounceAt = now;
     try {
-      await this.room.localParticipant.publishData(new TextEncoder().encode(payload), {
+      await this.room.localParticipant.publishData(bytes, {
         reliable: true,
         topic: VIDEO_TOPIC
       });
@@ -1226,7 +1354,7 @@ export class AdaptiveVideoController {
             // requesting another encode. A software HEVC decoder is never retained.
             const lowerLayer = publication.simulcasted && !evidence.lowerLayer && !lostHevcHardware;
             if (isPremiumCodec(codec) && !lowerLayer) {
-              this.message.demand[key] = this.message.codecs.includes('vp8') ? 'vp8' : 'h264';
+              this.requestFallback(key);
               this.backoff.fail(`${key}/${codec}`, now);
             }
             evidence.lowerLayer = true;
@@ -1461,7 +1589,7 @@ export class AdaptiveVideoController {
     this.room.off(RoomEvent.TrackSubscribed, this.event);
     this.room.off(RoomEvent.ParticipantConnected, this.connected);
     this.room.off(RoomEvent.ParticipantDisconnected, this.disconnected);
-    this.room.off(RoomEvent.Reconnected, this.event);
+    this.room.off(RoomEvent.Reconnected, this.reconnected);
     for (const source of [...this.sources.keys(), ...this.initialSources.keys()])
       await this.stopSource(source);
     this.peers.clear();

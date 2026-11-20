@@ -456,6 +456,25 @@ def audit_payload(entry: AuditLogEntry) -> dict[str, object]:
     }
 
 
+async def relationship_snapshot(session: AsyncSession, user: User) -> list[dict[str, object]]:
+    rows = (
+        await session.execute(
+            select(Relationship, User)
+            .join(
+                User,
+                (User.id == Relationship.target_id)
+                & (User.origin_domain == Relationship.target_domain),
+            )
+            .where(
+                Relationship.user_id == user.id,
+                Relationship.user_domain == user.origin_domain,
+            )
+            .order_by(Relationship.type, func.lower(User.username))
+        )
+    ).all()
+    return [relationship_payload(item, target) for item, target in rows]
+
+
 def relationship_payload(relationship: Relationship, target: User) -> dict[str, object]:
     return {
         "type": relationship.type,
@@ -476,7 +495,21 @@ def dm_channel_payload(
         **channel_payload(channel),
         "recipients": [user_payload(user) for user in recipients],
     }
+    for field in ("dm_previous_id", "dm_successor_id"):
+        if value := getattr(channel, field, None):
+            payload[field] = str(value)
     if conversation is not None:
+        proposal = getattr(conversation, "plaintext_continuation_request", None) or {}
+        if (
+            proposal.get("status") in {"pending", "approved"}
+            and proposal["context"]["state_version"]
+            == str(getattr(conversation, "state_version", None))
+            and proposal["context"]["generation"] == str(channel.encryption_policy_generation)
+            and datetime.fromisoformat(proposal["expires_at"]) > datetime.now(UTC)
+        ):
+            payload["continuation_requester"] = proposal.get(
+                "requester_name", proposal["requester"]
+            )
         owner_id = getattr(conversation, "owner_id", None)
         conversation_type = str(getattr(conversation, "type", "direct"))
         payload.update(

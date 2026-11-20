@@ -33,6 +33,10 @@ enum DebugEvent {
   gatewayReconnecting,
   gatewayOffline,
   encryptionCipher,
+  encryptionSetupRetry,
+  encryptionSetupFailed,
+  encryptedHistoryFailed,
+  voiceJoinFailed,
 }
 
 /// Device-local, opt-in diagnostics. Never accepts messages, URLs or payloads.

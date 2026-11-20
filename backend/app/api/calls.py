@@ -611,6 +611,15 @@ async def start_call(
     access = await load_channel_access(session, settings, auth.user, channel_ref)
     if access.guild is not None or access.channel.type != 1:
         raise HTTPException(status_code=400, detail={"code": "CALL_REQUIRES_DM"})
+    if access.channel.origin_domain == settings.domain:
+        current_channel = await session.get(
+            Channel,
+            (access.channel.id, access.channel.origin_domain),
+            with_for_update={"read": True},
+            populate_existing=True,
+        )
+        if current_channel is None or getattr(current_channel, "dm_successor_id", None) is not None:
+            raise HTTPException(status_code=409, detail={"code": "DM_CONTINUED"})
     participants = await local_dm_participants(
         session, access.channel.id, access.channel.origin_domain
     )

@@ -58,6 +58,7 @@ from app.push.presentation import (
     notification_previews_enabled,
     push_body,
     push_presentation,
+    relationship_alerts_enabled,
 )
 from app.push.relay import (
     RELAY_GRANT_TTL_SECONDS,
@@ -800,7 +801,9 @@ async def redeem_push_notification(
             (auth.user.id, auth.user.origin_domain),
         )
         preferences = preferences_row.notification_settings if preferences_row is not None else {}
-        if preferences.get("presence_preference") == "dnd":
+        if preferences.get("presence_preference") == "dnd" or (
+            event.kind == "relationship" and not relationship_alerts_enabled(preferences)
+        ):
             return await _suppress_push(redis, body.event_token, encoded)
         if not event.title or not event.body or not event.event_ref:
             return await _suppress_push(redis, body.event_token, encoded)
@@ -808,7 +811,15 @@ async def redeem_push_notification(
         return PushNotificationResponse(
             kind=cast(Literal["call", "moderation", "relationship"], event.kind),
             title=event.title[:160],
-            body=event.body[:500],
+            body=(
+                (
+                    "フレンドを開いて更新を確認してください。"
+                    if str(getattr(preferences_row, "locale", "")).lower().startswith("ja")
+                    else "Open Friends to view this update."
+                )
+                if event.kind == "relationship" and not notification_previews_enabled(preferences)
+                else event.body[:500]
+            ),
             channel_ref=event.channel_ref,
             event_ref=event.event_ref,
             sent_at=event.sent_at or datetime.now(UTC).isoformat(),

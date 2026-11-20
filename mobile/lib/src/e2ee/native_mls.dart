@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
+import 'package:kaede_mobile/src/l10n/language_controller.dart';
 
 final class _NativeBuffer extends Struct {
   external Pointer<Uint8> data;
@@ -36,7 +38,17 @@ DynamicLibrary _openLibrary() {
   if (override != null && override.isNotEmpty) {
     return DynamicLibrary.open(override);
   }
-  if (Platform.isIOS || Platform.isMacOS) return DynamicLibrary.process();
+  if (Platform.isIOS || Platform.isMacOS) {
+    final library = DynamicLibrary.process();
+    if (!const [
+      'kaede_e2ee_invoke',
+      'kaede_e2ee_close',
+      'kaede_e2ee_buffer_free'
+    ].every(library.providesSymbol)) {
+      throw UserInputException(L10n.current.encryption_component_unavailable);
+    }
+    return library;
+  }
   if (Platform.isAndroid) return DynamicLibrary.open('libkaede_e2ee_ffi.so');
   final names = Platform.isWindows
       ? const <String>['kaede_e2ee_ffi.dll']

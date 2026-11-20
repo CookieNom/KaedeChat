@@ -94,7 +94,13 @@
     type PendingMessageSend,
     withoutSubmittedUploads
   } from '$lib/chat/outbox';
-  import { compareEntityRefs, entityKey, entityRef, matchesEntityRef } from '$lib/chat/refs';
+  import {
+    compareEntityRefs,
+    entityKey,
+    entityRef,
+    matchesEntityRef,
+    parseCanonicalEntityRef
+  } from '$lib/chat/refs';
   import { interactionResponses } from '$lib/chat/interaction-responses.svelte';
   import { buildTimeline, withInteractionResponses } from '$lib/chat/timeline';
   import { loadMessageHistory } from '$lib/chat/message-history';
@@ -130,6 +136,9 @@
   import GifPicker from '$lib/components/GifPicker.svelte';
   import { markConversationsRead } from '$lib/notifications/read-actions';
   import MessageRow from '$lib/components/MessageRow.svelte';
+  import DMContinuationConsent from '$lib/components/DMContinuationConsent.svelte';
+  import DMPreviousHistory from '$lib/components/DMPreviousHistory.svelte';
+  import DeviceMessageSearch from '$lib/components/DeviceMessageSearch.svelte';
   import MessageSearch from '$lib/components/MessageSearch.svelte';
   import NewMessageDialog from '$lib/components/NewMessageDialog.svelte';
   import PinnedMessagesPanel from '$lib/components/PinnedMessagesPanel.svelte';
@@ -212,6 +221,7 @@
   let error = $state('');
   let busy = $state(false);
   let channelReady = $state(false);
+  let historyLoadError = $state('');
   let typing = $state('');
   const typingState = createTypingState((label) => {
     typing = label;
@@ -220,6 +230,7 @@
   let pinnedMessages = $state<Message[]>([]);
   let pinsOpen = $state(false);
   let pinsLoading = $state(false);
+  let pinsRequest = 0;
   let pinsError = $state('');
   let hasEarlier = $state(true);
   let authorityHistoryComplete = $state(false);
@@ -423,13 +434,12 @@
     }
   }
 
+  const visibleMessages = $derived(
+    messages.filter((message) => !entities.isMessageBlocked(message))
+  );
   const timeline = $derived(
     withInteractionResponses(
-      buildTimeline(
-        messages.filter((message) => !entities.isMessageBlocked(message)),
-        visitReadRef,
-        visitReadInclusive
-      ),
+      buildTimeline(visibleMessages, visitReadRef, visitReadInclusive),
       Object.values(interactionResponses.byResponse),
       channel ? entityRef(channel) : ''
     )
@@ -524,18 +534,10 @@
       .finally(() => (emojiCatalogLoading = false));
   });
 
-  const setMessages = (items: Message[]) => {
-    const target = channel;
-    if (!target) {
-      entities.messages.upsertMany(items);
-      return;
-    }
-    entities.messages.replaceWhere(
-      items,
-      (message) =>
-        message.channel_id === target.id && message.channel_domain === target.origin_domain
+  const setMessages = (items: Message[]) =>
+    entities.messages.replaceWhere(items, (message) =>
+      isCurrentChannel(message.channel_id, message.channel_domain)
     );
-  };
   const setReadStates = (items: ReadStateStatus[]) => entities.readStates.replace(items);
   const setGuilds = (items: Guild[]) => entities.ingestGuilds(items);
   const setDirectMessages = (items: Channel[]) => entities.ingestDirectMessages(items);
@@ -631,6 +633,13 @@
   }
 
   function applyDispatch(dispatch: Dispatch, decryptedUpdate = false) {
+    if (dispatch.t === 'CHANNEL_CREATE') {
+      const next = dispatch.d as Channel;
+      if (next.dm_previous_id && isCurrentChannel(next.dm_previous_id, next.origin_domain)) {
+        window.location.replace(directMessagePath(next));
+        return;
+      }
+    }
     if (dispatch.t === 'MESSAGE_CREATE') {
       const message = dispatch.d as Message;
       if (isCurrentChannel(message.channel_id, message.channel_domain)) {
@@ -696,7 +705,7 @@
         pinnedMessages = reconcileChannelPinsUpdate(pinnedMessages, update).filter(
           (message) => message.pinned !== false
         );
-        if (pinsOpen) void loadPins();
+        if (pinsOpen || pinsLoading) void loadPins();
       }
     } else if (dispatch.t === 'MESSAGE_UPDATE') {
       const update = dispatch.d as Message;
@@ -1036,6 +1045,7 @@
       const buffered: Dispatch[] = [];
       dispatchBuffer = buffered;
       setMessages([]);
+      previousMessageRefs = [];
       resetUploads();
       editingMessage = null;
       composerDraftBeforeEdit = null;
@@ -1055,6 +1065,9 @@
       error = '';
       busy = false;
       channelReady = false;
+      historyLoadError = '';
+      e2eeClient = null;
+      e2eeSafetyNumber = '';
       jumpingHistory = false;
       visitReadRef = null;
       historyTarget = null;
@@ -1080,18 +1093,19 @@
 
   function recoverCurrentRoute() {
     const targetRef = dmId;
-    const targetAround = historyTarget;
+    const targetAround = channelReady ? historyTarget : aroundMessage;
     const routeGeneration = loadGeneration;
     const snapshot = ++snapshotGeneration;
-    const buffered: Dispatch[] = [];
+    const buffered: Dispatch[] = dispatchBuffer ?? [];
     const startingCallRevision = callRevision;
+    historyLoadError = '';
     dispatchBuffer = buffered;
     void load(
       targetRef,
       routeGeneration,
       snapshot,
       buffered,
-      true,
+      channelReady,
       startingCallRevision,
       targetAround
     );
@@ -1106,6 +1120,9 @@
     startingCallRevision: number,
     targetAround: string | null
   ) {
+    const isCurrent = () =>
+      routeGeneration === loadGeneration && snapshot === snapshotGeneration && targetRef === dmId;
+    let historyAuthorized = false;
     try {
       const [
         loadedDms,
@@ -1116,7 +1133,6 @@
         loadedCall,
         loadedEmojis,
         loadedStickers,
-        loadedPins,
         loadedCommands
       ] = await Promise.all([
         api<Channel[]>('/users/@me/channels'),
@@ -1132,18 +1148,12 @@
         ),
         api<CustomEmoji[]>('/users/@me/emojis'),
         api<GuildSticker[]>('/users/@me/stickers'),
-        loadPinnedMessages(targetRef).catch(() => []),
         api<unknown>(`/channels/${encodeURIComponent(targetRef)}/application-commands`)
           .then(parseApplicationCommands)
           .catch(() => [])
       ]);
       const loadedMessages = loadedHistory.messages;
-      if (
-        routeGeneration !== loadGeneration ||
-        snapshot !== snapshotGeneration ||
-        targetRef !== dmId
-      )
-        return;
+      if (!isCurrent()) return;
       setDirectMessages(loadedDms);
       setGuilds(loadedGuilds);
       if (!preserveMessages) {
@@ -1179,12 +1189,7 @@
         if (!targetAround && state?.unread && visitReadRef) {
           targetAround = entityRef(visitReadRef);
           const history = await loadMessageHistory(targetRef, targetAround);
-          if (
-            routeGeneration !== loadGeneration ||
-            snapshot !== snapshotGeneration ||
-            targetRef !== dmId
-          )
-            return;
+          if (!isCurrent()) return;
           loadedMessages.splice(0, loadedMessages.length, ...history.messages);
           loadedHistory.hasLater = history.hasLater;
           historyTarget = targetAround;
@@ -1193,7 +1198,6 @@
       setReadStates(loadedReadStates);
       availableEmojis = loadedEmojis;
       availableStickers = loadedStickers;
-      pinnedMessages = loadedPins;
       applicationCommands = loadedCommands;
       entities.ingestCurrentUser(loadedCurrentUser);
       const preferredPresence = myPresencePreference();
@@ -1227,10 +1231,31 @@
       }
       const loadedChannel =
         loadedDms.find((item) => matchesEntityRef(targetRef, item, localDomain)) ?? null;
-      if (loadedChannel?.encryption_mode !== 'e2ee') {
+      if (!loadedChannel) {
+        let ref = targetRef;
+        const seen = new SvelteSet<string>();
+        while (!seen.has(ref)) {
+          seen.add(ref);
+          const result = await api<{ channel_ref?: string }>(
+            '/e2ee/channels/' + encodeURIComponent(ref) + '/plaintext-continuation/consent',
+            { method: 'POST', body: JSON.stringify({ action: 'status' }) }
+          );
+          if (!isCurrent() || !result.channel_ref) break;
+          ref = result.channel_ref;
+          const next = loadedDms.find((item) => matchesEntityRef(ref, item, localDomain));
+          if (next) {
+            window.location.replace(directMessagePath(next));
+            return;
+          }
+        }
+      }
+      if (!loadedChannel)
+        throw new Error($t('ui_this_conversation_is_no_longer_available_07f8c47b'));
+      historyAuthorized = true;
+      if (loadedChannel.encryption_mode !== 'e2ee') {
         void initializeE2EE(loadedCurrentUser)
           .then((client) => {
-            if (routeGeneration === loadGeneration) e2eeClient = client;
+            if (isCurrent()) e2eeClient = client;
           })
           .catch(() => {
             // Plaintext conversations remain usable when secure device storage is unavailable.
@@ -1266,15 +1291,21 @@
           window.location.assign(resolve('home'));
           return;
         }
+        // History from before encryption was enabled is already readable.
+        if (!preserveMessages) setMessages(orderedMessages.filter((message) => !message.e2ee));
         const client = await initializeE2EE(loadedCurrentUser);
-        if (routeGeneration !== loadGeneration || targetRef !== dmId) return;
+        if (!isCurrent()) return;
         e2eeClient = client;
         orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
-        const decryptedPins = await decryptConversationMessages(client, loadedChannel, loadedPins);
-        const safetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
-        if (routeGeneration !== loadGeneration || snapshot !== snapshotGeneration) return;
-        pinnedMessages = decryptedPins;
-        e2eeSafetyNumber = safetyNumber;
+        if (!isCurrent()) return;
+        if (isGroupDm(loadedChannel)) {
+          void client
+            .safetyNumber(loadedChannel)
+            .catch(() => '')
+            .then((number) => {
+              if (isCurrent()) e2eeSafetyNumber = number;
+            });
+        }
       } else {
         e2eeClient = null;
         e2eeSafetyNumber = '';
@@ -1293,18 +1324,15 @@
       if (dispatchBuffer === buffered) dispatchBuffer = null;
       channelReady = true;
       acknowledgeLatestIfVisible();
+      void loadPins();
     } catch (caught) {
-      if (
-        routeGeneration !== loadGeneration ||
-        snapshot !== snapshotGeneration ||
-        targetRef !== dmId
-      )
-        return;
+      if (!isCurrent()) return;
       for (const dispatch of buffered) applyDispatch(dispatch);
       forgetConfirmedSends();
       if (dispatchBuffer === buffered) dispatchBuffer = null;
-      if (!preserveMessages) {
-        error = userErrorMessage(
+      if (!channelReady) {
+        if (!historyAuthorized) setMessages([]);
+        historyLoadError = userErrorMessage(
           caught,
           $t('ui_could_not_open_this_conversation_try_again_426d4f45')
         );
@@ -1335,6 +1363,7 @@
       let prepended = older.reverse().slice(-available);
       if (channel?.encryption_mode === 'e2ee' && e2eeClient)
         prepended = await decryptConversationMessages(e2eeClient, channel, prepended);
+      if (generation !== loadGeneration || targetRef !== dmId) return;
       const byKey = Object.create(null) as Record<string, Message>;
       for (const message of prepended) byKey[entityKey(message)] = message;
       for (const message of messages) byKey[entityKey(message)] = message;
@@ -1375,6 +1404,7 @@
       let decryptedNewer = newer.reverse();
       if (channel?.encryption_mode === 'e2ee' && e2eeClient)
         decryptedNewer = await decryptConversationMessages(e2eeClient, channel, decryptedNewer);
+      if (generation !== loadGeneration || targetRef !== dmId) return;
       for (const message of decryptedNewer) byKey[entityKey(message)] = message;
       setMessages(Object.values(byKey).sort(compareMessages).slice(-1_000));
       hasLater = newer.length === 50;
@@ -1528,6 +1558,7 @@
     if (document.querySelector('dialog[open]')) return;
     if (manualUnreadPaused) return;
     if (
+      !channelReady ||
       document.visibilityState !== 'visible' ||
       !document.hasFocus() ||
       !timelineAtBottom ||
@@ -1545,10 +1576,10 @@
   }
 
   async function send(retry?: PendingMessageSend) {
-    if (systemConversation) return;
+    if (systemConversation || busy || !channelReady || !channel) return;
     const text = content.trim();
     if (editingMessage && !retry) {
-      if (!text || busy) return;
+      if (!text) return;
       const editing = editingMessage;
       const generation = loadGeneration;
       busy = true;
@@ -1596,7 +1627,6 @@
       }
       return;
     }
-    if (busy || !channelReady || !channel) return;
     if (selectedApplicationCommand && !retry) {
       const selected = selectedApplicationCommand;
       if (!commandOptionsComplete(selected, commandOptionValues)) return;
@@ -2120,6 +2150,29 @@
     }
   }
 
+  let previousMessageRefs = $state<string[]>([]);
+  const previousMessages = $derived(
+    previousMessageRefs.flatMap((ref) => {
+      const m = entities.messages.get(ref);
+      return m && !entities.isMessageBlocked(m) ? [m] : [];
+    })
+  );
+  let dismissedDraft = $state('');
+  const previousDraftKey = $derived.by(() => {
+    if (!channel?.dm_previous_id || !draftAccount) return '';
+    const canonical = draftKey(draftAccount, channel.dm_previous_id + '@' + channel.origin_domain);
+    if (readDraft(canonical) || channel.origin_domain !== currentUser?.origin_domain)
+      return canonical;
+    return draftKey(draftAccount, channel.dm_previous_id);
+  });
+  const previousDraft = $derived(
+    previousDraftKey && previousDraftKey !== dismissedDraft ? readDraft(previousDraftKey) : ''
+  );
+  let privacySettings: HTMLDialogElement;
+  let draftDialog: HTMLDialogElement;
+  let continuation: DMContinuationConsent | undefined = $state();
+  let continuationAvailable = $state(false);
+  let draftToMove = $state({ key: '', text: '' });
   let consentRefresh = $state(0);
   let consentStatus = $state<string | null>(null);
   const consentPending = $derived(consentStatus === 'pending' || consentStatus === 'approved');
@@ -2217,18 +2270,18 @@
 
   async function showEncryptionInfo() {
     if (!channel || channel.encryption_mode !== 'e2ee') return;
+    privacySettings.showModal();
+    const target = entityRef(channel);
     if (currentUser) {
       try {
         const client = e2eeClient ?? (await initializeE2EE(currentUser));
-        e2eeClient = client;
-        e2eeSafetyNumber = await client.safetyNumber(channel);
+        if (!channel || entityRef(channel) !== target) return;
+        const number = await client.safetyNumber(channel);
+        if (channel && entityRef(channel) === target) e2eeSafetyNumber = number;
       } catch {
         // The cached number or an explicit unavailable state remains useful.
       }
     }
-    window.alert(
-      `End-to-end encryption is on, but participant identities remain unverified until this safety number is compared with the other members using a separate trusted channel. A match detects first-contact key substitution by an actively malicious instance. Compare it again after membership or identity changes:\n\n${e2eeSafetyNumber || $t('ui_safety_number_unavailable_on_this_device_52363a69')}`
-    );
   }
 
   function composerPaste(event: ClipboardEvent) {
@@ -2317,27 +2370,28 @@
   }
 
   async function loadPins() {
-    if (!channel) return;
+    if (!channel || !channelReady) return;
     const target = channel;
     const client = e2eeClient;
     const generation = loadGeneration;
+    const request = ++pinsRequest;
     pinsLoading = true;
     pinsError = '';
     try {
       let loaded = await loadPinnedMessages(entityRef(target));
-      if (generation !== loadGeneration) return;
-      if (client && target.encryption_mode === 'e2ee')
+      if (generation !== loadGeneration || request !== pinsRequest) return;
+      if (pinsOpen && loaded.length && client && target.encryption_mode === 'e2ee')
         loaded = await decryptConversationMessages(client, target, loaded);
-      if (generation !== loadGeneration) return;
+      if (generation !== loadGeneration || request !== pinsRequest) return;
       pinnedMessages = loaded;
     } catch (caught) {
-      if (generation !== loadGeneration) return;
+      if (generation !== loadGeneration || request !== pinsRequest) return;
       pinsError = userErrorMessage(
         caught,
         $t('ui_could_not_load_pinned_messages_close_this_pan_7f16cd85')
       );
     } finally {
-      if (generation === loadGeneration) pinsLoading = false;
+      if (generation === loadGeneration && request === pinsRequest) pinsLoading = false;
     }
   }
 
@@ -2712,8 +2766,8 @@
   }
 
   async function jumpHistory(reference: string | null) {
+    if (!channelReady || !channel || jumpingHistory || loadingEarlier || loadingLater) return;
     manualUnreadPaused = false;
-    if (!channel || jumpingHistory || loadingEarlier || loadingLater) return;
     const targetChannel = channel;
     const generation = loadGeneration;
     jumpingHistory = true;
@@ -2883,7 +2937,12 @@
               <PresenceIndicator user={itemRecipient} />
             {/if}
           </span>
-          <strong>{dmTitle(item)}</strong>
+          <span class="dm-list-label"
+            ><strong>{dmTitle(item)}</strong>
+            {#if item.continuation_requester}<small
+                >{$t('dm_privacy_asked', { name: item.continuation_requester })}</small
+              >{/if}</span
+          >
           {#if unreadFor(item)?.unread}<small class="unread-badge"
               >{Math.max(1, unreadFor(item)?.mention_count ?? 0)}</small
             >{/if}
@@ -3023,19 +3082,37 @@
             ? $t('ui_hide_pinned_messages_9ee082b6')
             : $t('ui_show_pinned_messages_26b577c8')}
           aria-pressed={pinsOpen}
+          disabled={!channelReady || !channel}
           title={$t('ui_pinned_messages_4c0dbc8c')}
           onclick={togglePins}>📌</button
         >
-        <MessageSearch
-          customEmojis={pickerEmojis}
-          bind:open={messageSearchOpen}
-          scope="channel"
-          scopeRef={channel ? entityRef(channel) : dmId}
-          accountRef={currentUser ? entityRef(currentUser) : null}
-          {channel}
-          users={[...(currentUser ? [currentUser] : []), ...(channel?.recipients ?? [])]}
-          placement="header"
-        />
+        {#if channelReady && currentUser && channel?.encryption_mode === 'e2ee'}
+          {#key entityRef(channel) + entityRef(currentUser)}
+            <DeviceMessageSearch
+              messages={[...previousMessages, ...visibleMessages]}
+              onJump={jumpToMessageReference}
+            />
+          {/key}
+        {:else if channelReady && channel}
+          <MessageSearch
+            customEmojis={pickerEmojis}
+            localHistory={previousMessages}
+            bind:open={messageSearchOpen}
+            scope="channel"
+            scopeRef={channel ? entityRef(channel) : dmId}
+            accountRef={currentUser ? entityRef(currentUser) : null}
+            {channel}
+            users={[...(currentUser ? [currentUser] : []), ...(channel?.recipients ?? [])]}
+            placement="header"
+          />
+        {:else}
+          <button
+            type="button"
+            class="icon-button"
+            disabled
+            aria-label={$t('ui_search_messages_ddf0602b')}><Icon name="search" size={18} /></button
+          >
+        {/if}
         {#if !systemConversation && !activeCall}
           <button
             class="icon-button"
@@ -3057,6 +3134,37 @@
           >{$t('ui_retry_now_5148c3e2')}</button
         >
       </div>
+    {/if}
+    {#if channel?.dm_previous_id && channel.encryption_mode === 'plaintext' && previousDraft && !content && !editingMessage && channelReady}
+      <div class="history-boundary" role="status">
+        {$t('dm_privacy_new_messages')}
+        {#if previousDraft && !content && !editingMessage && channelReady}
+          <button
+            class="history-button"
+            type="button"
+            onclick={() => {
+              draftToMove = { key: previousDraftKey, text: previousDraft };
+              draftDialog.showModal();
+            }}>{$t('dm_privacy_draft_review')}</button
+          >
+        {/if}
+      </div>
+    {/if}
+    {#if channel?.encryption_state === 'active' && currentUser && !systemConversation && channel.origin_domain === currentUser.origin_domain && channel.recipients?.every((user) => user.origin_domain === currentUser.origin_domain && user.account_type !== 'bot')}
+      {#key entityRef(channel) + entityRef(currentUser)}
+        <DMContinuationConsent
+          bind:this={continuation}
+          bind:canRequest={continuationAvailable}
+          notice={channel.continuation_requester}
+          room={entityRef(channel)}
+          callActive={Boolean(activeCall)}
+          account={entityRef(currentUser)}
+          onContinue={(ref) => {
+            const next = parseCanonicalEntityRef(ref, channel?.origin_domain);
+            if (next) window.location.replace(directMessagePath(next));
+          }}
+        />
+      {/key}
     {/if}
     {#if !systemConversation && channel && currentUser && !groupConversation && channel.encryption_mode === 'plaintext'}
       {#key entityRef(channel)}
@@ -3115,8 +3223,18 @@
         aria-label={$t('ui_direct_messages_95e66705')}
       >
         {#if error}<p class="form-error message-error" role="alert">{error}</p>{/if}
+        {#if historyLoadError}
+          <div class="history-boundary" role="alert">
+            <span>{historyLoadError}</span>
+            <button class="secondary-button" onclick={recoverCurrentRoute}
+              >{$t('ui_retry_942087cc')}</button
+            >
+          </div>
+        {:else if !channelReady}
+          <p class="history-boundary" role="status">{$t('chat_loading_messages')}</p>
+        {/if}
         {#snippet emptyTimeline()}
-          {#if channelReady && channel}
+          {#if channelReady && channel && !channel.dm_previous_id && !hasEarlier && !hasLater}
             {#if channel.history_truncated}
               <aside class="history-boundary" role="status">
                 <strong>{$t('ui_no_recent_messages_are_cached_04baa15b')}</strong>
@@ -3139,15 +3257,16 @@
           <VirtualMessageList
             items={timeline}
             empty={emptyTimeline}
-            {hasEarlier}
+            hasEarlier={channelReady && hasEarlier}
             {loadingEarlier}
-            {hasLater}
+            hasLater={channelReady && hasLater}
             {loadingLater}
             onLoadEarlier={loadEarlier}
             onLoadLater={loadLater}
             targetKey={targetTimelineKey}
             onRead={acknowledgeVisible}
-            canJumpToRead={Boolean(visitReadRef) &&
+            canJumpToRead={channelReady &&
+              Boolean(visitReadRef) &&
               visitUnreadCount !== 0 &&
               currentReadState?.unread !== false}
             unreadCount={visitUnreadCount}
@@ -3161,6 +3280,13 @@
             onBottomChange={timelineBottomChanged}
             label={$t('ui_direct_messages_95e66705')}
           >
+            {#snippet header()}
+              {#if channel?.dm_previous_id && currentUser && !hasEarlier && channelReady}
+                {#key entityRef(channel) + entityRef(currentUser)}
+                  <DMPreviousHistory {channel} user={currentUser} bind:refs={previousMessageRefs} />
+                {/key}
+              {/if}
+            {/snippet}
             {#snippet historyStart()}
               {#if channel?.history_truncated && !authorityHistoryComplete}
                 <aside class="history-boundary" role="status">
@@ -3199,7 +3325,8 @@
                   presence={item.message.author
                     ? entities.presenceFor(item.message.author)
                     : 'offline'}
-                  canEdit={item.message.author_id === currentUser?.id &&
+                  canEdit={channelReady &&
+                    item.message.author_id === currentUser?.id &&
                     item.message.author_domain === currentUser?.origin_domain}
                   canDelete={item.message.author_id === currentUser?.id &&
                     item.message.author_domain === currentUser?.origin_domain}
@@ -3207,7 +3334,7 @@
                   onDelete={deleteMessage}
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
-                  onReply={systemConversation ? undefined : startReply}
+                  onReply={channelReady && !systemConversation ? startReply : undefined}
                   onForward={!systemConversation &&
                   forwardDestinations.length &&
                   forwardUnavailableReason(item.message) === null
@@ -3510,6 +3637,43 @@
   />
 {/if}
 
+<dialog class="action-dialog" bind:this={privacySettings}>
+  <form method="dialog">
+    <h2>{$t('dm_privacy_title')}</h2>
+    <p>{$t('ui_on_participant_identities_remain_unverified_u_04ef8c30')}</p>
+    <p>{$t('ui_compare_this_safety_number_with_members_throu_0247a03c')}</p>
+    <p>{e2eeSafetyNumber || $t('ui_safety_number_unavailable_on_this_device_52363a69')}</p>
+    <footer>
+      <button>{$t('ui_close_7d9eb7ac')}</button>
+      {#if continuation && continuationAvailable}<button onclick={() => continuation?.request()}
+          >{$t('dm_privacy_request')}</button
+        >{/if}
+    </footer>
+  </form>
+</dialog>
+<dialog class="action-dialog" bind:this={draftDialog}>
+  <form method="dialog">
+    <h2>{$t('dm_privacy_draft_question')}</h2>
+    <p>{$t('dm_privacy_draft_explain')}</p>
+    <footer>
+      <button>{$t('dm_privacy_cancel')}</button><button
+        onclick={() => {
+          if (
+            draftToMove.key !== previousDraftKey ||
+            draftToMove.text !== previousDraft ||
+            content ||
+            editingMessage ||
+            !channelReady
+          )
+            return;
+          content = previousDraft;
+          dismissedDraft = previousDraftKey;
+          writeDraft(previousDraftKey, '');
+        }}>{$t('dm_privacy_draft_move')}</button
+      >
+    </footer>
+  </form>
+</dialog>
 <dialog bind:this={groupDialog} class="action-dialog group-dm-dialog">
   <form method="dialog" onsubmit={(event) => event.preventDefault()}>
     <header>

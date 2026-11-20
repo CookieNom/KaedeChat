@@ -387,6 +387,47 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
         monkeypatch.setattr("app.api.guild_lifecycle.build_envelope", build_leave)
         monkeypatch.setattr("app.api.guild_lifecycle.queue_event", queue_leave)
 
+        domain = user.origin_domain
+        for group_id in (50, 51):
+            session.add(
+                m.Channel(
+                    id=group_id,
+                    origin_domain=domain,
+                    type=1,
+                    created_floor_id=group_id,
+                    dm_previous_id=50 if group_id == 51 else None,
+                    dm_successor_id=51 if group_id == 50 else None,
+                )
+            )
+            session.add(
+                m.DMConversation(
+                    id=group_id,
+                    origin_domain=domain,
+                    authority_domain=domain,
+                    pair_key=str(group_id) * 32,
+                    type="group",
+                    owner_id=7,
+                    owner_domain=domain,
+                )
+            )
+        await session.flush()
+        session.add_all(
+            m.DMParticipant(
+                conversation_id=group_id,
+                conversation_domain=domain,
+                user_id=member,
+                user_domain=domain,
+            )
+            for group_id in (50, 51)
+            for member in (7, 8)
+        )
+        monkeypatch.setattr(
+            "app.tasks._worker_snowflake", SimpleNamespace(mint=AsyncMock(return_value=52))
+        )
+        monkeypatch.setattr("app.api.dms.enforce_client_rate_limit", AsyncMock())
+        monkeypatch.setattr("app.api.dms.queue_group_state", AsyncMock(return_value=set()))
+        monkeypatch.setattr("app.api.dms.publish_dispatch", AsyncMock())
+
         user.deleted_at = cutoff
         user.disabled_at = cutoff
         user.password_hash = user.password_kdf_version = None
@@ -407,6 +448,9 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
         assert (
             await session.get(m.GuildMember, (40, "remote.test", 8, "alpha.localhost")) is not None
         )
+        assert (await session.get(m.DMConversation, (51, domain))).owner_id == 8
+        for group_id in (50, 51):
+            assert await session.get(m.DMParticipant, (group_id, domain, 7, domain)) is None
         build_leave.assert_awaited_once()
         assert build_leave.await_args.args[2] == "guild.leave.request"
         queue_leave.assert_awaited_once_with(session, settings, "remote.test", leave)

@@ -1594,6 +1594,8 @@ class MemberRole(Base):
 
 class Channel(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "channels"
+    dm_previous_id: Mapped[int | None] = mapped_column(BigInteger)
+    dm_successor_id: Mapped[int | None] = mapped_column(BigInteger)
     guild_id: Mapped[int | None] = mapped_column(BigInteger)
     guild_domain: Mapped[str | None] = mapped_column(String(DOMAIN_LENGTH))
     type: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1682,6 +1684,34 @@ class Channel(Base, FederatedIdMixin, TimestampMixin):
     )
     __table_args__ = (
         PrimaryKeyConstraint("id", "origin_domain"),
+        ForeignKeyConstraint(
+            ["dm_previous_id", "origin_domain"],
+            ["channels.id", "channels.origin_domain"],
+            name="fk_channels_dm_previous_id",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["dm_successor_id", "origin_domain"],
+            ["channels.id", "channels.origin_domain"],
+            name="fk_channels_dm_successor_id",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index(
+            "uq_channels_dm_previous_id",
+            "dm_previous_id",
+            "origin_domain",
+            unique=True,
+            postgresql_where=text("dm_previous_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_channels_dm_successor_id",
+            "dm_successor_id",
+            "origin_domain",
+            unique=True,
+            postgresql_where=text("dm_successor_id IS NOT NULL"),
+        ),
         UniqueConstraint(
             "id",
             "origin_domain",
@@ -3733,6 +3763,7 @@ class Pin(Base):
 class DMConversation(Base, FederatedIdMixin, TimestampMixin):
     __tablename__ = "dm_conversations"
     e2ee_consent: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    plaintext_continuation_request: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     pair_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     type: Mapped[str] = mapped_column(String(16), server_default="direct")
     authority_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), nullable=False)

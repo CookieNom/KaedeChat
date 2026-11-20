@@ -104,6 +104,7 @@ from app.api.e2ee import (
     claim_local_bot_room_key_packages,
     claim_local_room_key_packages,
     dm_encryption_consent,
+    dm_plaintext_continuation_consent,
     propose_room_encryption,
     propose_room_rekey,
     require_room_policy_authority,
@@ -8345,6 +8346,30 @@ async def federation_e2ee_dm_consent(
         session,
         redis,
         settings,
+    )
+
+
+@router.post("/_kaede/v1/e2ee/rooms/continuation-consent")
+async def federation_dm_plaintext_continuation_consent(
+    payload: E2EEDMConsentRequest,
+    principal: FederationPrincipal = Depends(authenticate_federation),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    await enforce_e2ee_room_proxy_limit(redis, principal)
+    # Every current participant votes, including non-owner group members.
+    auth = await federated_e2ee_actor(
+        payload, principal, session, redis, settings, require_mutation_admission=False
+    )
+    await require_remote_user_creation_allowed(session, auth.user)
+    return await dm_plaintext_continuation_consent(
+        EntityRef(f"{payload.channel_id}@{payload.channel_domain}"),
+        DMEncryptionConsentRequest(action=payload.action, request_id=payload.request_id),
+        auth,
+        session,
+        settings,
+        redis,
     )
 
 

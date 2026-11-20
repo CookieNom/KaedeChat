@@ -289,6 +289,7 @@ async def test_fresh_ready_hydrates_history_statuses(
     monkeypatch.setattr(gateway, "current_presence_preference", presence)
     monkeypatch.setattr(gateway, "guild_history_sync_statuses", statuses)
     monkeypatch.setattr(gateway, "contact_presence_snapshot", presences)
+    monkeypatch.setattr(gateway, "gateway_relationships", AsyncMock(return_value=[]))
     monkeypatch.setattr(gateway, "ready_payload", payload)
 
     result = await gateway.hydrated_ready_payload(
@@ -301,7 +302,7 @@ async def test_fresh_ready_hydrates_history_statuses(
         "fresh-session",
     )
 
-    assert result == {"ready": True}
+    assert result == {"ready": True, "relationships": []}
     assert captured["args"] == (
         user,
         [guild],
