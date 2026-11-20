@@ -28,10 +28,30 @@ import 'package:kaede_mobile/src/storage/local_database.dart';
 import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart' show Database;
+import 'package:sqflite/sqflite.dart'
+    show ConflictAlgorithm, Database, Transaction;
 
-/// No-op database; the settings flows never touch the local cache.
-final class _TestDatabase implements Database {
+/// UI fixtures exercise snapshot writes but do not restore persisted state.
+final class _TestDatabase implements Database, Transaction {
+  @override
+  Future<T> transaction<T>(Future<T> Function(Transaction) action,
+          {bool? exclusive}) =>
+      action(this);
+
+  @override
+  Future<int> delete(String table,
+      {String? where, List<Object?>? whereArgs}) async {
+    expect(table, 'snapshots');
+    return 0;
+  }
+
+  @override
+  Future<int> insert(String table, Map<String, Object?> values,
+      {String? nullColumnHack, ConflictAlgorithm? conflictAlgorithm}) async {
+    expect(table, 'snapshots');
+    return 1;
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       throw UnimplementedError('$invocation');

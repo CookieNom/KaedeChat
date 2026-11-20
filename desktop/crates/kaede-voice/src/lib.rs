@@ -2846,21 +2846,19 @@ fn reconcile_video_subscriptions(
                     "camera"
                 }
             );
+            let codec = mime.strip_prefix("video/").unwrap_or("");
+            let now = Instant::now();
             let decode_overload = receiver_health
                 .lock()
                 .ok()
                 .and_then(|states| {
-                    states.get(&key).map(|state| {
-                        state.needs_fallback(Instant::now())
-                            || state.premium_blocked(
-                                mime.strip_prefix("video/").unwrap_or(""),
-                                Instant::now(),
-                            )
-                    })
+                    states
+                        .get(&key)
+                        .map(|state| state.needs_fallback(now) || state.premium_blocked(codec, now))
                 })
                 .unwrap_or(false);
             let rank = (
-                if premium_codec(mime.strip_prefix("video/").unwrap_or("")) {
+                if premium_codec(codec) {
                     if decode_overload { 0 } else { 4 }
                 } else if mime == "video/vp9" {
                     3

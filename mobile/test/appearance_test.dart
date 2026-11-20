@@ -316,7 +316,10 @@ void main() {
       expect(find.text('Decline'), findsOneWidget);
       await tester.tap(find.text('Accept'));
       await tester.tap(find.text('Accept'));
-      await tester.pump();
+      // Dio dispatches through multiple asynchronous interceptors while the UI stays busy.
+      for (var frame = 0; frame < 10 && accepts == 0; frame++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
       expect(accepts, 1);
       expect(
           tester
@@ -326,6 +329,7 @@ void main() {
           isNull);
       accept.complete();
       await tester.pumpAndSettle();
+      expect(accepts, 1);
       expect(find.text('Remove friend'), findsOneWidget);
       expect(find.text('Accept'), findsNothing);
       expect(tester.takeException(), isNull);
