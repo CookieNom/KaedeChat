@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:kaede_mobile/src/api/media_urls.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_directory.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
@@ -909,6 +910,20 @@ final class _ProfileContactActions extends ConsumerStatefulWidget {
 final class _ProfileContactActionsState
     extends ConsumerState<_ProfileContactActions> {
   bool _busy = false;
+  late Future<void> _load;
+
+  @override
+  void initState() {
+    super.initState();
+    _load = ref.read(mobileControllerProvider.notifier).refreshRelationships();
+  }
+
+  void _retry() {
+    setState(() {
+      _load =
+          ref.read(mobileControllerProvider.notifier).refreshRelationships();
+    });
+  }
 
   Future<void> _run(
       String? expectedType, Future<void> Function() action) async {
@@ -1008,15 +1023,35 @@ final class _ProfileContactActionsState
         Text(l10n.profile_block_help,
             style: Theme.of(context).textTheme.bodySmall),
     ];
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (var i = 0; i < actions.length; i++) ...[
-          if (i > 0) const SizedBox(height: 8),
-          actions[i],
-        ],
-      ],
+    return FutureBuilder<void>(
+      future: _load,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return Text(l10n.profile_loading_relationship);
+        }
+        if (snapshot.hasError) {
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(userFacingError(snapshot.error!,
+                  summary: l10n.ui_could_not_load_value0_786258fa(
+                      l10n.ui_friends_63cc7b7a))),
+              ActionButton(
+                  onPressed: _retry, label: Text(l10n.ui_retry_8036af59)),
+            ],
+          );
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < actions.length; i++) ...[
+              if (i > 0) const SizedBox(height: 8),
+              actions[i],
+            ],
+          ],
+        );
+      },
     );
   }
 }

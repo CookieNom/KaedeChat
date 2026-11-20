@@ -250,6 +250,7 @@ void main() {
       final list = Completer<void>();
       final accept = Completer<void>();
       var accepts = 0;
+      var loads = 0;
       final dio = Dio()
         ..interceptors
             .add(InterceptorsWrapper(onRequest: (request, handler) async {
@@ -259,6 +260,12 @@ void main() {
           } else if (request.method == 'GET') {
             expect(request.path, '/api/v1/users/@me/relationships');
             await list.future;
+            if (++loads == 1) {
+              handler.reject(DioException(
+                  requestOptions: request,
+                  type: DioExceptionType.connectionError));
+              return;
+            }
             data = [
               {'type': 'pending_in', 'user': target.toJson()}
             ];
@@ -300,6 +307,11 @@ void main() {
       expect(find.text('Accept'), findsNothing);
       list.complete();
       await tester.pumpAndSettle();
+      expect(find.text('Send friend request'), findsNothing);
+      expect(find.text('Accept'), findsNothing);
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(loads, 2);
       expect(find.text('Sent you a friend request'), findsOneWidget);
       expect(find.text('Decline'), findsOneWidget);
       await tester.tap(find.text('Accept'));

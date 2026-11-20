@@ -900,6 +900,7 @@ async def test_dm_e2ee_grant_reactivates_the_matching_revoked_device(
         last_message_domain="chat.example",
         encryption_mode="e2ee",
         encryption_state="active",
+        dm_successor_id=None,
     )
     grant_row = SimpleNamespace(
         id=70,
@@ -947,6 +948,7 @@ async def test_dm_e2ee_grant_reactivates_the_matching_revoked_device(
         scalars=AsyncMock(return_value=[revoked, active]),
         add=Mock(),
         flush=AsyncMock(),
+        refresh=AsyncMock(),
         commit=AsyncMock(),
     )
     monkeypatch.setattr(
@@ -980,6 +982,7 @@ async def test_dm_e2ee_grant_reactivates_the_matching_revoked_device(
         prepared,
     )
 
+    session.refresh.assert_awaited_once_with(channel, with_for_update=True)
     assert revoked.status == "pending"
     assert revoked.revoked_at is None
     assert revoked.consent_generation == 4

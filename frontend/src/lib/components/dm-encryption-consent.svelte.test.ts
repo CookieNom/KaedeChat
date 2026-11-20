@@ -40,7 +40,7 @@ it.each(['agree', 'disagree'])(
     try {
       flushSync();
       await vi.waitFor(() => expect(target.textContent).toContain('Alice requested'));
-      expect(target.textContent).toContain('cannot be turned off');
+      expect(target.textContent).toContain('Messages sent with encryption stay encrypted.');
       const buttons = target.querySelectorAll('button');
       const button = buttons[action === 'agree' ? 0 : 1];
       flushSync(() => button.click());
