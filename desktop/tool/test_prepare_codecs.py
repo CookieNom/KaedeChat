@@ -79,8 +79,39 @@ int main() {
             )
             self.assertIn(f'COMMAND_DIR={scripts}\\', result.stdout)
 
+    def test_native_fingerprint_tracks_only_inputs_to_that_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sdk_patch = Path(temp) / 'sdk.patch'
+            native_patch = Path(temp) / 'native.patch'
+            native_patch.write_text('shared change\n')
+            def write_sdk_patch(path, value):
+                sdk_patch.write_text(f'diff --git a/{path} b/{path}\n+{value}\n')
+
+            with patch.object(codecs, 'PATCHES', [sdk_patch]), patch.object(codecs, 'WEBRTC_PATCH', native_patch):
+                write_sdk_patch('webrtc-sys/src/adm_proxy.cpp', 1)
+                mac = codecs.native_fingerprint('mac-x64')
+                win = codecs.native_fingerprint('win-x64')
+                self.assertNotEqual(mac, codecs.native_fingerprint('mac-arm64'))
+                with patch.dict(codecs.PINS, {'cuda_version': 'new', 'cuda_headers': {}}):
+                    write_sdk_patch('webrtc-sys/src/adm_proxy.cpp', 2)
+                    self.assertEqual(mac, codecs.native_fingerprint('mac-x64'))
+                write_sdk_patch('webrtc-sys/libwebrtc/build_windows.cmd', 1)
+                self.assertEqual(mac, codecs.native_fingerprint('mac-x64'))
+                self.assertNotEqual(win, codecs.native_fingerprint('win-x64'))
+                write_sdk_patch('webrtc-sys/libwebrtc/build_macos.sh', 1)
+                self.assertNotEqual(mac, codecs.native_fingerprint('mac-x64'))
+                write_sdk_patch('webrtc-sys/libwebrtc/patches/add_licenses.patch', 1)
+                self.assertNotEqual(mac, codecs.native_fingerprint('mac-x64'))
+                self.assertNotEqual(win, codecs.native_fingerprint('win-x64'))
+                write_sdk_patch('webrtc-sys/src/adm_proxy.cpp', 1)
+                with patch.object(codecs, 'XCODE_VERSION', 'new'):
+                    self.assertNotEqual(mac, codecs.native_fingerprint('mac-x64'))
+                    self.assertEqual(win, codecs.native_fingerprint('win-x64'))
+                native_patch.write_text('changed shared source\n')
+                self.assertNotEqual(mac, codecs.native_fingerprint('mac-x64'))
+
     def test_artifact_requires_matching_source_target_and_hevc_build(self):
-        with tempfile.TemporaryDirectory() as temp, patch.object(codecs, 'fingerprint', return_value='expected'), patch.object(codecs, 'triple', return_value='linux-x64'):
+        with tempfile.TemporaryDirectory() as temp, patch.object(codecs, 'native_fingerprint', return_value='expected'), patch.object(codecs, 'triple', return_value='linux-x64'):
             root = Path(temp)
             manifest = {'fingerprint': 'expected', 'target': 'linux-x64', 'webrtc_revision': codecs.PINS['webrtc_revision']}
             for name in ['lib/libwebrtc.a', 'webrtc.ninja', 'desktop_capture.ninja', 'LICENSE.md', 'include/api/peer_connection_interface.h']:
@@ -95,6 +126,12 @@ int main() {
                     (root / 'kaede-build.json').write_text(json.dumps({**manifest, key: value}))
                     with self.assertRaises(SystemExit):
                         codecs.verify_artifact(root)
+            legacy_manifest = {**manifest, 'fingerprint': 'old'}
+            (root / 'kaede-build.json').write_text(json.dumps(legacy_manifest))
+            self.assertEqual(codecs.verify_artifact(root, expected_fingerprint='old'), root.resolve())
+            (root / 'kaede-build.json').write_text(json.dumps({**legacy_manifest, 'target': 'win-x64'}))
+            with self.assertRaises(SystemExit):
+                codecs.verify_artifact(root, expected_fingerprint='old')
             (root / 'kaede-build.json').write_text(json.dumps(manifest))
             for args in ['rtc_use_h265 = false\n',
                          '# rtc_use_h265 = true\nrtc_use_h265 = false\n',

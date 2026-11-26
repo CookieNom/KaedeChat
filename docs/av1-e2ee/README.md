@@ -63,15 +63,34 @@ bitrate controls. The custom WebRTC archive must match those sources and enable
 `rtc_use_h265`. `LK_CUSTOM_WEBRTC` selects it, and a mismatched or incomplete
 archive fails verification.
 
-The native workflow builds the archive on each target OS. Release and CI jobs
-use it and fetch pinned CUDA headers without installing a CUDA toolkit. NVIDIA
-driver libraries load at runtime. Codec advertisement and hardware probes have
-the final say; a GPU model or OS version never proves a codec or configuration.
-Per-platform hardware paths are listed in the
-[desktop README](../../desktop/README.md#hardware-video).
+Desktop CI and release jobs pull the pinned package for Linux x64, Windows
+x64, macOS ARM64, or macOS Intel. The GHCR tag is
+`ghcr.io/cookienom/kaede-webrtc:<target>-<fingerprint>`.
+`desktop/tool/webrtc_packages.json` pins each target's native input fingerprint
+and package digest. Cargo builds the SDK bindings and application against that
+archive. Windows and Linux use pinned CUDA headers and load NVIDIA driver
+libraries at runtime. [Desktop setup for a local pull](../../desktop/README.md#development)
 
-CI builds these by default. For a local build on the target OS, when you've
-been asked for one:
+### Publishing a desktop WebRTC update
+
+1. Push the changed native sources, pins, or build recipe to a trusted branch
+   in the release repository. Update paired SDK and WebRTC pins together when
+   their ABI changes.
+2. In GitHub Actions, run **Publish desktop WebRTC** on that branch, or use
+   `gh workflow run desktop-webrtc.yml --ref BRANCH`. Each target reuses its
+   matching package or builds and publishes the archive for its new fingerprint.
+3. Copy each changed target's entry from the job summary into
+   `desktop/tool/webrtc_packages.json`, commit the pins on the branch, and wait
+   for desktop CI to pass before merging. Keep package tags used by release
+   pins available in GHCR.
+
+Run the publisher on the migration branch before merging the initial pins.
+It verifies and publishes the four existing archives from commit `324b41e`,
+so this first publication needs no native compilation.
+[Source build 45883142594](https://github.com/CookieNom/KaedeChat/actions/runs/45883142594)
+
+For an explicitly requested local source build on the target OS, use an empty
+work directory.
 
 ```sh
 python3 desktop/tool/prepare_codecs.py --cuda
@@ -79,11 +98,9 @@ python3 desktop/tool/build_webrtc.py --work-dir /absolute/empty/build-directory
 python3 desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc
 ```
 
-Use the printed `LK_CUSTOM_WEBRTC` and `CUDA_HOME` paths for the desktop build.
-The SDK and WebRTC pins are an ABI pair carrying Kaede's AV1 wire format and
-native extensions, so they aren't interchangeable with the latest SDK release.
-Update the pair and rebase its patches together. Don't swap a single prebuilt
-or assume an untested upstream revision works.
+Use the printed `LK_CUSTOM_WEBRTC` and, on Windows and Linux, `CUDA_HOME` paths
+for the desktop build. Check codec advertisement and hardware probes on the
+target hardware. [Hardware video paths](../../desktop/README.md#hardware-video)
 
 ## RTP interoperability
 
