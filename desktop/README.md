@@ -54,6 +54,22 @@ can't open a device.
 Releases ship a signed per-user NSIS installer. [Releasing](docs/releasing.md)
 covers where it installs, the Start menu option, and the taskbar-pin prompt.
 
+To diagnose a slow first call after a Windows restart, quit Kaede from the tray.
+In PowerShell, set `$env:KAEDE_VOICE_TIMINGS = '1'` before launching the app.
+The native startup timings go to standard error. Capture both log streams:
+
+```powershell
+$exe = "$env:LOCALAPPDATA\Kaede Chat\kaede-tauri.exe"
+$log = "$env:TEMP\kaede-voice-$(Get-Date -Format yyyyMMdd-HHmmss)"
+Start-Process $exe -RedirectStandardOutput "$log.out.txt" -RedirectStandardError "$log.err.txt"
+```
+
+For a comparison on a separate cold boot, set both `KAEDE_VOICE_TIMINGS` and
+`KAEDE_VOICE_SYNTHETIC_ONLY` to `1` in the launch shell. The second switch
+skips WebRTC's Windows audio device module while Kaede uses CPAL for the mic
+and speakers. Compare the first-call timings and verify audio in both directions.
+Both switches are opt-in. Quit Kaede and launch it from Start to resume normal use.
+
 ### macOS
 
 macOS 11 and later use CoreAudio, Keychain, ScreenCaptureKit-compatible LiveKit

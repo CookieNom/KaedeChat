@@ -1,0 +1,236 @@
+diff --git a/webrtc-sys/src/adm_proxy.cpp b/webrtc-sys/src/adm_proxy.cpp
+index 209f39d..dd5760b 100644
+--- a/webrtc-sys/src/adm_proxy.cpp
++++ b/webrtc-sys/src/adm_proxy.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "livekit/adm_proxy.h"
++#include "kaede_voice_startup.h"
+ 
+ #include "api/audio/audio_device.h"
+ #include "api/audio/create_audio_device_module.h"
+@@ -53,12 +54,21 @@ AdmProxy::AdmProxy(const webrtc::Environment& env, webrtc::Thread* worker_thread
+ #if defined(__ANDROID__)
+   // platform_adm_ stays nullptr, will be created in EnsurePlatformAdmCreated()
+ #else
+-  platform_adm_ = webrtc::CreateAudioDeviceModule(
+-      env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
++  // Kaede uses CPAL for device I/O and the synthetic ADM for WebRTC playout.
++  if (WindowsVoiceFlag("KAEDE_VOICE_SYNTHETIC_ONLY")) {
++    VoiceStartupTimer skipped("platform audio skipped (synthetic-only experiment)");
++    return;
++  }
++  {
++    VoiceStartupTimer timer("create platform audio module");
++    platform_adm_ = webrtc::CreateAudioDeviceModule(
++        env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
++  }
+ 
+   if (!platform_adm_) {
+     RTC_LOG(LS_ERROR) << "AdmProxy: CreateAudioDeviceModule returned nullptr";
+   } else {
++    VoiceStartupTimer timer("initialize platform audio module");
+     int32_t init_result = platform_adm_->Init();
+     if (init_result != 0) {
+       RTC_LOG(LS_ERROR) << "AdmProxy: Platform ADM Init() failed with error=" << init_result;
+@@ -366,6 +376,7 @@ int32_t AdmProxy::RecordingDeviceName(uint16_t index,
+ }
+ 
+ int32_t AdmProxy::SetPlayoutDevice(uint16_t index) {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   selected_playout_device_ = index;
+ 
+@@ -382,6 +393,7 @@ int32_t AdmProxy::SetPlayoutDevice(uint16_t index) {
+ }
+ 
+ int32_t AdmProxy::SetPlayoutDevice(WindowsDeviceType device) {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   // Note: When using WindowsDeviceType, we can't easily get the GUID
+   // The GUID will be populated on next CreatePlatformAdm if needed
+@@ -393,6 +405,7 @@ int32_t AdmProxy::SetPlayoutDevice(WindowsDeviceType device) {
+ }
+ 
+ int32_t AdmProxy::SetRecordingDevice(uint16_t index) {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   selected_recording_device_ = index;
+ 
+@@ -409,6 +422,7 @@ int32_t AdmProxy::SetRecordingDevice(uint16_t index) {
+ }
+ 
+ int32_t AdmProxy::SetRecordingDevice(WindowsDeviceType device) {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   // Note: When using WindowsDeviceType, we can't easily get the GUID
+   // The GUID will be populated on next CreatePlatformAdm if needed
+@@ -571,6 +585,7 @@ bool AdmProxy::Recording() const {
+ }
+ 
+ int32_t AdmProxy::InitSpeaker() {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   if (platform_adm_) {
+     return platform_adm_->InitSpeaker();
+@@ -587,6 +602,7 @@ bool AdmProxy::SpeakerIsInitialized() const {
+ }
+ 
+ int32_t AdmProxy::InitMicrophone() {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   if (platform_adm_) {
+     return platform_adm_->InitMicrophone();
+@@ -735,6 +751,7 @@ int32_t AdmProxy::MicrophoneMute(bool* enabled) const {
+ }
+ 
+ int32_t AdmProxy::StereoPlayoutIsAvailable(bool* available) const {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   if (platform_adm_) {
+     return platform_adm_->StereoPlayoutIsAvailable(available);
+@@ -744,6 +761,7 @@ int32_t AdmProxy::StereoPlayoutIsAvailable(bool* available) const {
+ }
+ 
+ int32_t AdmProxy::SetStereoPlayout(bool enable) {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   if (platform_adm_) {
+     return platform_adm_->SetStereoPlayout(enable);
+@@ -761,6 +779,7 @@ int32_t AdmProxy::StereoPlayout(bool* enabled) const {
+ }
+ 
+ int32_t AdmProxy::StereoRecordingIsAvailable(bool* available) const {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   if (platform_adm_) {
+     return platform_adm_->StereoRecordingIsAvailable(available);
+@@ -770,6 +789,7 @@ int32_t AdmProxy::StereoRecordingIsAvailable(bool* available) const {
+ }
+ 
+ int32_t AdmProxy::SetStereoRecording(bool enable) {
++  VoiceStartupTimer timer(__func__);
+   webrtc::MutexLock lock(&mutex_);
+   if (platform_adm_) {
+     return platform_adm_->SetStereoRecording(enable);
+diff --git a/webrtc-sys/src/kaede_voice_startup.h b/webrtc-sys/src/kaede_voice_startup.h
+new file mode 100644
+index 0000000..d57873e
+--- /dev/null
++++ b/webrtc-sys/src/kaede_voice_startup.h
+@@ -0,0 +1,43 @@
++#pragma once
++
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++namespace livekit_ffi {
++
++// Only the literal value "1" enables these Windows desktop experiments.
++inline bool WindowsVoiceFlag(const char* name) {
++#if defined(_WIN32)
++  const char* value = std::getenv(name);
++  return value && std::strcmp(value, "1") == 0;
++#else
++  return false;
++#endif
++}
++
++class VoiceStartupTimer {
++ public:
++  explicit VoiceStartupTimer(const char* stage) : stage_(stage) {
++    if (Enabled()) started_ = Clock::now();
++  }
++
++  ~VoiceStartupTimer() {
++    if (!Enabled()) return;
++    auto ms = std::chrono::duration<double, std::milli>(Clock::now() - started_);
++    std::fprintf(stderr, "kaede voice startup: %s %.3f ms\n", stage_, ms.count());
++  }
++
++ private:
++  static bool Enabled() {
++    static const bool enabled = WindowsVoiceFlag("KAEDE_VOICE_TIMINGS");
++    return enabled;
++  }
++
++  using Clock = std::chrono::steady_clock;
++  const char* stage_;
++  Clock::time_point started_;
++};
++
++}  // namespace livekit_ffi
+diff --git a/webrtc-sys/src/peer_connection_factory.cpp b/webrtc-sys/src/peer_connection_factory.cpp
+index ca74580..23ed7fb 100644
+--- a/webrtc-sys/src/peer_connection_factory.cpp
++++ b/webrtc-sys/src/peer_connection_factory.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "livekit/peer_connection_factory.h"
++#include "kaede_voice_startup.h"
+ 
+ #include <memory>
+ #include <utility>
+@@ -177,25 +178,34 @@ PeerConnectionFactory::PeerConnectionFactory(
+   }
+ 
+   // Create AdmProxy - it creates and initializes Platform ADM internally
+-  adm_proxy_ = rtc_runtime_->worker_thread()->BlockingCall([&] {
+-    return webrtc::make_ref_counted<livekit_ffi::AdmProxy>(
+-        env_, rtc_runtime_->worker_thread());
+-  });
++  {
++    VoiceStartupTimer timer("worker dispatch and audio proxy setup");
++    adm_proxy_ = rtc_runtime_->worker_thread()->BlockingCall([&] {
++      return webrtc::make_ref_counted<livekit_ffi::AdmProxy>(
++          env_, rtc_runtime_->worker_thread());
++    });
++  }
+   audio_device_ = std::make_shared<AudioDeviceController>(adm_proxy_);
+ 
+   dependencies.adm = adm_proxy_;
+ 
+-  dependencies.video_encoder_factory =
+-      std::move(std::make_unique<livekit_ffi::VideoEncoderFactory>());
+-  dependencies.video_decoder_factory =
+-      std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
++  {
++    VoiceStartupTimer timer("video codec factories");
++    dependencies.video_encoder_factory =
++        std::move(std::make_unique<livekit_ffi::VideoEncoderFactory>());
++    dependencies.video_decoder_factory =
++        std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
++  }
+   dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
+   dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+   dependencies.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
+ 
+   webrtc::EnableMedia(dependencies);
+-  peer_factory_ =
+-      webrtc::CreateModularPeerConnectionFactory(std::move(dependencies));
++  {
++    VoiceStartupTimer timer("create modular peer connection factory");
++    peer_factory_ =
++        webrtc::CreateModularPeerConnectionFactory(std::move(dependencies));
++  }
+ 
+   if (peer_factory_.get() == nullptr) {
+     RTC_LOG_ERR(LS_ERROR) << "Failed to create PeerConnectionFactory";
+@@ -296,7 +306,12 @@ create_peer_connection_factory_with_zero_playout_delay() {
+ std::shared_ptr<PeerConnectionFactory>
+ create_peer_connection_factory_with_options(bool zero_playout_delay,
+                                             bool enable_warp) {
+-  return std::make_shared<PeerConnectionFactory>(RtcRuntime::create(),
++  std::shared_ptr<RtcRuntime> runtime;
++  {
++    VoiceStartupTimer timer("create WebRTC runtime and threads");
++    runtime = RtcRuntime::create();
++  }
++  return std::make_shared<PeerConnectionFactory>(std::move(runtime),
+                                                  zero_playout_delay,
+                                                  enable_warp);
+ }
