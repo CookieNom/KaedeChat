@@ -4243,7 +4243,7 @@ fn main() {
     tauri::Builder::default()
         // WebView2 also injects startup scripts into third-party player frames.
         .plugin(
-            tauri::plugin::Builder::new("prototype-protection")
+            tauri::plugin::Builder::<_, ()>::new("prototype-protection")
                 .js_init_script("if (window === window.top) Object.freeze(Object.prototype);")
                 .build(),
         )
