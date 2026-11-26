@@ -78,3 +78,14 @@ index 2682d4d..7ac1a6b 100644
    }
    [self configureCompressionSession];
    return WEBRTC_VIDEO_CODEC_OK;
+diff --git a/call/rtp_config.cc b/call/rtp_config.cc
+--- a/call/rtp_config.cc
++++ b/call/rtp_config.cc
+@@ -252,5 +252,6 @@
+   if (!rtx.ssrcs.empty()) {
+     RTC_DCHECK_EQ(ssrcs.size(), rtx.ssrcs.size());
+-    auto& stream_config_rtx = stream_config.rtx.emplace();
++    // Explicit aggregate initialization avoids the MSVC default-constructibility trait bug.
++    auto& stream_config_rtx = stream_config.rtx.emplace(RtpStreamConfig::Rtx{});
+     stream_config_rtx.ssrc = rtx.ssrcs[index];
+     stream_config_rtx.payload_type = rtx.payload_type;

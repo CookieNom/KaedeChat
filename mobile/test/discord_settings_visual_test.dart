@@ -828,6 +828,12 @@ void main() {
       [],
       pushService: PushService.test(firebaseSetup: Completer<void>().future),
     );
+    await controller.api.useTokens(SessionTokens(
+        instance: user.ref.domain,
+        userRef: user.ref,
+        accessToken: 'access',
+        refreshToken: 'refresh'));
+    controller.state = MobileState(phase: SessionPhase.ready, user: user);
     await tester.pumpWidget(ProviderScope(
       overrides: [mobileControllerProvider.overrideWith((ref) => controller)],
       child: MaterialApp(
