@@ -80,6 +80,26 @@ class WebRTCRegistryTest(unittest.TestCase):
                 self.assertTrue((installed / 'previous-install').exists())
                 self.assertEqual(codecs.verify_artifact(installed), installed.resolve())
 
+    def test_seed_manifest_digest_is_checked_before_publishing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / 'source.zip'
+            entry = write_seed(archive)
+            entry['seed']['artifact_id'] = 42
+
+            def run(args, **kwargs):
+                if args[:2] == ['gh', 'api']:
+                    kwargs['stdout'].write(archive.read_bytes())
+                elif args[:3] == ['oras', 'push', '--oci-layout']:
+                    (kwargs['cwd'] / 'manifest.json').write_text('different OCI manifest')
+                else:
+                    self.fail(f'Unexpected command before seed digest verification: {args}')
+
+            with (patch.object(registry.subprocess, 'run', side_effect=run),
+                  patch.object(codecs, 'triple', return_value='mac-x64'),
+                  patch.object(codecs, 'native_fingerprint', return_value='current'),
+                  self.assertRaisesRegex(SystemExit, 'Seed manifest digest')):
+                registry.publish('mac-x64', 'package:tag', entry, 'current', seed=True)
+
     def test_publisher_plans_from_registry_state_without_replacing_a_pin(self):
         digest = 'sha256:' + 'a' * 64
         pinned = {'fingerprint': 'current', 'digest': digest}
