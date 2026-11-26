@@ -975,7 +975,7 @@ async fn native_switch_account(
     *state.pending_mfa.lock().await = None;
     activate_account(
         NativeAccount {
-            pending_grants: Default::default(),
+            pending_grants: Arc::default(),
             api,
             session,
             account_key,
@@ -1100,7 +1100,7 @@ async fn restore_known_account(
             Ok(true) => {
                 activate_account(
                     NativeAccount {
-                        pending_grants: Default::default(),
+                        pending_grants: Arc::default(),
                         api,
                         session,
                         account_key: known.account_key.clone(),
@@ -1491,7 +1491,7 @@ async fn login_request(body: &Value, state: &NativeState) -> Result<Value, Nativ
             let remembered_key = account_key.clone();
             activate_account(
                 NativeAccount {
-                    pending_grants: Default::default(),
+                    pending_grants: Arc::default(),
                     api,
                     session,
                     account_key,
@@ -1547,7 +1547,7 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
             let remembered_key = pending.account_key.clone();
             activate_account(
                 NativeAccount {
-                    pending_grants: Default::default(),
+                    pending_grants: Arc::default(),
                     api: pending.api,
                     session: pending.session,
                     account_key: pending.account_key,

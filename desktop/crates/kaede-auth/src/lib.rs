@@ -990,11 +990,13 @@ mod tests {
             email: None,
             password: "authentication-secret",
             password_kdf: &kdf,
+            accepted_terms: true,
             turnstile_token: None,
         }) else {
             panic!("registration request should serialize");
         };
         assert_eq!(registration["password_kdf"], kdf);
+        assert_eq!(registration["accepted_terms"], true);
     }
 
     #[test]
