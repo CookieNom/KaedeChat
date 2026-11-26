@@ -321,6 +321,7 @@ class DMGroupAuthorizeRequest(UnambiguousInputModel):
     conversation_domain: FederationDomain | None = None
     inviter: RemoteUserProfile
     invitee: RemoteUserProfile
+    inviter_intent: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def coherent_authority_context(self) -> DMGroupAuthorizeRequest:
@@ -337,6 +338,7 @@ class DMGroupMutationRequest(UnambiguousInputModel):
     conversation_domain: FederationDomain
     actor: RemoteUserProfile
     target: RemoteUserProfile | None = None
+    inviter_intent: dict[str, Any] | None = None
     name: str | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
@@ -553,7 +555,9 @@ class GuildProxyRequest(UnambiguousInputModel):
         if (self.forwarded_message_id is None) != (self.forwarded_channel_id is None):
             raise ValueError("a proxied forward requires complete snapshot provenance")
         if self.forward_snapshot is not None:
-            self.forward_snapshot = validate_forward_snapshot(self.forward_snapshot)
+            self.forward_snapshot = validate_forward_snapshot(
+                self.forward_snapshot, federation=True
+            )
         if self.forwarded_message_id is not None and (
             (self.forward_snapshot is None) == (not encrypted_forward)
         ):

@@ -558,7 +558,7 @@ async def test_stage_join_defaults_a_non_moderator_to_audience(
     assert grant.can_speak is moderator
     assert grant.can_stream is moderator
     assert grant.can_priority_speak is False
-    assert captured["can_publish_data"] is False
+    assert captured["can_publish_data"] is True
     metadata = cast(dict[str, object], captured["metadata"])
     assert metadata["suppressed"] is (not moderator)
     assert metadata["can_use_vad"] is True  # Stage publication is gated by suppression.

@@ -47,6 +47,7 @@ from app.api.channels import (
     message_view_installation_lineage,
     publish_current_thread_member_updates,
     raise_proxy_rejection,
+    require_attachment_upload_channel,
     slowmode_retry_after_ms,
 )
 from app.api.dependencies import (
@@ -753,6 +754,11 @@ async def prepare_remote_starter_attachments(
             or attachment.interaction_response_id is not None
         ):
             raise HTTPException(status_code=409, detail={"code": "ATTACHMENT_ALREADY_USED"})
+        require_attachment_upload_channel(attachment, access.channel)
+        attachment.upload_channel_id, attachment.upload_channel_domain = (
+            access.channel.id,
+            access.channel.origin_domain,
+        )
         attachments.append(attachment)
     await record_attachment_recipients(
         session,

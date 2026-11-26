@@ -307,6 +307,7 @@ export function renderMessageMarkdown(
   for (const anchor of template.content.querySelectorAll('a')) {
     anchor.setAttribute('rel', 'noopener noreferrer nofollow');
     anchor.setAttribute('target', '_blank');
+    anchor.dataset.shoppingLink = '';
   }
   for (const input of template.content.querySelectorAll('input')) {
     input.setAttribute('type', 'checkbox');

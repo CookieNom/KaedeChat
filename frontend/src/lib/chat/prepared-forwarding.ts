@@ -206,6 +206,44 @@ function validatePreparedSource(
   return raw as unknown as PreparedForwardSource;
 }
 
+// Normalize only attachment durations. Keep the signed envelope intact for the destination.
+function publicProofSnapshot(value: unknown, depth = 0): unknown {
+  if (value === null) return null;
+  const raw = record(value, 'Forward source snapshot');
+  const attachments = raw.attachments;
+  const children = raw.message_snapshots;
+  if (
+    !Array.isArray(attachments) ||
+    attachments.length > 10 ||
+    !Array.isArray(children) ||
+    children.length > (depth === 0 ? 1 : 0)
+  )
+    throw new Error('Forward source snapshot is invalid.');
+  return {
+    ...raw,
+    attachments: attachments.map((item) => {
+      const attachment = record(item, 'Forward attachment');
+      const duration = attachment.duration_secs;
+      if (duration === undefined || duration === null) return attachment;
+      if (
+        typeof duration !== 'number' &&
+        !(
+          typeof duration === 'string' &&
+          duration === duration.trim() &&
+          duration.length <= 32 &&
+          /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/u.test(duration)
+        )
+      )
+        throw new Error('Forward recording duration is invalid.');
+      const seconds = Number(duration);
+      if (!(seconds > 0 && seconds <= 1200))
+        throw new Error('Forward recording duration is invalid.');
+      return { ...attachment, duration_secs: seconds };
+    }),
+    message_snapshots: children.map((child) => publicProofSnapshot(child, depth + 1))
+  };
+}
+
 function validateForwardAuthorization(
   value: unknown,
   source: PreparedForwardSource,
@@ -256,7 +294,7 @@ function validateForwardAuthorization(
     !sameCanonicalJson(content.source_attachment_refs, source.attachment_refs) ||
     !canonicalProofStickerItems(content.source_sticker_items) ||
     !canonicalSortedCustomEmojiRefs(content.source_custom_emoji_refs) ||
-    !sameCanonicalJson(content.source_snapshot, source.snapshot) ||
+    !sameCanonicalJson(publicProofSnapshot(content.source_snapshot), source.snapshot) ||
     content.application_ref !== null ||
     content.e2ee_device_id !== null ||
     content.nonce !== nonce ||

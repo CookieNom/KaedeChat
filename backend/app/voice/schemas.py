@@ -609,12 +609,15 @@ class CallStateFederationRequest(StrictVoiceModel):
     model_config = ConfigDict(extra="forbid")
 
     call: CallResponse
+    accepted_by: str | None = Field(default=None, min_length=3, max_length=286)
 
     @model_validator(mode="after")
-    def terminal_state_only(self) -> CallStateFederationRequest:
-        if self.call.state != "ended":
-            raise ValueError("replica propagation accepts only terminal call state")
-        return self
+    def coherent_transition(self) -> CallStateFederationRequest:
+        if self.call.state == "active" and self.accepted_by in self.call.participants:
+            return self
+        if self.call.state == "ended" and self.accepted_by is None:
+            return self
+        raise ValueError("call state must be terminal or identify the accepting participant")
 
 
 class ActiveCallResponse(StrictVoiceModel):

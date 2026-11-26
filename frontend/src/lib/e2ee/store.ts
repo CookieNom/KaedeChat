@@ -1,5 +1,6 @@
 import {
   base64url,
+  base64urlByteLength,
   clearBytes,
   fromBase64url,
   ownedBytes,
@@ -1053,15 +1054,11 @@ function validateAccountVaultEnvelope(envelope: AccountVaultEnvelope): void {
   ) {
     throw new Error('The encryption vault is invalid.');
   }
-  const nonce = fromBase64url(envelope.nonce, 12);
-  const ciphertext = fromBase64url(envelope.ciphertext, MAX_STATE_BYTES + 16);
-  try {
-    if (nonce.length !== 12 || ciphertext.length < 17) {
-      throw new Error('The encryption vault is invalid.');
-    }
-  } finally {
-    clearBytes(nonce);
-    clearBytes(ciphertext);
+  if (
+    base64urlByteLength(envelope.nonce, 12) !== 12 ||
+    base64urlByteLength(envelope.ciphertext, MAX_STATE_BYTES + 16) < 17
+  ) {
+    throw new Error('The encryption vault is invalid.');
   }
 }
 

@@ -39,7 +39,7 @@ def _remote_voice_error(
     if 400 <= status_code < 500:
         try:
             body = decode_federation_response_json(response)  # type: ignore[arg-type]
-            candidate = body.get("detail") if isinstance(body, dict) else None
+            candidate = body.get("detail", body) if isinstance(body, dict) else None
             if isinstance(candidate, dict) and isinstance(candidate.get("code"), str):
                 detail = candidate
         except (FederationNetworkError, ValueError, json.JSONDecodeError):
@@ -62,6 +62,7 @@ async def request_remote_guild_voice_token(
     guild: Guild,
     actor: User,
     sender_device_id: str | None,
+    supports_aes256: bool = False,
     connection_id: str,
     takeover: bool,
     client_kind: Literal["web", "desktop", "mobile"],
@@ -100,6 +101,7 @@ async def request_remote_guild_voice_token(
             "POST",
             guild.origin_domain,
             "/_kaede/v1/voice/token",
+            query={"media_key_bits": "256"} if supports_aes256 else None,
             payload={
                 "guild_id": str(guild.id),
                 "channel_id": str(channel.id),

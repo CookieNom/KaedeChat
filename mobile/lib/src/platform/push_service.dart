@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:cryptography/cryptography.dart';
@@ -257,7 +258,10 @@ final class PushNotificationEnvelope {
 }
 
 final class _PushRedemption {
-  const _PushRedemption({this.notification, this.showFallback = false});
+  const _PushRedemption(
+      {this.notification, this.showFallback = false, this.accountKey});
+
+  final String? accountKey;
 
   final PushNotificationEnvelope? notification;
   final bool showFallback;
@@ -411,18 +415,11 @@ Future<void> notificationActionBackgroundHandler(
   if (event?.action != SystemCallAction.decline) return;
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
-  await SystemCallService.endNative(event!.callId);
-  final api =
-      KaedeApiClient(vault: const SessionVault(), allowSessionRefresh: false);
-  if (await api.restore() == null) return;
-  try {
-    await api.sendJson(
-      'POST',
-      '/api/v1/calls/${event.callId}',
-      data: const <String, Object?>{'action': 'decline'},
-    ).timeout(const Duration(seconds: 8));
-  } on Object {
-    // The call will expire naturally if the device is temporarily offline.
+  final account = (await const SessionVault().read())?.accountKey;
+  if (account != null && Platform.isAndroid) {
+    // Notifications posted before the native call UI upgrade can still invoke
+    // this isolate. The signed-in controller owns token refresh and the action.
+    await SystemCallService.deferLegacyDecline(event!, account);
   }
 }
 
@@ -445,7 +442,8 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   final redemption = await _redeemOpaqueWake(wake);
   final notification = redemption.notification;
   if (notification != null) {
-    await _displayRedeemedNotification(local, notification);
+    await _displayRedeemedNotification(
+        local, notification, redemption.accountKey);
   } else if (redemption.showFallback) {
     await _showLocalNotification(
       local,
@@ -500,7 +498,8 @@ Future<_PushRedemption> _redeemOpaqueWake(OpaquePushWake wake) async {
     final notification = PushNotificationEnvelope.parse(response);
     return notification == null
         ? const _PushRedemption(showFallback: true)
-        : _PushRedemption(notification: notification);
+        : _PushRedemption(
+            notification: notification, accountKey: tokens.accountKey);
   } on KaedeException catch (error) {
     if (error.status == 404 || error.status == 204) {
       return const _PushRedemption();
@@ -588,17 +587,21 @@ final class PushService {
   final _relationshipUpdates = StreamController<void>.broadcast();
   Stream<void> get relationshipUpdates => _relationshipUpdates.stream;
   Stream<String?> get health => _healthEvents.stream;
+  final _voipTokenChanges = StreamController<void>.broadcast();
+  Stream<void> get voipTokenChanges => _voipTokenChanges.stream;
   Stream<SystemCallEvent> get callEvents => _callEvents.stream;
   bool get remotePushAvailable => _firebaseReady;
 
   Future<void> setNativeRelayState({
     required RelayPushState state,
     required String installationId,
+    required String accountKey,
   }) async {
     try {
       await _nativePushState
           .invokeMethod<void>('setRelayState', <String, String>{
         'home': state.home.value,
+        'accountKey': accountKey,
         'installationId': installationId,
         'routeId': state.routeId,
         'wakeSecret': state.wakeSecret,
@@ -606,14 +609,6 @@ final class PushService {
         if (state.voipWakeSecret != null)
           'voipWakeSecret': state.voipWakeSecret!,
       });
-    } on MissingPluginException {
-      // Only iOS extensions consume this native copy.
-    }
-  }
-
-  Future<void> clearNativeRelayState() async {
-    try {
-      await _nativePushState.invokeMethod<void>('clearRelayState');
     } on MissingPluginException {
       // Only iOS extensions consume this native copy.
     }
@@ -690,7 +685,10 @@ final class PushService {
         importance: Importance.defaultImportance),
     AndroidNotificationChannel('kaede_calls', 'Calls',
         description: 'Incoming calls and voice alerts',
-        importance: Importance.max),
+        importance: Importance.max,
+        sound:
+            UriAndroidNotificationSound('content://settings/system/ringtone'),
+        audioAttributesUsage: AudioAttributesUsage.notificationRingtone),
     AndroidNotificationChannel('kaede_moderation', 'Account and moderation',
         description: 'Security and moderation notices',
         importance: Importance.high),
@@ -723,6 +721,13 @@ final class PushService {
       healthEvents,
       callEvents,
     );
+    if (Platform.isIOS) {
+      _nativePushState.setMethodCallHandler((call) async {
+        if (call.method == 'voipTokenChanged') {
+          service._voipTokenChanges.add(null);
+        }
+      });
+    }
     await local.initialize(
       const InitializationSettings(
         android: AndroidInitializationSettings('@drawable/ic_stat_kaede'),
@@ -813,10 +818,47 @@ final class PushService {
 
   Future<void> _showRemoteMessage(RemoteMessage message) async {
     try {
-      final wake = OpaquePushWake.parse(message.data);
+      final data = Map<String, dynamic>.of(message.data);
+      final enriched = Platform.isIOS && data.containsKey('kaede_nse_payload');
+      final raw = enriched ? data.remove('kaede_nse_payload') : null;
+      final signature = enriched ? data.remove('kaede_nse_signature') : null;
+      if (enriched) {
+        for (final key in const ['screen', 'channel_ref', 'message_ref']) {
+          data.remove(key);
+        }
+      }
+      final wake = OpaquePushWake.parse(data);
       if (wake == null) return;
-      if (!await _trustedRelayWake(wake, const SessionVault())) return;
-      final redemption = await _redeemOpaqueWake(wake);
+      final relay = await const SessionVault().readRelayPushState();
+      if (!await authenticatePushWake(wake, relay)) return;
+      final _PushRedemption redemption;
+      if (enriched) {
+        if (wake.version != 2 ||
+            relay == null ||
+            raw is! String ||
+            signature is! String) {
+          return;
+        }
+        final expected = await Hmac.sha256().calculateMac(
+          utf8.encode('kaede-nse-v1\n${wake.wakeMac}\n$raw'),
+          secretKey: SecretKey(
+              base64Url.decode(base64Url.normalize(relay.wakeSecret))),
+        );
+        if (expected != Mac(base64.decode(signature)) || raw.isEmpty) return;
+        final json = jsonDecode(utf8.decode(base64.decode(raw)));
+        if (json is! Map<String, Object?>) return;
+        final session = await const SessionVault().read();
+        if (session?.instance != relay.home ||
+            (await const SessionVault().readRelayPushState())?.routeId !=
+                wake.routeId) {
+          return;
+        }
+        redemption = _PushRedemption(
+            notification: PushNotificationEnvelope.parse(json),
+            accountKey: session?.accountKey);
+      } else {
+        redemption = await _redeemOpaqueWake(wake);
+      }
       final notification = redemption.notification;
       if (notification != null) {
         _reportHealth(null);
@@ -828,7 +870,8 @@ final class PushService {
             active: _appActive, channel: _visibleChannel)) {
           return;
         }
-        await _displayRedeemedNotification(_local, notification);
+        await _displayRedeemedNotification(
+            _local, notification, redemption.accountKey);
       } else if (redemption.showFallback) {
         _reportHealth(
           'Notification details could not be fetched securely. A private fallback alert was shown; open Kaede to refresh.',
@@ -1030,6 +1073,8 @@ final class PushService {
     for (final subscription in _subscriptions) {
       await subscription.cancel();
     }
+    if (Platform.isIOS) _nativePushState.setMethodCallHandler(null);
+    await _voipTokenChanges.close();
     await _tokenRefreshBridge?.close();
     await _destinations.close();
     await _healthEvents.close();
@@ -1041,7 +1086,12 @@ final class PushService {
 Future<void> _displayRedeemedNotification(
   FlutterLocalNotificationsPlugin local,
   PushNotificationEnvelope notification,
+  String? accountKey,
 ) async {
+  const vault = SessionVault();
+  if (accountKey == null || (await vault.read())?.accountKey != accountKey) {
+    return;
+  }
   final id = stableNotificationId(
     notification.eventRef ??
         notification.destination?.message?.wire ??
@@ -1057,6 +1107,17 @@ Future<void> _displayRedeemedNotification(
           'caller_name': notification.title,
         })
       : null;
+  if (callPayload != null && (Platform.isAndroid || Platform.isIOS)) {
+    if (await SystemCallService.showIncomingNative(
+          callId: callPayload.call.wire,
+          channelRef: callPayload.channel.wire,
+          callerName: callPayload.callerName,
+          accountKey: accountKey,
+        ) ||
+        (await vault.read())?.accountKey != accountKey) {
+      return;
+    }
+  }
   final payload = callPayload?.encode() ?? notification.destination?.encode();
   await _showLocalNotification(
     local,
@@ -1069,19 +1130,10 @@ Future<void> _displayRedeemedNotification(
     senderKey: notification.senderRef?.wire,
     sentAt: notification.sentAt,
   );
-  if (Platform.isAndroid && callPayload != null) {
-    try {
-      await SystemCallService.showIncomingNative(
-        callId: callPayload.call.wire,
-        callerName: callPayload.callerName,
-      );
-    } on PlatformException {
-      // Telecom may deny a call (for example, during an emergency call).
-      // The actionable notification remains available.
-    }
-  }
   final avatarPath = await _notificationAvatar(notification.senderAvatarUri);
-  if (avatarPath == null) return;
+  if (avatarPath == null || (await vault.read())?.accountKey != accountKey) {
+    return;
+  }
   await _showLocalNotification(
     local,
     id: id,
@@ -1295,15 +1347,17 @@ Future<void> _showLocalNotification(
         autoCancel: callPayload == null,
         ongoing: callPayload != null,
         timeoutAfter: callPayload == null ? null : 60000,
-        audioAttributesUsage: callPayload == null
-            ? AudioAttributesUsage.notification
-            : AudioAttributesUsage.notificationRingtone,
+        // Android's FLAG_INSISTENT repeats the alert until dismissal or timeout.
+        additionalFlags: callPayload == null ? null : Int32List.fromList([4]),
+        sound: channel.sound,
+        audioAttributesUsage: channel.audioAttributesUsage,
         actions: callPayload == null
             ? null
             : const <AndroidNotificationAction>[
                 AndroidNotificationAction(
                   _declineCallAction,
                   'Decline',
+                  showsUserInterface: true,
                   cancelNotification: true,
                 ),
                 AndroidNotificationAction(

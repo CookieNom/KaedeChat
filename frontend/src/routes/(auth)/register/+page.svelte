@@ -253,13 +253,13 @@
         <span
           >{$t('ui_i_agree_to_this_server_s_549dcd13')}
           <a
-            href={nativeDesktop ? `${selectedInstance}/terms` : resolve('terms')}
+            href={nativeDesktop ? `https://${selectedInstance}/terms` : resolve('terms')}
             target="_blank"
             rel="noopener noreferrer">{$t('ui_terms_of_service_4afa55bf')}</a
           >
           {$t('ui_and_acknowledge_its_019d8797')}
           <a
-            href={nativeDesktop ? `${selectedInstance}/privacy` : resolve('privacy')}
+            href={nativeDesktop ? `https://${selectedInstance}/privacy` : resolve('privacy')}
             target="_blank"
             rel="noopener noreferrer">{$t('ui_privacy_policy_506ff394')}</a
           >.</span

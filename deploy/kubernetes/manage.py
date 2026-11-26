@@ -155,6 +155,17 @@ def build(cfg: dict, values: dict, revision: str) -> tuple[str, str]:
     for name in ("backend", "frontend"):
         image = image_names(cfg, values, revision)[0 if name == "backend" else 1]
         command = ["docker", "build", "--pull", "--target", "runtime", "-t", image]
+        if name == "backend":
+            version = revision
+            if (ROOT / ".git").exists():
+                version = run(
+                    [
+                        "git", "-C", str(ROOT), "describe", "--tags", "--match",
+                        "v[0-9]*", "--always", "--dirty",
+                    ],
+                    capture=True,
+                ).strip()
+            command += ["--build-arg", f"KAEDE_SOFTWARE_VERSION={version}"]
         if name == "frontend":
             for key, value in values.items():
                 if key.startswith("KAEDE_LEGAL_") or key in {

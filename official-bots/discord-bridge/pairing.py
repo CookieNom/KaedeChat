@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import secrets
+import time
 
 import kaede_bot as kaede
 from kaede_bot.ui import ActionRow, Button, SelectOption, StringSelect, View
@@ -13,6 +14,7 @@ NO_MENTIONS = {"parse": [], "replied_user": False}
 class Pairing:
     def __init__(self, bridge):
         self.bridge = bridge
+        self.approvals = {}
         for name, description, handler in (
             ("bridge-pair", "Connect a Kaede channel to a Discord channel", self.pair),
             ("bridge-list", "Browse this server's channel pairs", self.list_pairs),
@@ -105,10 +107,31 @@ class Pairing:
         pagination = f" Choices page {page + 1}/{pages}; buttons browse choices only." if pages > 1 else ""
         await self.say(interaction, f"{title}\nSelect an option to continue.{pagination} This menu expires after 3 minutes.", view)
 
-    def discord_channels(self, guild):
+    async def approve_from_discord(self, message):
+        parts = message.content.split()
+        if not parts or parts[0] != "!kaede-pair":
+            return False
+        channel = message.channel
+        if channel not in message.guild.text_channels or not channel.permissions_for(message.author).manage_channels:
+            return True
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            target = kaede.EntityRef.parse(parts[1])
+        except (ValueError, TypeError):
+            await channel.send("Use `!kaede-pair ID@domain` with the Kaede server reference shown by /bridge-pair.")
+            return True
+        now = time.monotonic()
+        self.approvals = {key: expiry for key, expiry in self.approvals.items() if expiry > now}
+        self.approvals[(channel.id, target)] = now + 180
+        await channel.send(f"A Kaede administrator in {target} has three minutes to connect this channel with /bridge-pair.")
+        return True
+
+    def discord_channels(self, guild, target):
         if guild is None or guild.me is None:
             return []
-        return [c for c in guild.text_channels if c.permissions_for(guild.me).view_channel
+        return [c for c in guild.text_channels if self.approvals.get((c.id, target), 0) > time.monotonic()
+                and c.permissions_for(guild.me).view_channel
                 and c.permissions_for(guild.me).send_messages]
 
     @staticmethod
@@ -121,6 +144,9 @@ class Pairing:
     async def pair(self, interaction):
         if not self.bridge.is_ready():
             await self.say(interaction, "Discord is still connecting. Try again shortly.")
+            return
+        if not any(self.discord_channels(guild, interaction.guild_ref) for guild in self.bridge.guilds):
+            await self.say(interaction, f"Ask someone with Manage Channels permission to send `!kaede-pair {interaction.guild_ref}` in the Discord channel, then run /bridge-pair again within three minutes.")
             return
         channels = await self.bridge.kaede.fetch_channels(interaction.guild_ref)
         choices = [(c.name or str(c.ref), c.ref) for c in channels if self.kaede_channel(c, interaction.guild_ref)]
@@ -135,16 +161,17 @@ class Pairing:
                             return
                         channel = await self.bridge.kaede.fetch_channel(ref)
                         remote = self.bridge.get_channel(channel_id)
-                        if (not self.kaede_channel(channel, event.guild_ref)
-                                or remote not in self.discord_channels(self.bridge.get_guild(guild_id))):
-                            await self.say(event, "Channel access changed. Run /bridge-pair again.")
-                            return
                         async with self.bridge.route_lock:
+                            if (not self.kaede_channel(channel, event.guild_ref)
+                                    or remote not in self.discord_channels(self.bridge.get_guild(guild_id), event.guild_ref)):
+                                await self.say(event, "Discord approval expired or channel access changed. Run /bridge-pair again.")
+                                return
                             try:
                                 self.bridge.store.add_pair(str(ref), str(event.guild_ref), str(channel_id))
                             except IntegrityError:
                                 await self.say(event, "One of these channels is already paired. Use /bridge-unpair first.")
                                 return
+                            self.approvals.pop((channel_id, event.guild_ref), None)
                         await self.say(event, "Channel pair saved. New messages now relay in both directions.")
                     remote = self.bridge.get_channel(channel_id)
                     if remote is None:
@@ -154,9 +181,9 @@ class Pairing:
                                       [("Confirm pairing", True), ("Cancel", False)], confirm)
                 await self.picker(event, "Step 3 of 4 — Choose a Discord text channel", [
                     (f"{c.category.name + ' / ' if c.category else ''}#{c.name}", c.id)
-                    for c in self.discord_channels(guild)], choose_discord)
+                    for c in self.discord_channels(guild, event.guild_ref)], choose_discord)
             await self.picker(event, "Step 2 of 4 — Choose a Discord server", [(g.name, g.id) for g in self.bridge.guilds
-                                                                    if self.discord_channels(g)], choose_guild)
+                                                                    if self.discord_channels(g, event.guild_ref)], choose_guild)
         await self.picker(interaction, "Step 1 of 4 — Choose a Kaede text channel in this server", choices, choose_kaede)
 
     async def pairs(self, interaction, remove=False):

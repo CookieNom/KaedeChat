@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import ipaddress
+import socket
 from urllib.parse import urljoin, urlsplit
+
+import httpx
+
+from .errors import ApiError
 
 
 class MediaURLValidationError(ValueError):
@@ -125,3 +132,80 @@ def resolve_target_media_location(
 
     resolved = urljoin(base_url or target_origin, location)
     return validate_target_media_url(resolved, target_origin)
+
+
+def _public_media_address(address: str) -> bool:
+    ip = ipaddress.ip_address(address)
+    if isinstance(ip, ipaddress.IPv6Address):
+        # Transition prefixes can encode a non-public effective IPv4 destination.
+        if (
+            ip.scope_id is not None
+            or ip.is_site_local
+            or ip.sixtofour is not None
+            or ip.teredo is not None
+            or ip in ipaddress.IPv6Network("64:ff9b::/96")
+            or ip in ipaddress.IPv6Network("64:ff9b:1::/48")
+        ):
+            return False
+        ip = ip.ipv4_mapped or ip
+    return ip.is_global and not (ip.is_multicast or ip.is_reserved or ip.is_link_local)
+
+
+class MediaTransport(httpx.AsyncHTTPTransport):
+    """Resolve an authenticated origin once and use that address for TLS."""
+
+    def __init__(self, origin: str, *, allow_private: bool) -> None:
+        super().__init__(trust_env=False)
+        self.origin = origin
+        self.allow_private = allow_private
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        validate_signed_media_url(str(request.url), self.origin)
+        host = request.url.raw_host.decode("ascii")
+        try:
+            records = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(
+                    host, request.url.port or 443, type=socket.SOCK_STREAM
+                ),
+                timeout=10,
+            )
+            addresses = list(dict.fromkeys(str(record[4][0]) for record in records))
+            if not addresses or (
+                not self.allow_private
+                and not all(_public_media_address(ip) for ip in addresses)
+            ):
+                raise ValueError("prohibited media address")
+        except (OSError, ValueError, TimeoutError):
+            raise ApiError(
+                502,
+                "MEDIA_DESTINATION_INVALID",
+                "Media host is unavailable or restricted",
+            ) from None
+        # Try the resolved addresses within the original connection timeout. Only
+        # connection failures are replayable: the request body has not been sent.
+        loop = asyncio.get_running_loop()
+        timeouts = request.extensions.get("timeout", {})
+        budget = timeouts.get("connect")
+        deadline = loop.time() + budget if budget is not None else None
+        remaining = iter(addresses)
+        address = next(remaining)
+        while True:
+            extensions = {**request.extensions, "sni_hostname": host}
+            if deadline is not None:
+                extensions["timeout"] = {
+                    **timeouts,
+                    "connect": max(0, deadline - loop.time()),
+                }
+            pinned = httpx.Request(
+                request.method,
+                request.url.copy_with(host=address),
+                headers=request.headers,
+                stream=request.stream,
+                extensions=extensions,
+            )
+            try:
+                return await super().handle_async_request(pinned)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                address = next(remaining, "")
+                if not address or (deadline is not None and loop.time() >= deadline):
+                    raise

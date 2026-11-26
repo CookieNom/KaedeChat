@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Kaede encrypted bot media test</title>
+<body>
+<script type="module">
+import { Room, RoomEvent, ExternalE2EEKeyProvider, Track } from '/sdk.mjs';
+
+window.start = async ({ url, token, key }) => {
+  const keys = new ExternalE2EEKeyProvider({ keySize: 256, ratchetSalt: 'kaede-livekit-v1' });
+  await keys.setKey(Uint8Array.from(key).buffer);
+  const room = new Room({ e2ee: { keyProvider: keys, worker: new Worker('/worker.mjs', { type: 'module' }) } });
+  const audio = new AudioContext();
+  await audio.resume();
+  const analyser = audio.createAnalyser();
+  analyser.fftSize = 1024;
+  const spectrum = new Float32Array(analyser.frequencyBinCount);
+  const readPixel = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  const inbound = new Map();
+  let video;
+  room.on(RoomEvent.TrackSubscribed, (track, publication, peer) => {
+    if (peer.identity !== 'bot' || !publication.isEncrypted) throw new Error('Unexpected or unencrypted publication');
+    if (track.kind === 'video' && publication.trackName !== 'kaede.video.v1:camera:vp8') {
+      throw new Error('Unexpected bot camera track name');
+    }
+    inbound.set(track.kind, track);
+    if (track.kind === 'audio') {
+      const element = track.attach();
+      element.muted = true;
+      document.body.append(element);
+      element.play();
+      audio.createMediaStreamSource(new MediaStream([track.mediaStreamTrack])).connect(analyser);
+    } else {
+      video = track.attach();
+      video.muted = true;
+      document.body.append(video);
+      video.play();
+    }
+  });
+  const enabled = new Promise(resolve => {
+    room.on(RoomEvent.ParticipantEncryptionStatusChanged, (active, peer) => {
+      if (active && peer === room.localParticipant) resolve();
+    });
+  });
+  await Promise.all([room.setE2EEEnabled(true), enabled]);
+  await room.connect(url, token);
+  if (!room.isE2EEEnabled || !room.localParticipant.isE2EEEnabled) throw new Error('Browser E2EE inactive');
+
+  const tone = audio.createOscillator();
+  const destination = audio.createMediaStreamDestination();
+  tone.connect(destination);
+  tone.start();
+  const canvas = document.createElement('canvas');
+  canvas.width = 160;
+  canvas.height = 120;
+  const paint = canvas.getContext('2d');
+  let level, tick = 0;
+  window.sendPhase = phase => {
+    tone.frequency.value = phase === 0 ? 600 : 1600;
+    level = phase === 0 ? 52 : 200;
+  };
+  window.sendPhase(0);
+  setInterval(() => {
+    const gray = level + (++tick % 2);
+    paint.fillStyle = `rgb(${gray}, ${gray}, ${gray})`;
+    paint.fillRect(0, 0, canvas.width, canvas.height);
+  }, 80);
+  const microphone = await room.localParticipant.publishTrack(destination.stream.getAudioTracks()[0], {
+    source: Track.Source.Microphone, dtx: false
+  });
+  const camera = await room.localParticipant.publishTrack(canvas.captureStream(12).getVideoTracks()[0], {
+    name: 'kaede.video.v1:camera:vp8', source: Track.Source.Camera, videoCodec: 'vp8', simulcast: false, backupCodec: false
+  });
+  if (!microphone.isEncrypted || !camera.isEncrypted) throw new Error('Browser published plaintext');
+  window.codecsMatch = async () => {
+    const hasCodec = async (track, type, codec) => {
+      const report = await track?.getRTCStatsReport();
+      return Array.from(report?.values() ?? []).some(stat => stat.type === type &&
+        report.get(stat.codecId)?.mimeType.toLowerCase() === codec);
+    };
+    return (await Promise.all([
+      hasCodec(inbound.get('audio'), 'inbound-rtp', 'audio/opus'),
+      hasCodec(inbound.get('video'), 'inbound-rtp', 'video/vp8'),
+      hasCodec(microphone.track, 'outbound-rtp', 'audio/opus'),
+      hasCodec(camera.track, 'outbound-rtp', 'video/vp8')
+    ])).every(Boolean);
+  };
+
+  window.received = phase => {
+    window.observed = { inbound: [...inbound.keys()], videoReady: video?.readyState };
+    if (!video || video.readyState < 2) return false;
+    analyser.getFloatFrequencyData(spectrum);
+    const peak = Math.max(...spectrum);
+    const frequency = spectrum.indexOf(peak) * audio.sampleRate / analyser.fftSize;
+    readPixel.drawImage(video, 0, 0, 1, 1);
+    const gray = readPixel.getImageData(0, 0, 1, 1).data[0];
+    Object.assign(window.observed, { frequency, peak, gray });
+    const videoMatches = phase === 0 ? gray > 150 : gray > 20 && gray < 100;
+    return videoMatches && peak > -60 && Math.abs(frequency - (phase === 0 ? 900 : 1900)) < 90;
+  };
+  // The shared-key worker acknowledges rotation through the next decrypted media.
+  window.ratchet = () => keys.ratchetKey(undefined, 0);
+};
+</script>
+</body>
+</html>

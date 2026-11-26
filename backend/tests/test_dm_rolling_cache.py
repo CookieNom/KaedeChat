@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -5,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +42,9 @@ from app.federation.dm_history import (
     history_media_capability_status,
     history_media_path,
     merge_dm_history_messages,
+    sign_group_history_page,
     validate_dm_history_page,
+    verified_group_history_profiles,
     verify_history_media_capability,
 )
 from app.federation.dm_storage import (
@@ -194,6 +198,247 @@ def test_history_page_ignores_authority_local_body_and_marks_completion(
         "❤",
         "<:lantern:75512661369970689@home.example>",
     ]
+
+
+@pytest.mark.asyncio
+async def test_signed_group_history_renders_departed_authors_without_trusting_relayed_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.federation import security
+
+    receiver = settings()
+    authority = settings(domain="authority.example")
+    key = Ed25519PrivateKey.generate()
+    monkeypatch.setattr(security, "self_private_key", AsyncMock(return_value=("test-key", key)))
+    session = AsyncMock()
+    session.get.return_value = SimpleNamespace(
+        expired_at=None, public_key=key.public_key().public_bytes_raw()
+    )
+    session.scalars.return_value = []
+    requester = (7, receiver.domain)
+    nonce = "a" * 32
+    now = datetime.now(UTC) - timedelta(minutes=1)
+    conversation = (10, authority.domain)
+    author = (20, "third.example")
+    raw = message(
+        message_id=snowflake_at(now),
+        origin=author[1],
+        channel_ref=conversation,
+        author_id=author[0],
+        username="unverified",
+        created_at=now,
+    )
+    raw["mention_user_refs"] = [{"id": "31", "origin_domain": "former.example"}]
+    body = {
+        "conversation_id": "10",
+        "conversation_domain": authority.domain,
+        "complete": True,
+        "next_before": None,
+        "messages": [raw],
+    }
+    trusted: dict[tuple[int, str], dict[str, object]] = {}
+    binding = dict(
+        authority=authority.domain,
+        nonce=nonce,
+        requester=requester,
+        limit=2,
+        trusted_profiles=trusted,
+    )
+    validation = dict(
+        settings=receiver,
+        conversation_ref=conversation,
+        authority_domain=authority.domain,
+        participant_refs={requester},
+        trusted_profiles=trusted,
+        before=None,
+        limit=2,
+    )
+    assert not await verified_group_history_profiles(session, receiver, body, **binding)
+    with pytest.raises(FederationNetworkError, match="mismatched references"):
+        validate_dm_history_page(body, **validation)
+    body["group_history_proof"] = await sign_group_history_page(
+        session, authority, body, nonce, requester
+    )
+    assert await verified_group_history_profiles(session, receiver, body, **binding)
+    page = validate_dm_history_page(body, verified_group_history=True, **validation)
+    assert page.messages[0]["mention_user_refs"] == raw["mention_user_refs"]
+    assert page.messages[0]["author"]["profile_resolved"] is False
+    assert page.messages[0]["author"]["username"] != "unverified"
+    trusted[author] = profile(*author, "independent")
+    assert (
+        validate_dm_history_page(body, verified_group_history=True, **validation).messages[0][
+            "author"
+        ]["username"]
+        == "independent"
+    )
+    with pytest.raises(FederationNetworkError, match="Invalid group history proof"):
+        await verified_group_history_profiles(
+            session, receiver, body, **(binding | {"nonce": "b" * 32})
+        )
+    raw["author_id"] = "21"
+    with pytest.raises(FederationNetworkError, match="Invalid group history proof"):
+        await verified_group_history_profiles(session, receiver, body, **binding)
+
+
+def test_history_decodes_nested_signed_recordings_to_public_numeric_seconds() -> None:
+    from app.chat.payloads import message_payload
+    from app.core.base64url import encode_base64url
+    from app.core.federation import canonical_json
+
+    from .test_forwarding import snapshot
+
+    now = datetime.now(UTC) - timedelta(minutes=1)
+    origin = "example.test"
+    raw = message(
+        message_id=snowflake_at(now),
+        origin=origin,
+        channel_ref=(100, origin),
+        author_id=42,
+        username="author",
+        created_at=now,
+    )
+    voice = snapshot(plaintext_sha256=encode_base64url(bytes(32)))
+    media = cast(list[dict[str, object]], voice["attachments"])[0]
+    media.update(origin_domain=origin, duration_secs=1.23456)
+    voice["created_at"] = (now - timedelta(seconds=1)).isoformat()
+    voice["message_snapshots"] = [dict(voice)]
+    attachment = Attachment(
+        id=501,
+        origin_domain=origin,
+        filename="voice.ogg",
+        content_type="audio/ogg",
+        size=12,
+        duration_secs=1.23456,
+        waveform="AQIDBA==",
+        variants={},
+        scan_status="clean",
+        encryption_mode="plaintext",
+        content_sha256="00" * 32,
+    )
+    stored = Message(
+        id=snowflake_at(now),
+        origin_domain=origin,
+        channel_id=100,
+        channel_domain=origin,
+        author_id=42,
+        author_domain=origin,
+        message_type=0,
+        created_at=now,
+        flags=1 << 14,
+        forwarded_message_id=10,
+        forwarded_message_domain=origin,
+        forwarded_channel_id=20,
+        forwarded_channel_domain=origin,
+        forward_snapshot=voice,
+        mention_user_refs=[],
+        tts=False,
+        encryption_policy_generation=1,
+    )
+    raw.update(
+        message_payload(stored, None, [attachment], include_forward_source=True),
+        author=profile(42, origin, "author"),
+    )
+    canonical_json(raw)
+    page = validate_dm_history_page(
+        {
+            "conversation_id": "100",
+            "conversation_domain": origin,
+            "messages": [raw],
+            "complete": True,
+            "next_before": None,
+        },
+        settings=settings(),
+        conversation_ref=(100, origin),
+        authority_domain=origin,
+        participant_refs={(42, origin)},
+        trusted_profiles={},
+        before=None,
+        limit=1,
+    )
+    forwarded = cast(list[dict[str, Any]], page.messages[0]["message_snapshots"])[0]["message"]
+    assert forwarded["attachments"][0]["duration_secs"] == 1.23456
+    assert forwarded["message_snapshots"][0]["attachments"][0]["duration_secs"] == 1.23456
+    assert "duration_secs_exact" not in cast(list[dict], page.messages[0]["attachments"])[0]
+
+
+def test_dm_history_accepts_authenticated_encrypted_forward_and_reencrypted_attachment() -> None:
+    from .test_message_rich_e2ee import FIXTURE, rich_envelope
+
+    vector = json.loads(FIXTURE.read_text())["vectors"][0]
+    envelope = rich_envelope(vector)
+    now = datetime.now(UTC) - timedelta(minutes=1)
+    origin = "example.test"
+    message_id = snowflake_at(now)
+    raw = message(
+        message_id=message_id,
+        origin=origin,
+        channel_ref=(100, origin),
+        author_id=42,
+        username="author",
+        created_at=now,
+    )
+    envelope.update(
+        forwarded_message_ref=f"10@{origin}",
+        forwarded_channel_ref=f"20@{origin}",
+        forwarded_created_at=(now - timedelta(minutes=1)).isoformat(),
+        forwarded_flags=0,
+        forwarded_message_type=0,
+        forward_snapshot_digest=envelope["rich_payload_digest"],
+        forward_source_projection_digest=envelope["rich_payload_digest"],
+        message_flags=1 << 14,
+        message_mention_refs=[],
+        message_mention_everyone=False,
+        message_mention_role_refs=[],
+        message_mention_user_refs=[],
+        message_custom_emoji_refs=[],
+    )
+    attachment = dict(
+        id="501",
+        origin_domain=origin,
+        filename="encrypted-file",
+        content_type="application/octet-stream",
+        size=73,
+        scan_status="encrypted",
+        encryption_mode="e2ee",
+        encryption_protocol="kaede-file-v1",
+    )
+    raw.update(
+        content=None,
+        e2ee=envelope,
+        flags=1 << 14,
+        forwarded_message_id="10",
+        forwarded_message_domain=origin,
+        forwarded_channel_id="20",
+        forwarded_channel_domain=origin,
+        message_reference={"type": 1},
+        attachments=[attachment],
+    )
+    body = dict(
+        conversation_id="100",
+        conversation_domain=origin,
+        messages=[raw],
+        complete=True,
+        next_before=None,
+    )
+    validation = dict(
+        settings=settings(),
+        conversation_ref=(100, origin),
+        authority_domain=origin,
+        participant_refs={(42, origin)},
+        trusted_profiles={},
+        before=None,
+        limit=1,
+    )
+    page = validate_dm_history_page(body, **validation)
+    assert page.messages[0]["e2ee"] == envelope
+    assert page.messages[0]["attachments"][0]["scan_status"] == "encrypted"
+    raw["forwarded_channel_id"] = "21"
+    with pytest.raises(FederationNetworkError, match="rich content"):
+        validate_dm_history_page(body, **validation)
+    raw["forwarded_channel_id"] = "20"
+    attachment["id"] = "502"
+    with pytest.raises(FederationNetworkError, match="rich content"):
+        validate_dm_history_page(body, **validation)
 
 
 @pytest.mark.parametrize(
@@ -1263,7 +1508,7 @@ async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
         AsyncSession,
         SimpleNamespace(
             get=get,
-            scalar=AsyncMock(side_effect=[1, attachment, message_row, 1]),
+            scalar=AsyncMock(side_effect=[1, attachment, message_row, None, 1]),
             execute=AsyncMock(),
             commit=AsyncMock(),
         ),
@@ -1307,7 +1552,7 @@ async def test_history_media_origin_rejects_cross_conversation_or_message_scope(
         assert raised.value.status_code == 404
 
 
-@pytest.mark.parametrize("terminal_field", ["scan_status", "deleted_at"])
+@pytest.mark.parametrize("terminal_field", ["scan_status", "deleted_at", "safety_state", "case"])
 async def test_history_media_origin_rechecks_terminal_state_after_recipient_commit(
     monkeypatch: pytest.MonkeyPatch,
     terminal_field: str,
@@ -1356,14 +1601,18 @@ async def test_history_media_origin_rechecks_terminal_state_after_recipient_comm
     async def commit() -> None:
         if terminal_field == "scan_status":
             attachment.scan_status = "quarantined"
-        else:
+        elif terminal_field == "deleted_at":
             attachment.deleted_at = datetime.now(UTC)
+        elif terminal_field == "safety_state":
+            message_row.safety_state = "pending_review"
 
     session = cast(
         AsyncSession,
         SimpleNamespace(
             get=get,
-            scalar=AsyncMock(side_effect=[1, attachment]),
+            scalar=AsyncMock(
+                side_effect=[1, attachment, message_row, 37 if terminal_field == "case" else None]
+            ),
             execute=AsyncMock(),
             commit=commit,
         ),

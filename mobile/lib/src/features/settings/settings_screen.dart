@@ -13,7 +13,10 @@ import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/presence_control.dart';
 import 'package:kaede_mobile/src/domain/text_to_speech.dart';
+import 'package:kaede_mobile/src/features/chat/shopping_links.dart';
+import 'package:kaede_mobile/src/features/presence/presence_schedules_sheet.dart';
 import 'package:kaede_mobile/src/features/settings/debug_settings.dart';
 import 'package:kaede_mobile/src/features/settings/developer_portal_screen.dart';
 import 'package:kaede_mobile/src/features/settings/instance_administration_screen.dart';
@@ -61,34 +64,30 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String? _versionLabel;
 
   Future<String?> _secretPrompt(String title, String label) async {
-    final input = TextEditingController();
-    try {
-      return showDialog<String>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(title),
-          content: TextField(
-            controller: input,
-            obscureText: true,
-            autofocus: true,
-            decoration: InputDecoration(labelText: label),
-          ),
-          actions: [
-            ActionButton(
-              kind: ActionButtonKind.text,
-              onPressed: () => Navigator.pop(context),
-              child: Text(L10n.of(context).ui_cancel_35afca3b),
-            ),
-            ActionButton(
-              onPressed: () => Navigator.pop(context, input.text),
-              child: Text(L10n.of(context).ui_continue_ab43d664),
-            ),
-          ],
+    var secret = '';
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          onChanged: (value) => secret = value,
+          obscureText: true,
+          autofocus: true,
+          decoration: InputDecoration(labelText: label),
         ),
-      );
-    } finally {
-      input.dispose();
-    }
+        actions: [
+          ActionButton(
+            kind: ActionButtonKind.text,
+            onPressed: () => Navigator.pop(context),
+            child: Text(L10n.of(context).ui_cancel_35afca3b),
+          ),
+          ActionButton(
+            onPressed: () => Navigator.pop(context, secret),
+            child: Text(L10n.of(context).ui_continue_ab43d664),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _initializeEncryption() async {
@@ -664,7 +663,8 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         child: Center(child: CircularProgressIndicator()),
       );
     }
-    final presence = '${_settings['presence_preference'] ?? 'online'}';
+    final presence = mobile.presenceState?.effectiveStatus.name ??
+        mobile.presencePreference.name;
     final usesRelay = ref.read(mobileControllerProvider.notifier).usesPushRelay;
     final pushRelayHost =
         ref.read(mobileControllerProvider.notifier).pushRelayHost;
@@ -862,6 +862,10 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   .ui_your_availability_follows_you_between_mobile__1aa8ef75),
           SettingsRow(
             title: L10n.of(context).ui_online_bc3b88aa,
+            subtitle: presence == 'online' &&
+                    summarizePresenceSubtext(mobile.presenceState).isNotEmpty
+                ? summarizePresenceSubtext(mobile.presenceState)
+                : null,
             leading: _PresenceIcon(PresenceStatus.online),
             divider: true,
             onTap: () => _saveSetting('presence_preference', 'online'),
@@ -869,23 +873,42 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           SettingsRow(
             title: L10n.of(context).ui_idle_45aa17b3,
+            subtitle: presence == 'idle' &&
+                    summarizePresenceSubtext(mobile.presenceState).isNotEmpty
+                ? summarizePresenceSubtext(mobile.presenceState)
+                : null,
             leading: _PresenceIcon(PresenceStatus.idle),
             divider: true,
-            onTap: () => _saveSetting('presence_preference', 'idle'),
+            onTap: () => _selectPresenceWithDuration(PresenceStatus.idle),
             trailing: _presenceCheck(presence == 'idle'),
           ),
           SettingsRow(
             title: L10n.of(context).ui_do_not_disturb_816d809a,
+            subtitle: presence == 'dnd' &&
+                    summarizePresenceSubtext(mobile.presenceState).isNotEmpty
+                ? summarizePresenceSubtext(mobile.presenceState)
+                : null,
             leading: _PresenceIcon(PresenceStatus.dnd),
             divider: true,
-            onTap: () => _saveSetting('presence_preference', 'dnd'),
+            onTap: () => _selectPresenceWithDuration(PresenceStatus.dnd),
             trailing: _presenceCheck(presence == 'dnd'),
           ),
           SettingsRow(
             title: L10n.of(context).ui_invisible_bab31830,
+            subtitle: presence == 'invisible' &&
+                    summarizePresenceSubtext(mobile.presenceState).isNotEmpty
+                ? summarizePresenceSubtext(mobile.presenceState)
+                : null,
             leading: _PresenceIcon(PresenceStatus.invisible),
-            onTap: () => _saveSetting('presence_preference', 'invisible'),
+            divider: true,
+            onTap: () => _selectPresenceWithDuration(PresenceStatus.invisible),
             trailing: _presenceCheck(presence == 'invisible'),
+          ),
+          SettingsRow.chevron(
+            title: 'Presence schedules',
+            subtitle: summarizeSchedulesHint(mobile.presenceState),
+            leading: const _LeadingIcon(Icons.schedule_rounded),
+            onTap: () => showPresenceSchedulesSheet(context, ref),
           ),
           SettingsSectionHeader(
             L10n.of(context).ui_appearance_31018b9f,
@@ -1184,6 +1207,25 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           SettingsSectionHeader(L10n.of(context).ui_privacy_ebfa87e7),
+          ListenableBuilder(
+              listenable: shoppingLinks,
+              builder: (context, _) => shoppingLinks.available ||
+                      shoppingLinks.enabled
+                  ? SwitchListTile(
+                      title: const Text('Shopping affiliate links'),
+                      subtitle: const Text(
+                          'Use this instance’s shared code when opening eligible shopping links.'),
+                      value: shoppingLinks.enabled,
+                      onChanged: shoppingLinks.busy
+                          ? null
+                          : (value) => shoppingLinks.choose(
+                              context,
+                              ref
+                                  .read(mobileControllerProvider.notifier)
+                                  .repository
+                                  .api,
+                              value))
+                  : const SizedBox.shrink()),
           SettingsRow(
             title: L10n.of(context).share_locale_with_bots,
             subtitle: L10n.of(context).share_locale_with_bots_description,
@@ -2025,6 +2067,31 @@ final class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           _disablingPush = false;
         });
       }
+    }
+  }
+
+  Future<void> _selectPresenceWithDuration(PresenceStatus status) async {
+    if (_saving) return;
+    final picked = await showPresenceDurationSheet(context, status: status);
+    if (picked == null || !mounted) return;
+    setState(() => _saving = true);
+    try {
+      final updated = await ref
+          .read(mobileControllerProvider.notifier)
+          .repository
+          .updateSettings(<String, Object?>{
+        'presence_preference': status.name,
+        'presence_duration_minutes': picked.minutes,
+      });
+      ref.read(mobileControllerProvider.notifier).applySettings(updated);
+      if (mounted) setState(() => _settings = updated);
+    } on Object catch (error) {
+      _showError(
+        error,
+        summary: L10n.current.ui_could_not_save_that_setting_0e78d469,
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 

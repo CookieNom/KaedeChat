@@ -12,6 +12,7 @@ import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
@@ -61,6 +62,7 @@ from .e2ee import (
     encrypted_forward_snapshot_digest,
     process_e2ee_control,
     require_real_e2ee_provider,
+    validate_device_registration_input,
     webhook_key_package_upload_input,
     webhook_mls_credential,
 )
@@ -982,6 +984,12 @@ def _announcement_follow_page(
     return result
 
 
+def _webhook_token_segment(token: str) -> str:
+    if not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9_-]+", token) is None:
+        raise ValueError("invalid webhook token")
+    return token
+
+
 def _webhook_token_ref(origin: str, webhook_id: int) -> EntityRef:
     return EntityRef(webhook_id, _target_authority(origin))
 
@@ -1683,7 +1691,17 @@ class Client:
         worker_state: WorkerState,
         intents: Intents | None = None,
         e2ee_device_id: str | None = None,
+        private_media_origins: Mapping[str, Sequence[str]] | None = None,
     ):
+        from .media_urls import media_url_origin, validate_signed_media_url
+
+        self._private_media_origins = {
+            media_url_origin(validate_signed_media_url(target, target)): {
+                media_url_origin(validate_signed_media_url(origin, origin))
+                for origin in origins
+            }
+            for target, origins in (private_media_origins or {}).items()
+        }
         self.worker_state = worker_state
         self.intents = intents or Intents.default()
         self._targets: dict[str, httpx.AsyncClient] = {}
@@ -1902,10 +1920,35 @@ class Client:
         installation_id: int | None = None,
         channel_ref: EntityRef | None = None,
         dm_capability_id: str | None = None,
+        message: Message | None = None,
     ) -> Callable[[View], Awaitable[None]]:
         """Build the authoritative edit used by ``disable_on_timeout``."""
 
+        # Keep the authored projection. An MLS sender cannot decrypt its own
+        # ciphertext from history, and the signed revision fences concurrent edits.
+        encrypted_at_registration = message is not None and message.e2ee is not None
+        if encrypted_at_registration:
+            message = deepcopy(message, {id(self): self})
+
         async def edit(timed_out_view: View) -> None:
+            if message is not None and (
+                encrypted_at_registration
+                or message.channel_ref in self._interaction_e2ee_contexts
+            ):
+                if message.channel_ref not in self._interaction_e2ee_contexts:
+                    raise E2EEProtocolError(
+                        "encrypted view timeout requires a current MLS context"
+                    )
+                await self.edit_message(
+                    message.channel_ref,
+                    message.ref,
+                    components=timed_out_view.to_components(),
+                    target=target,
+                    installation_id=installation_id,
+                    dm_capability_id=dm_capability_id,
+                    _authored_message=message if encrypted_at_registration else None,
+                )
+                return
             body: dict[str, Any] = {
                 "components": timed_out_view.to_components(),
             }
@@ -3392,6 +3435,41 @@ class Client:
         headers: dict[str, str] | None = None,
     ) -> Any:
         origin = self._request_target(path, target)
+        if path.startswith("/api/v1/webhooks/"):
+            # The URL token authenticates this request. Keep it isolated from the
+            # worker's tokens, request proofs, DM capabilities, and cookie jar.
+            webhook_headers = {
+                key: value
+                for key, value in (headers or {}).items()
+                if key.lower()
+                in {
+                    "idempotency-key",
+                    "x-kaede-e2ee-device",
+                    "x-github-event",
+                    "x-github-delivery",
+                    "x-audit-log-reason",
+                }
+            }
+            async with httpx.AsyncClient(
+                base_url=origin, timeout=30, trust_env=False
+            ) as client:
+                for attempt in range(3):
+                    response = await client.request(
+                        method,
+                        path,
+                        json=json,
+                        params=params,
+                        headers=webhook_headers,
+                    )
+                    if response.status_code != 429 or attempt == 2:
+                        await self._raise(response)
+                        return None if response.status_code == 204 else response.json()
+                    await asyncio.sleep(
+                        min(
+                            30.0,
+                            max(0.05, float(response.headers.get("Retry-After", "1"))),
+                        )
+                    )
         application_home = self._is_application_home_path(path)
         if origin not in self._targets:
             if application_home:
@@ -3532,8 +3610,10 @@ class Client:
             # Current Kaede responses use a top-level error envelope. Keep the
             # legacy FastAPI detail shape for older instance versions.
             detail = (
-                body if "code" in body else body.get("detail", {})
-            ) if isinstance(body, dict) else {}
+                (body if "code" in body else body.get("detail", {}))
+                if isinstance(body, dict)
+                else {}
+            )
         except ValueError:
             detail = {}
         code = (
@@ -3651,6 +3731,16 @@ class Client:
             or "e2ee-mls/1" not in normalized_capabilities
         ):
             raise ValueError("bot E2EE capabilities are invalid")
+        validate_device_registration_input(
+            challenge.signing_input,
+            (
+                "kaede-bot-e2ee-device-registration-v1",
+                str(challenge.application_ref),
+                str(challenge.worker_id),
+            ),
+            identity_key,
+            credential,
+        )
         signature = real_provider.sign(challenge.signing_input)
         if len(signature) != 64:
             raise E2EEProtocolError("bot E2EE provider returned an invalid signature")
@@ -4727,6 +4817,7 @@ class Client:
                     ),
                     target=origin,
                     view_version=starter_version,
+                    message=starter_message,
                     installation_id=installation_id,
                     channel_ref=channel,
                     dm_capability_id=dm_capability_id,
@@ -5805,6 +5896,25 @@ class Client:
             ),
         )
 
+    def _media_transport(
+        self, target: str, media_origin: str
+    ) -> httpx.AsyncHTTPTransport:
+        from .media_urls import (
+            MediaTransport,
+            MediaURLValidationError,
+            validate_target_media_url,
+        )
+
+        allow_private = media_origin in self._private_media_origins.get(target, set())
+        if target == self._application_home or target in self._explicit_targets:
+            try:
+                validate_target_media_url(media_origin, target)
+            except MediaURLValidationError:
+                pass
+            else:
+                allow_private = True
+        return MediaTransport(media_origin, allow_private=allow_private)
+
     async def _download_attachment_path(
         self,
         path: str,
@@ -5837,6 +5947,7 @@ class Client:
         async with (
             httpx.AsyncClient(
                 timeout=60,
+                transport=self._media_transport(origin, media_origin),
                 follow_redirects=False,
                 trust_env=False,
             ) as media_client,
@@ -5922,7 +6033,10 @@ class Client:
                 "Upload URL is not on this instance's safe HTTPS media host",
             ) from None
         async with httpx.AsyncClient(
-            timeout=60, follow_redirects=False, trust_env=False
+            timeout=60,
+            follow_redirects=False,
+            trust_env=False,
+            transport=self._media_transport(attachment.target, upload_origin),
         ) as upload_client:
             response = await upload_client.put(
                 upload_url,
@@ -7529,7 +7643,7 @@ class Client:
         )
         raw = await self.request(
             "GET",
-            f"/api/v1/webhooks/{resolved_id}/{token}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}",
             target=origin,
         )
         webhook = _webhook_response(
@@ -7564,7 +7678,7 @@ class Client:
         )
         raw = await self.request(
             "PATCH",
-            f"/api/v1/webhooks/{resolved_id}/{token}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}",
             target=origin,
             json=body,
         )
@@ -7591,7 +7705,7 @@ class Client:
         )
         await self.request(
             "DELETE",
-            f"/api/v1/webhooks/{resolved_id}/{token}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}",
             target=origin,
         )
 
@@ -7616,7 +7730,7 @@ class Client:
         )
         raw_ticket = await self.request(
             "POST",
-            f"/api/v1/webhooks/{resolved_id}/{token}/avatar/tickets",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/avatar/tickets",
             target=origin,
             json={
                 "filename": filename,
@@ -7636,7 +7750,7 @@ class Client:
         raw = await self._complete_scanned_media(
             lambda: self.request(
                 "PUT",
-                f"/api/v1/webhooks/{resolved_id}/{token}/avatar",
+                f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/avatar",
                 target=origin,
                 json={"attachment_id": str(ticket.ref.id)},
             ),
@@ -7668,7 +7782,7 @@ class Client:
         )
         raw = await self.request(
             "DELETE",
-            f"/api/v1/webhooks/{resolved_id}/{token}/avatar",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/avatar",
             target=origin,
         )
         webhook = _webhook_response(
@@ -7715,7 +7829,7 @@ class Client:
         challenge = WebhookE2EEDeviceChallenge.from_payload(
             await self.request(
                 "POST",
-                f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/devices/challenge",
+                f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/devices/challenge",
                 target=origin,
                 json={
                     "identity_key": _b64(identity_key),
@@ -7751,6 +7865,12 @@ class Client:
             or "e2ee-mls/1" not in normalized
         ):
             raise ValueError("webhook E2EE capabilities are invalid")
+        validate_device_registration_input(
+            challenge.signing_input,
+            ("kaede-webhook-e2ee-device-registration-v1", str(webhook_ref)),
+            identity_key,
+            credential,
+        )
         signature = real_provider.sign(challenge.signing_input)
         if len(signature) != 64:
             raise E2EEProtocolError(
@@ -7760,7 +7880,7 @@ class Client:
         device = WebhookE2EEDevice.from_payload(
             await self.request(
                 "POST",
-                f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/devices",
+                f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/devices",
                 target=origin,
                 json={
                     "challenge_id": challenge.challenge_id,
@@ -7812,7 +7932,7 @@ class Client:
         inventory = WebhookE2EEDeviceInventory.from_payload(
             await self.request(
                 "GET",
-                f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/devices",
+                f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/devices",
                 target=origin,
             )
         )
@@ -7863,7 +7983,7 @@ class Client:
         result = WebhookE2EEKeyPackageResult.from_payload(
             await self.request(
                 "POST",
-                f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/devices/"
+                f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/devices/"
                 f"{device.protocol_id}/key-packages",
                 target=self._authority_target(webhook_ref, target),
                 json={
@@ -8035,7 +8155,7 @@ class Client:
         page = WebhookE2EEControlPage.from_payload(
             await self.request(
                 "GET",
-                f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/channels/"
+                f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/channels/"
                 f"{channel_ref}/control-log",
                 target=origin,
                 headers={"X-Kaede-E2EE-Device": device_id},
@@ -8100,7 +8220,7 @@ class Client:
         origin = self._authority_target(webhook_ref, target)
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/forum-reservations",
+            f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/forum-reservations",
             target=origin,
             headers={"X-Kaede-E2EE-Device": device_id},
             json={
@@ -8160,7 +8280,7 @@ class Client:
         proposal = WebhookE2EEForumProposal.from_payload(
             await self.request(
                 "POST",
-                f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/channels/"
+                f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/channels/"
                 f"{thread_ref}/propose",
                 target=self._authority_target(thread_ref, target),
                 headers={"X-Kaede-E2EE-Device": device.protocol_id},
@@ -8202,7 +8322,7 @@ class Client:
         origin = self._authority_target(thread_ref, target)
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/channels/"
+            f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/channels/"
             f"{thread_ref}/activate",
             target=origin,
             headers={"X-Kaede-E2EE-Device": device.protocol_id},
@@ -8260,7 +8380,7 @@ class Client:
         origin = self._authority_target(thread_ref, target)
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{webhook_ref.id}/{token}/e2ee/channels/"
+            f"/api/v1/webhooks/{webhook_ref.id}/{_webhook_token_segment(token)}/e2ee/channels/"
             f"{thread_ref}/starter",
             target=origin,
             headers={"X-Kaede-E2EE-Device": device_id},
@@ -8365,7 +8485,7 @@ class Client:
             params["thread_id"] = str(thread_id)
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{resolved_id}/{token}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}",
             target=origin,
             params=params,
             json=body,
@@ -8420,7 +8540,7 @@ class Client:
         )
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{resolved_id}/{token}/attachments",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/attachments",
             target=origin,
             params={"channel_id": str(channel_ref)}
             if channel_ref is not None
@@ -8468,7 +8588,7 @@ class Client:
         )
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{resolved_id}/{token}/slack",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/slack",
             target=origin,
             params={
                 "wait": wait,
@@ -8519,7 +8639,7 @@ class Client:
             headers["X-GitHub-Delivery"] = delivery_id
         raw = await self.request(
             "POST",
-            f"/api/v1/webhooks/{resolved_id}/{token}/github",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/github",
             target=origin,
             params={
                 "wait": wait,
@@ -8559,7 +8679,7 @@ class Client:
         )
         raw = await self.request(
             "GET",
-            f"/api/v1/webhooks/{resolved_id}/{token}/messages/{message}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/messages/{message}",
             target=origin,
             params={"thread_id": str(thread_id)} if thread_id is not None else None,
         )
@@ -8637,7 +8757,7 @@ class Client:
         )
         raw = await self.request(
             "PATCH",
-            f"/api/v1/webhooks/{resolved_id}/{token}/messages/{message}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/messages/{message}",
             target=origin,
             params={
                 "with_components": include_components,
@@ -8678,7 +8798,7 @@ class Client:
         )
         await self.request(
             "DELETE",
-            f"/api/v1/webhooks/{resolved_id}/{token}/messages/{message}",
+            f"/api/v1/webhooks/{resolved_id}/{_webhook_token_segment(token)}/messages/{message}",
             target=origin,
             params={"thread_id": str(thread_id)} if thread_id is not None else None,
         )
@@ -10037,6 +10157,7 @@ class Client:
                     f"/api/v1/bots/channels/{message.channel_ref}/messages/{message.ref}",
                     target=origin,
                     view_version=message.view_version,
+                    message=message,
                     installation_id=installation_id,
                     channel_ref=channel,
                     dm_capability_id=dm_capability_id,
@@ -10194,6 +10315,7 @@ class Client:
         view_version: int | None = None,
         installation_id: int | None = None,
         dm_capability_id: str | None = None,
+        _authored_message: Message | None = None,
     ) -> Message:
         origin = self._authority_target(channel, target)
         authored_rich_data: dict[str, object] | None = None
@@ -10205,19 +10327,28 @@ class Client:
         automatic_e2ee = (
             isinstance(e2ee, MissingType) and channel in self._interaction_e2ee_contexts
         )
+        if _authored_message is not None and not automatic_e2ee:
+            raise E2EEProtocolError(
+                "encrypted view timeout requires a current MLS context"
+            )
         requested_view = view
         if automatic_e2ee:
-            current_page = await self.history(
-                channel,
-                target=origin,
-                around=message,
-                limit=1,
-                installation_id=installation_id,
-                dm_capability_id=dm_capability_id,
-            )
-            current = next((item for item in current_page if item.ref == message), None)
-            if current is None:
-                raise NotFound(404, "MESSAGE_NOT_FOUND", "Message not found")
+            if _authored_message is not None:
+                current = _authored_message
+            else:
+                current_page = await self.history(
+                    channel,
+                    target=origin,
+                    around=message,
+                    limit=1,
+                    installation_id=installation_id,
+                    dm_capability_id=dm_capability_id,
+                )
+                current = next(
+                    (item for item in current_page if item.ref == message), None
+                )
+                if current is None:
+                    raise NotFound(404, "MESSAGE_NOT_FOUND", "Message not found")
             if current.poll is not None:
                 raise ValueError("encrypted poll messages cannot be edited")
             current_envelope = current.e2ee
@@ -10240,14 +10371,16 @@ class Client:
                 merged_timeout = (
                     max(1, int(view.timeout)) if view.timeout is not None else 900
                 )
-            elif not isinstance(components, MissingType):
-                merged_components = [dict(item) for item in components]
-                merged_persistent = current.view_persistent
-                merged_timeout = 900
             else:
-                merged_components = [dict(item) for item in current.components]
+                retained_components = (
+                    current.components
+                    if isinstance(components, MissingType)
+                    else components
+                )
+                merged_components = [dict(item) for item in retained_components]
                 merged_persistent = current.view_persistent
-                merged_timeout = 900
+                contract = current_envelope.get("interaction_contract") or {}
+                merged_timeout = int(contract.get("view_timeout_seconds", 900))
             if isinstance(attachment_manifests, MissingType):
                 merged_manifests = [
                     dict(item.encrypted_manifest)
@@ -10451,6 +10584,7 @@ class Client:
                         ),
                         target=origin,
                         view_version=rendered.view_version,
+                        message=rendered,
                         installation_id=installation_id,
                         channel_ref=channel,
                         dm_capability_id=dm_capability_id,
@@ -14440,6 +14574,9 @@ class Client:
         """Project a locally authored body after exact envelope echo validation."""
 
         message.content = cast(str | None, data["content"])
+        message.allowed_mentions = dict(
+            cast(Mapping[str, Any], data["allowed_mentions"])
+        )
         message.embeds = [
             dict(item) for item in cast(list[dict[str, Any]], data["embeds"])
         ]

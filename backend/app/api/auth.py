@@ -423,13 +423,14 @@ main{{width:min(430px,calc(100vw - 32px));padding:28px;border:1px solid #3b3c36;
 background:#20211e}}h1{{margin:0 0 8px;font-size:24px}}p{{color:#aaa298;margin:0 0 22px}}
 #challenge{{min-height:70px;display:grid;place-items:center}}#error{{color:#ef6b68;margin-top:14px}}
 </style></head><body><main><h1>One quick check</h1>
-<p>Complete this verification to continue securely in Kaede Desktop.</p>
+<p>Complete this verification to continue in Kaede.</p>
 <div id="challenge"></div><div id="error" role="alert"></div></main>
 <script>
 const requestId={safe_request_id!r};
 function emit(kind,value){{
   const payload=JSON.stringify({{kind,request_id:requestId,value}});
-  if(window.ipc&&window.ipc.postMessage) window.ipc.postMessage(payload);
+  const bridge = window.ipc || window.KaedeChallenge;
+  if(bridge && bridge.postMessage) bridge.postMessage(payload);
 }}
 window.addEventListener('load',()=>{{
  const wait=setInterval(()=>{{if(!window.turnstile)return;clearInterval(wait);

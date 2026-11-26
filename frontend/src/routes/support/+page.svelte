@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { resolve } from '$app/paths';
+  import { isNativeDesktop, storedNativeInstance } from '$lib/platform/native';
   import { api, ApiError } from '$lib/api/client';
   import LegalPage from '$lib/components/landing/LegalPage.svelte';
   import TurnstileWidget from '$lib/components/TurnstileWidget.svelte';
@@ -10,6 +11,7 @@
     reasons: string[];
     turnstile: { enabled: boolean; site_key: string | null };
   } | null>(null);
+  let supportUrl = $state('');
   let loadFailed = $state(false);
   let email = $state('');
   let reason = $state('');
@@ -33,7 +35,12 @@
   onMount(() => {
     const controller = new AbortController();
     void api<NonNullable<typeof configuration>>('/support/config', { signal: controller.signal })
-      .then((value) => (configuration = value))
+      .then((value) => {
+        configuration = value;
+        if (isNativeDesktop() && value.turnstile.enabled && storedNativeInstance()) {
+          supportUrl = `https://${storedNativeInstance()}/support`;
+        }
+      })
       .catch(() => {
         if (!controller.signal.aborted) loadFailed = true;
       });
@@ -68,7 +75,9 @@
 
 <LegalPage title="Contact support" updated={null}>
   <div class="support-content">
-    <p>Need help with this instance? Choose a reason and tell us what happened.</p>
+    {#if !supportUrl}<p>
+        Need help with this instance? Choose a reason and tell us what happened.
+      </p>{/if}
     {#if loadFailed}
       <p class="form-error" role="alert">
         Support could not be loaded. Please reload this page to try again.
@@ -77,6 +86,10 @@
       <p role="status">Loading support options…</p>
     {:else if !configuration.enabled}
       <p role="status">The support form is currently unavailable. Please try again later.</p>
+    {:else if supportUrl}
+      <a class="primary-button" href={supportUrl} target="_blank" rel="noopener noreferrer">
+        Open support form in browser
+      </a>
     {:else if sent}
       <div bind:this={successPanel} role="status" tabindex="-1" class="support-success">
         <h2>Request received</h2>
@@ -149,6 +162,10 @@
 <style>
   .support-content {
     max-width: 36rem;
+  }
+  .support-content a.primary-button {
+    margin-top: 1rem;
+    color: var(--on-accent);
   }
   form {
     display: grid;

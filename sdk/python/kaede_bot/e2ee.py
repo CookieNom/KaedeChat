@@ -178,6 +178,27 @@ def _payload_mapping(value: object, label: str) -> Mapping[str, object]:
     return cast(Mapping[str, object], value)
 
 
+def validate_device_registration_input(
+    signing_input: bytes,
+    principal_fields: tuple[str, ...],
+    identity_key: bytes,
+    credential: bytes,
+) -> None:
+    try:
+        fields = signing_input.decode("ascii").split("\n")
+    except UnicodeDecodeError as exc:
+        raise E2EEProtocolError("invalid device registration challenge") from exc
+    if fields[:-1] != [
+        *principal_fields,
+        _b64(identity_key),
+        _b64(hashlib.sha256(credential).digest()),
+    ]:
+        raise E2EEProtocolError(
+            "device registration challenge does not match this device"
+        )
+    _wire_b64(fields[-1], "device registration nonce", maximum=32, exact=32)
+
+
 @dataclass(frozen=True, slots=True)
 class BotE2EEDeviceChallenge:
     challenge_id: str
@@ -1136,6 +1157,7 @@ class InteractionE2EEContext:
     policy_generation: int
     epoch: int
     history_floor_message_ref: EntityRef | None = None
+    mls_epoch: int | None = None
     _invalidated: bool = field(default=False, init=False, repr=False)
     _seen_ciphertexts: dict[bytes, int] = field(
         default_factory=dict, init=False, repr=False
@@ -1167,6 +1189,12 @@ class InteractionE2EEContext:
             or not 0 <= self.epoch <= (1 << 64) - 1
         ):
             raise ValueError("interaction MLS epoch is invalid")
+        if self.mls_epoch is None:
+            self.mls_epoch = self.epoch
+        elif (
+            type(self.mls_epoch) is not int or not 0 <= self.mls_epoch <= (1 << 64) - 1
+        ):
+            raise ValueError("interaction MLS group epoch is invalid")
         if (
             self.history_floor_message_ref is not None
             and self.history_floor_message_ref.domain != self.channel_ref.domain
@@ -1182,7 +1210,7 @@ class InteractionE2EEContext:
     def require_current(self) -> None:
         if self._invalidated:
             raise E2EEProtocolError("interaction E2EE context was invalidated")
-        if self.provider.group_epoch(self.group_id) != self.epoch:
+        if self.provider.group_epoch(self.group_id) != self.mls_epoch:
             self.invalidate()
             raise E2EEProtocolError("interaction MLS context is stale")
 
@@ -2136,34 +2164,48 @@ def process_e2ee_control(
         "MLS control ciphertext",
         maximum=MAX_MLS_MESSAGE_BYTES,
     )
+    if control.policy_generation < context.policy_generation:
+        return
+    same_generation = control.policy_generation == context.policy_generation
+    if same_generation and not hmac.compare_digest(group_id, context.group_id):
+        raise E2EEProtocolError("MLS policy generation was equivocated")
+    if same_generation and control.epoch < context.epoch:
+        return
     operation = control.envelope.get("operation")
     if operation == "welcome":
+        # A rotated room starts a fresh group with one Add commit. The
+        # authority's channel epoch continues counting across these groups.
         current_epoch = process_e2ee_welcome(
             context.provider,
             group_id,
             ciphertext,
-            expected_epoch=control.epoch,
+            expected_epoch=1,
         )
+        if current_epoch != 1 and not (
+            same_generation
+            and context.epoch == control.epoch
+            and current_epoch == context.mls_epoch
+        ):
+            raise E2EEProtocolError("MLS Welcome did not establish the expected epoch")
     elif operation == "commit":
+        if not same_generation or context.mls_epoch is None:
+            raise E2EEProtocolError("MLS commit arrived before its Welcome")
+        expected_epoch = context.mls_epoch + (control.epoch - context.epoch)
         current_epoch = process_e2ee_commit(
             context.provider,
             group_id,
             ciphertext,
-            expected_epoch=control.epoch,
+            expected_epoch=expected_epoch,
             apply=control.apply,
         )
+        if current_epoch != expected_epoch:
+            raise E2EEProtocolError("MLS commit does not match the current group epoch")
     else:
         raise E2EEProtocolError("unsupported MLS control operation")
-    if control.policy_generation < context.policy_generation:
-        return
-    if (
-        control.policy_generation == context.policy_generation
-        and not hmac.compare_digest(group_id, context.group_id)
-    ):
-        raise E2EEProtocolError("MLS policy generation was equivocated")
     context.group_id = group_id
     context.policy_generation = control.policy_generation
-    context.epoch = current_epoch
+    context.epoch = control.epoch
+    context.mls_epoch = current_epoch
 
 
 def _canonical_json(value: object, *, label: str) -> bytes:

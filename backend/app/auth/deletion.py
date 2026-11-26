@@ -40,6 +40,7 @@ async def erase_content_batch(
         lock_message_delete_target,
         proxy_remote_dm_message_operation,
         proxy_remote_guild_message_operation,
+        queue_attachment_tombstones,
     )
     from app.chat.channel_access import ChannelAccess
     from app.core.task_wake import enqueue_best_effort
@@ -137,15 +138,40 @@ async def erase_content_batch(
             user.content_deletion = dict(state)
             await session.commit()
         else:
-            access = await lock_message_delete_access(session, settings, access)
+            access = await lock_message_delete_access(
+                session, settings, access, include_unavailable=True
+            )
             message = await lock_message_delete_target(session, settings, access, message_ref)
+            if message.safety_state:
+                continue
             erase_message_body(message)
             await session.execute(
                 delete(m.Poll).where(
                     m.Poll.message_id == message.id, m.Poll.message_domain == message.origin_domain
                 )
             )
-            await commit_local_message_deletion(session, redis, settings, access, user, message)
+            if access.channel.unavailable or (
+                access.guild is not None and access.guild.unavailable
+            ):
+                # The room already has a terminal event. Purge its private state
+                # without publishing a channel projection that could reopen it.
+                message.deleted_at = cutoff
+                await session.execute(
+                    delete(m.Pin).where(
+                        m.Pin.message_id == message.id,
+                        m.Pin.message_domain == message.origin_domain,
+                    )
+                )
+                deleted, destinations = await queue_attachment_tombstones(
+                    session, settings, access, user, [message]
+                )
+                await session.commit()
+                for item in deleted:
+                    await enqueue_best_effort(media_local_purge, item.id, item.origin_domain)
+                for destination in destinations:
+                    await enqueue_best_effort(federation_deliver, destination)
+            else:
+                await commit_local_message_deletion(session, redis, settings, access, user, message)
     if messages:
         return
 
@@ -537,13 +563,18 @@ async def erase_authored_thread_titles_batch(
                 }
                 channel = await session.get(m.Channel, (channel_id, domain))
         else:
-            access = await lock_local_channel_mutation(session, settings, access)
+            access = await lock_local_channel_mutation(
+                session, settings, access, include_unavailable=True
+            )
             channel = access.channel
         if channel is None:
             continue
         # Keep other people's replies; remove the author's title and description.
         channel.name = "Deleted post"
         channel.topic = None
+        if domain == settings.domain and (channel.unavailable or guild.unavailable):
+            await session.commit()
+            continue
         if domain == settings.domain:
             await queue_guild_mutation(
                 session,

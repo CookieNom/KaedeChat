@@ -15,6 +15,7 @@ from app.voice.service import (
     STAGE_CHANNEL_TYPE,
     priority_speaking_granted,
     update_authoritative_occupant_grant,
+    voice_metadata_matches_policy,
     voice_speaking_allowed,
 )
 from app.voice.state import (
@@ -46,21 +47,18 @@ async def enforce_room_permissions(
         return 0
     guild = await session.get(Guild, (guild_id, settings.domain))
     channel = await session.get(Channel, (channel_id, settings.domain))
-    if (
-        guild is None
-        or channel is None
-        or (channel.guild_id, channel.guild_domain)
-        != (
-            guild.id,
-            guild.origin_domain,
-        )
-    ):
-        return 0
     changed = 0
     for occupant in await room_occupants(redis, settings.domain, room):
         try:
-            if channel.encryption_mode == "e2ee" and channel.encryption_state != "active":
-                raise HTTPException(status_code=409)
+            if (
+                guild is None
+                or guild.unavailable
+                or channel is None
+                or channel.unavailable
+                or (channel.guild_id, channel.guild_domain) != (guild.id, guild.origin_domain)
+                or not voice_metadata_matches_policy(channel, room, occupant.participant_metadata)
+            ):
+                raise HTTPException(status_code=403)
             user_id, user_domain = parse_participant_identity(occupant.identity)
             user = await session.get(User, (user_id, user_domain))
             if user is None or user.disabled_at is not None:

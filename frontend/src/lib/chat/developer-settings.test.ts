@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
+import { ApiError } from '$lib/api/client';
 import Page from '../../routes/(app)/developers/[applicationRef]/+page.svelte';
 const network = vi.hoisted(() => ({ api: vi.fn() }));
 vi.mock('$lib/api/client', async (original) => ({
@@ -38,6 +39,7 @@ function input(text: string, value: string) {
 let saved: Record<string, unknown>;
 let saveGate: Promise<void>;
 let rejectSave: boolean;
+let credentialsAllowed: boolean;
 let ignoreSave: boolean;
 let rejectCommandPublish: boolean;
 let publishedCommands: unknown[];
@@ -56,6 +58,7 @@ const addCommand = (type: string) => {
 beforeEach(async () => {
   saveGate = Promise.resolve();
   rejectSave = false;
+  credentialsAllowed = true;
   ignoreSave = false;
   rejectCommandPublish = false;
   publishedCommands = [];
@@ -110,12 +113,24 @@ beforeEach(async () => {
       }
       return structuredClone(publishedCommands);
     }
+    if (path.endsWith('/credentials') && !credentialsAllowed)
+      throw new ApiError('FORBIDDEN', 'Credentials unavailable', 403);
     if (path.endsWith('/credentials') && options.method === 'POST') return { token: 'test-token' };
     if (path.endsWith('/directory-preview')) throw new Error('Preview unavailable');
     return [];
   });
   component = mount(Page, { target: document.body, props: { data: { applicationRef: ref } } });
   await vi.waitFor(() => expect(field('Support URL')).toBeTruthy());
+});
+
+it('shows application settings and workers to members without credential access', async () => {
+  await unmount(component);
+  credentialsAllowed = false;
+  component = mount(Page, { target: document.body, props: { data: { applicationRef: ref } } });
+  await vi.waitFor(() => expect(field('Support URL')).toBeTruthy());
+  navigate('Credentials & workers');
+  expect(document.querySelector('#workers')).toBeTruthy();
+  expect(button('Create credential')).toBeUndefined();
 });
 
 it('saves the complete settings draft and retains it after reload', async () => {

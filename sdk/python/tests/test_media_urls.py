@@ -474,3 +474,73 @@ async def test_external_s3_download_status_does_not_disclose_presigned_url(
     assert raised.value.detail == {"upstream_status": 403}
     assert "download-secret" not in str(raised.value)
     assert "download-secret" not in repr(raised.value.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("addresses", "explicit_private", "allowed"),
+    [
+        (["8.8.8.8"], False, True),
+        (["2001:4860:4860::8888", "8.8.8.8"], False, True),
+        (["8.8.8.8", "::1"], False, False),
+        (["::ffff:127.0.0.1"], False, False),
+        (["64:ff9b::a00:1"], False, False),
+        (["169.254.169.254"], False, False),
+        (["192.168.1.6"], True, True),
+    ],
+)
+async def test_media_connection_uses_only_the_resolved_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    addresses: list[str],
+    explicit_private: bool,
+    allowed: bool,
+) -> None:
+    import asyncio
+    from kaede_bot.media_urls import MediaTransport
+
+    resolve = AsyncMock(
+        return_value=[(0, 0, 0, "", (address, 443)) for address in addresses]
+    )
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
+    connect = AsyncMock(
+        side_effect=[
+            *(httpx.ConnectError("unreachable") for _ in addresses[:-1]),
+            httpx.Response(200),
+        ]
+    )
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", connect)
+    location = "https://objects.example/a%2Fb?sig=a%2Fc"
+    request = httpx.Request("PUT", location, content=b"signed")
+    async with MediaTransport(
+        "https://objects.example", allow_private=explicit_private
+    ) as transport:
+        if not allowed:
+            with pytest.raises(ApiError, match="restricted"):
+                await transport.handle_async_request(request)
+            connect.assert_not_awaited()
+            return
+        await transport.handle_async_request(request)
+    resolve.assert_awaited_once()
+    pinned = connect.await_args.args[0]
+    assert [call.args[0].url.host for call in connect.await_args_list] == addresses
+    assert pinned.url.raw_path == request.url.raw_path
+    assert (
+        pinned.headers["Host"] == pinned.extensions["sni_hostname"] == "objects.example"
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_media_trust_is_scoped_to_the_configured_api_target() -> None:
+    bot = Client(
+        worker_state=client().worker_state,
+        private_media_origins={TARGET: ["https://objects.internal"]},
+    )
+    bot._explicit_targets.add(TARGET)
+    for target, origin, trusted in [
+        (TARGET, "https://media.chat.example", True),
+        (TARGET, "https://objects.internal", True),
+        ("https://other.example", "https://objects.internal", False),
+        ("https://other.example", "https://media.other.example", False),
+    ]:
+        async with bot._media_transport(target, origin) as transport:
+            assert transport.allow_private is trusted

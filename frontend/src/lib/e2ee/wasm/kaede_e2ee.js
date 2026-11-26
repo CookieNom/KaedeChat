@@ -178,6 +178,27 @@ export class KaedeMlsClient {
   }
   /**
    * @param {Uint8Array} group_id
+   * @returns {bigint}
+   */
+  groupEpoch(group_id) {
+    try {
+      const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+      const ptr0 = passArray8ToWasm0(group_id, wasm.__wbindgen_export);
+      const len0 = WASM_VECTOR_LEN;
+      wasm.kaedemlsclient_groupEpoch(retptr, this.__wbg_ptr, ptr0, len0);
+      var r0 = getDataViewMemory0().getBigInt64(retptr + 8 * 0, true);
+      var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+      var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+      if (r3) {
+        throw takeObject(r2);
+      }
+      return BigInt.asUintN(64, r0);
+    } finally {
+      wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+  }
+  /**
+   * @param {Uint8Array} group_id
    * @returns {boolean}
    */
   hasGroup(group_id) {

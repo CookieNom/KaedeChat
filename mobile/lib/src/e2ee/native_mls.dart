@@ -269,6 +269,11 @@ final class NativeMlsClient {
         'group_id': _base64url(groupId),
       })['bytes']);
 
+  String groupEpoch(Uint8List groupId) =>
+      _request('group_epoch', <String, Object?>{
+        'group_id': _base64url(groupId),
+      })['epoch'] as String;
+
   Uint8List exportEpochSecret(
     Uint8List groupId,
     String label,

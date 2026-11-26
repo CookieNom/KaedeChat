@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.chat.e2ee import channel_encryption_policy_payload
 from app.chat.e2ee_membership import (
     GUILD_E2EE_ACCESS_MUTATION_EVENTS,
+    GUILD_E2EE_OPTIONAL_REKEY_EVENTS,
     pause_guild_e2ee_for_membership_change,
 )
 from app.chat.payloads import materialize_channel_created_at
@@ -19,7 +20,7 @@ from app.core.federation import (
 from app.core.settings import Settings
 from app.core.task_wake import enqueue_best_effort
 from app.db.materialization import materialize_updated_at
-from app.db.models import Channel, Guild, GuildMember, User
+from app.db.models import Channel, Guild, GuildMember, Instance, User
 from app.federation.events import build_envelope, queue_event
 from app.federation.guilds import (
     SNAPSHOT_NEUTRAL_GUILD_EVENTS,
@@ -130,6 +131,22 @@ def federation_channel_state(channel: Channel) -> dict[str, object]:
     }
 
 
+SOUNDBOARD_DECIMAL_VOLUME_CAPABILITY = "guild-soundboard-decimal-volume/1"
+
+
+def guild_event_uses_decimal_volume(event_type: str, content: dict[str, Any]) -> bool:
+    if not event_type.startswith("guild.soundboard."):
+        return False
+    sounds = (
+        content.get("soundboard_sounds", [])
+        if event_type == "guild.soundboard.sounds.update"
+        else [content.get("sound")]
+    )
+    return isinstance(sounds, list) and any(
+        isinstance(sound, dict) and isinstance(sound.get("volume"), str) for sound in sounds
+    )
+
+
 async def queue_guild_mutation(
     session: AsyncSession,
     settings: Settings,
@@ -143,6 +160,7 @@ async def queue_guild_mutation(
     extra_destinations: Iterable[str] = (),
     e2ee_policy_channels: list[Channel] | None = None,
     pause_e2ee: bool = True,
+    permission_source_changed: bool = False,
 ) -> int:
     """Sequence, retain, and durably fan out one authoritative guild mutation.
 
@@ -157,8 +175,15 @@ async def queue_guild_mutation(
         raise RuntimeError("only a guild home may emit guild mutations")
     guild = await lock_current_guild(session, guild)
     signer = await guild_mutation_signer(session, settings, guild, actor)
-    if pause_e2ee and event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS:
-        paused = await pause_guild_e2ee_for_membership_change(session, guild)
+    if permission_source_changed or (
+        pause_e2ee and event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS
+    ):
+        if channel is not None and (
+            permission_source_changed or event_type.startswith("guild.overwrite.")
+        ):
+            paused = await pause_guild_e2ee_for_membership_change(session, guild, channel)
+        else:
+            paused = await pause_guild_e2ee_for_membership_change(session, guild)
         if e2ee_policy_channels is not None:
             known = {(item.id, item.origin_domain) for item in e2ee_policy_channels}
             e2ee_policy_channels.extend(
@@ -186,6 +211,7 @@ async def queue_guild_mutation(
             "channel": {
                 **raw_channel,
                 "version": channel.updated_at.isoformat(),
+                "encryption_policy": channel_encryption_policy_payload(channel),
             },
         }
     context: dict[str, Any] = {
@@ -193,6 +219,10 @@ async def queue_guild_mutation(
         "guild_domain": guild.origin_domain,
         "seq": str(seq),
     }
+    if permission_source_changed:
+        context["permission_source_changed"] = True
+    if not pause_e2ee and event_type in GUILD_E2EE_OPTIONAL_REKEY_EVENTS:
+        context["access_unchanged"] = True
     if snapshot_changed:
         context["snapshot_generation"] = str(guild.snapshot_generation)
     if channel is not None:
@@ -228,6 +258,17 @@ async def queue_guild_mutation(
         if channel is not None and not channel.unavailable
         else destinations
     )
+    if visible_destinations and guild_event_uses_decimal_volume(event_type, content):
+        # Legacy guild feeds require a JSON number. Only the upgraded peers
+        # receive fractional sound updates; every peer advances the same seq.
+        visible_destinations = set(
+            await session.scalars(
+                select(Instance.domain).where(
+                    Instance.domain.in_(visible_destinations),
+                    Instance.capabilities.contains([SOUNDBOARD_DECIMAL_VOLUME_CAPABILITY]),
+                )
+            )
+        )
     hidden_destinations = destinations - visible_destinations
     for destination in sorted(visible_destinations & destinations):
         await queue_event(

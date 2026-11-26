@@ -504,12 +504,16 @@ async def test_stale_vault_holder_is_fenced_if_lease_changes_while_waiting_for_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
 async def test_claiming_operation_retry_releases_room_lock_before_user_package_locks(
     monkeypatch: pytest.MonkeyPatch,
+    legacy: bool,
 ) -> None:
     user = cast(
         object,
-        SimpleNamespace(id=7, origin_domain="alpha.localhost", is_local=True),
+        SimpleNamespace(
+            id=7, origin_domain="alpha.localhost", is_local=True, e2ee_device_generation=1
+        ),
     )
     channel = cast(
         Channel,
@@ -544,11 +548,13 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
         base_policy_generation=0,
         policy_generation=1,
         group_id=GROUP_ID,
-        participant_refs=[{"id": "7", "domain": "alpha.localhost"}],
+        participant_refs=[{"id": "7", "domain": "alpha.localhost", "generation": "1"}],
         key_packages=[],
         prepared_response=None,
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
+    if legacy:
+        operation.participant_refs[0].pop("generation")
     session = SimpleNamespace(
         scalar=AsyncMock(side_effect=[None, None, operation, operation]),
         get=AsyncMock(return_value=user),
@@ -569,7 +575,7 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
 
     monkeypatch.setattr(e2ee_api, "claim_room_key_packages", claim_after_commit)
 
-    response = await e2ee_api._propose_room_operation(
+    prepare = e2ee_api._propose_room_operation(
         "activate",
         access,
         payload,
@@ -579,6 +585,14 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
         SimpleNamespace(domain="alpha.localhost"),
     )
 
+    if legacy:
+        with pytest.raises(HTTPException) as caught:
+            await prepare
+        assert caught.value.detail["code"] == "E2EE_OPERATION_STALE"
+        assert operation.status == "failed"
+        session.commit.assert_awaited_once()
+        return
+    response = await prepare
     assert response["status"] == "prepared"
     assert session.commit.await_count == 2
 
@@ -590,6 +604,8 @@ async def test_claiming_operation_retry_releases_room_lock_before_user_package_l
         ("rekey", None),
         ("activate", "required"),
         ("activate", "stale"),
+        ("rekey", "device_change"),
+        ("rekey", "departed_committer"),
     ],
 )
 async def test_room_commit_saves_controls_before_last_message_reference(
@@ -598,7 +614,7 @@ async def test_room_commit_saves_controls_before_last_message_reference(
     consent_error: str | None,
 ) -> None:
     domain = "alpha.localhost"
-    user = SimpleNamespace(id=7, origin_domain=domain)
+    user = SimpleNamespace(id=7, origin_domain=domain, e2ee_device_generation=1)
     channel = SimpleNamespace(
         id=10,
         origin_domain=domain,
@@ -625,7 +641,7 @@ async def test_room_commit_saves_controls_before_last_message_reference(
         base_policy_generation=0,
         group_id=GROUP_ID,
         consent_request_id=None,
-        participant_refs=[{"id": "7", "domain": domain}],
+        participant_refs=[{"id": "7", "domain": domain, "generation": "1"}],
         key_packages=[],
     )
     payload = RoomActivationRequest(
@@ -662,6 +678,7 @@ async def test_room_commit_saves_controls_before_last_message_reference(
     )
     for name, result in (
         ("load_channel_access", access),
+        ("_fence_operation_devices", e2ee_api._operation_roster([user])),
         ("lock_local_channel_mutation", access),
         ("require_room_policy_authority", None),
         ("require_active_sender_device", None),
@@ -680,12 +697,12 @@ async def test_room_commit_saves_controls_before_last_message_reference(
     monkeypatch.setattr(e2ee_api, "channel_payload", lambda *_: {})
     monkeypatch.setattr(e2ee_api, "profile_from_user", lambda *_: {})
 
-    if consent_error:
-        guard = AsyncMock(return_value="new-request")
-        if consent_error == "required":
-            guard.side_effect = HTTPException(409, detail={"code": "E2EE_DM_CONSENT_REQUIRED"})
-        monkeypatch.setattr(e2ee_api, "require_dm_encryption_consent", guard)
-        with pytest.raises(HTTPException, match="E2EE_DM_"):
+    if consent_error == "departed_committer":
+        access.guild = None
+        access.participants = [user]
+        session.get = AsyncMock(return_value=SimpleNamespace(authority_domain=domain))
+        monkeypatch.setattr(e2ee_api, "group_participants", AsyncMock(return_value=[]))
+        with pytest.raises(HTTPException, match="CHANNEL_NOT_FOUND"):
             await e2ee_api._commit_room_operation(
                 kind,
                 e2ee_api.EntityRef(f"10@{domain}"),
@@ -697,7 +714,33 @@ async def test_room_commit_saves_controls_before_last_message_reference(
                 SimpleNamespace(domain=domain),
                 actor_home_attested=False,
             )
-        assert channel.encryption_mode == "plaintext"
+        session.get.assert_awaited_once_with(
+            e2ee_api.DMConversation, (10, domain), with_for_update=True, populate_existing=True
+        )
+        assert channel.encryption_state == "rekeying" and not saved_messages
+        return
+
+    if consent_error:
+        guard = AsyncMock(return_value="new-request")
+        if consent_error == "required":
+            guard.side_effect = HTTPException(409, detail={"code": "E2EE_DM_CONSENT_REQUIRED"})
+        monkeypatch.setattr(e2ee_api, "require_dm_encryption_consent", guard)
+        if consent_error == "device_change":
+            user.e2ee_device_generation += 1
+        code = "E2EE_OPERATION_STALE" if consent_error == "device_change" else "E2EE_DM_"
+        with pytest.raises(HTTPException, match=code):
+            await e2ee_api._commit_room_operation(
+                kind,
+                e2ee_api.EntityRef(f"10@{domain}"),
+                payload,
+                SimpleNamespace(user=user),
+                session,
+                AsyncMock(),
+                SimpleNamespace(mint=AsyncMock()),
+                SimpleNamespace(domain=domain),
+                actor_home_attested=False,
+            )
+        assert channel.encryption_state == ("rekeying" if kind == "rekey" else "plaintext")
         assert operation.status == "failed"
         assert not saved_messages
         return

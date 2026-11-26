@@ -672,7 +672,9 @@ async def local_search(
     }
 
 
-def federated_search_payload(local: dict[str, object]) -> dict[str, object]:
+def federated_search_payload(
+    local: dict[str, object], *, decimal_scores: bool = True
+) -> dict[str, object]:
     """Reduce a local response to the small, peer-safe search wire shape."""
 
     wire_results: list[dict[str, object]] = []
@@ -712,8 +714,10 @@ def federated_search_payload(local: dict[str, object]) -> dict[str, object]:
                     "ranking_score": float(ranking_score),
                     "cursor_after": cursor_after,
                 }
-            ).model_dump(mode="json")
+            ).model_dump(mode="json", context={"federation": True})
         )
+        if not decimal_scores:
+            wire_results[-1]["ranking_score"] = round(ranking_score)
     return {
         "results": wire_results,
         "next_cursor": local.get("next_cursor"),
@@ -887,6 +891,7 @@ async def remote_search_wire_response(
             "POST",
             authority,
             "/_kaede/v1/search/messages",
+            query={"score_format": "decimal"},
             payload=payload,
             request_timeout=settings.search_federation_timeout_seconds,
             max_response_bytes=2 * 1024 * 1024,
@@ -897,6 +902,7 @@ async def remote_search_wire_response(
         raise FederationNetworkError("remote search failed")
     raw_remote = decode_federation_response_json(
         response,
+        allow_floats=True,
         max_response_bytes=2 * 1024 * 1024,
     )
     return FederatedMessageSearchResponse.model_validate(raw_remote)
@@ -1209,6 +1215,7 @@ async def search_with_authority(
             "POST",
             str(authority),
             "/_kaede/v1/search/messages",
+            query={"score_format": "decimal"},
             payload=payload,
             request_timeout=settings.search_federation_timeout_seconds,
             max_response_bytes=2 * 1024 * 1024,
@@ -1216,7 +1223,9 @@ async def search_with_authority(
         )
         if response.status_code != 200:
             raise FederationNetworkError("remote search failed")
-        raw_remote = decode_federation_response_json(response, max_response_bytes=2 * 1024 * 1024)
+        raw_remote = decode_federation_response_json(
+            response, max_response_bytes=2 * 1024 * 1024, allow_floats=True
+        )
         remote = FederatedMessageSearchResponse.model_validate(raw_remote)
     except (FederationNetworkError, ValueError):
         coverage = cast(dict[str, object], local["coverage"])

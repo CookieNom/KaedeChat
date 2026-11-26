@@ -267,6 +267,48 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
         session.add_all(users)
         await session.flush()
         user = users[0]
+        domain = user.origin_domain
+        session.add(
+            m.Guild(
+                id=60, origin_domain=domain, name="Local guild", owner_id=8, owner_domain=domain
+            )
+        )
+        await session.flush()
+        thread = m.Channel(
+            id=61,
+            origin_domain=domain,
+            guild_id=60,
+            guild_domain=domain,
+            type=11,
+            name="Old thread",
+            owner_id=7,
+            owner_domain=domain,
+            unavailable=True,
+            archived=True,
+            locked=True,
+            auto_archive_duration=60,
+            archive_timestamp=cutoff,
+            last_activity_at=cutoff,
+            message_count=1,
+            total_message_sent=1,
+            member_count=0,
+            created_floor_id=60,
+            created_at=cutoff - timedelta(seconds=2),
+        )
+        session.add(thread)
+        await session.flush()
+        session.add(
+            m.Message(
+                id=62,
+                origin_domain=domain,
+                channel_id=61,
+                channel_domain=domain,
+                author_id=7,
+                author_domain=domain,
+                content="private in deleted thread",
+                created_at=cutoff - timedelta(seconds=1),
+            )
+        )
         session.add(m.UserSettings(user_id=7, user_domain="alpha.localhost"))
         user.content_deletion = {
             "status": "pending",
@@ -344,6 +386,11 @@ async def test_cleanup_resumes_and_preserves_other_authors_and_new_content(migra
         assert user.content_deletion["status"] == "pending"
         old = await session.get(m.Message, (30, "alpha.localhost"))
         assert old.content is None and old.embeds == [] and old.deleted_at is not None
+        await erase_content_batch(session, AsyncMock(), settings, user)
+        erased = await session.get(m.Message, (62, domain))
+        assert erased.deleted_at is not None and erased.content is None
+        await session.refresh(thread)
+        assert thread.name == "Deleted post" and thread.unavailable is True
         await erase_content_batch(session, AsyncMock(), settings, user)
         assert user.content_deletion["status"] == "complete"
         remote_delete.assert_awaited_once()

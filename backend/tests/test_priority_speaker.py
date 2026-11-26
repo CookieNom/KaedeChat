@@ -313,7 +313,7 @@ async def test_authoritative_grant_computes_priority_speaking_fail_closed(
     )
 
     assert grant.can_priority_speak is expected
-    assert captured["can_publish_data"] is expected
+    assert captured["can_publish_data"] is (not bot_client or expected)
     assert cast_dict(captured["metadata"])["can_priority_speak"] is expected
 
 

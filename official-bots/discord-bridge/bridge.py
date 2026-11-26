@@ -121,6 +121,7 @@ class Bridge(discord.Client):
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         self.store, self.kaede = store, bot
         self.route_lock = asyncio.Lock()
+        self.pairing = Pairing(self)
         bot.listen("on_message")(self.on_kaede_message)
         bot.listen("on_ready")(self.on_kaede_ready)
         bot.listen("on_gateway_error")(self.on_kaede_connection_error)
@@ -143,6 +144,8 @@ class Bridge(discord.Client):
 
     async def on_message(self, message):
         if message.guild is None or message.author.bot or message.webhook_id:
+            return
+        if await self.pairing.approve_from_discord(message):
             return
         for route in self.store.routes():
             if str(message.channel.id) == route["discord_channel_id"]:
@@ -223,7 +226,6 @@ async def main():
     store = Store(data / "bridge.sqlite3")
     bot = kaede.Client(worker_state=kaede.WorkerState.load(worker_dir), intents=INTENTS)
     bridge = Bridge(store, bot)
-    Pairing(bridge)
     if os.environ.get("BRIDGE_SYNC_COMMANDS") == "1":
         try:
             await bot.sync_commands(application_home=os.environ["KAEDE_APPLICATION_HOME"],

@@ -1195,6 +1195,8 @@ async def grant_webhook_e2ee_participation_local(
         )
         .with_for_update()
     )
+    if participation is not None and participation.status == "active":
+        return await webhook_e2ee_participation_state(session, webhook, channel)
     if participation is None:
         participation = WebhookE2EEParticipation(
             id=await snowflake.mint(),
@@ -1272,6 +1274,8 @@ async def revoke_webhook_e2ee_participation_local(
             .with_for_update()
         )
     )
+    if not rows:
+        return await webhook_e2ee_participation_state(session, webhook, channel)
     now = datetime.now(UTC)
     for participation in rows:
         participation.status = "revoked"

@@ -16,6 +16,11 @@ from pydantic import (
     model_validator,
 )
 
+from app.chat.presence_control import (
+    MAX_PRESENCE_DURATION_MINUTES,
+    MAX_PRESENCE_SCHEDULES,
+    is_valid_timezone,
+)
 from app.core.model_validation import UnambiguousInputModel
 from app.core.types import EntityRef
 
@@ -231,6 +236,42 @@ class GuildNavigationUpdate(UnambiguousInputModel):
         return self
 
 
+class PresenceScheduleInput(UnambiguousInputModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,36}$")
+    name: str = Field(min_length=1, max_length=32)
+    status: Literal["online", "idle", "dnd", "invisible"]
+    days: list[int] = Field(min_length=1, max_length=7)
+    start_minute: int = Field(ge=0, le=1439)
+    end_minute: int = Field(ge=0, le=1439)
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must contain a non-whitespace character")
+        return cleaned
+
+    @field_validator("days")
+    @classmethod
+    def validate_days(cls, value: list[int]) -> list[int]:
+        if any(not 0 <= day <= 6 for day in value):
+            raise ValueError("days must be integers from 0 (Sunday) to 6 (Saturday)")
+        unique = sorted(set(value))
+        if len(unique) != len(value):
+            raise ValueError("days cannot contain duplicates")
+        return unique
+
+    @model_validator(mode="after")
+    def validate_window(self) -> PresenceScheduleInput:
+        if self.start_minute == self.end_minute:
+            raise ValueError("start_minute and end_minute cannot be identical")
+        return self
+
+
 class SettingsPatch(UnambiguousInputModel):
     locale: str | None = Field(default=None, min_length=2, max_length=16)
     theme: Literal["system", "light", "dark"] | None = None
@@ -238,6 +279,18 @@ class SettingsPatch(UnambiguousInputModel):
     share_locale_with_bots: bool | None = None
     age_restricted_dm_commands_enabled: bool | None = None
     presence_preference: Literal["online", "idle", "dnd", "invisible"] | None = None
+    presence_duration_minutes: int | None = Field(
+        default=None, ge=1, le=MAX_PRESENCE_DURATION_MINUTES
+    )
+    presence_reset_override: bool | None = None
+    presence_skip_active_schedule: bool = False
+    presence_timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    presence_schedules: list[PresenceScheduleInput] | None = Field(
+        default=None, max_length=MAX_PRESENCE_SCHEDULES
+    )
+    expected_presence_schedules: list[PresenceScheduleInput] | None = Field(
+        default=None, max_length=MAX_PRESENCE_SCHEDULES
+    )
     notification_settings: dict[str, object] | None = None
 
     @model_validator(mode="after")
@@ -245,9 +298,24 @@ class SettingsPatch(UnambiguousInputModel):
         if not self.model_fields_set:
             raise ValueError("at least one settings field is required")
         for field in self.model_fields_set:
+            if field == "presence_duration_minutes" and getattr(self, field) is None:
+                continue
             if getattr(self, field) is None:
                 raise ValueError(f"settings {field} cannot be null")
+        if self.presence_schedules is not None:
+            ids = [rule.id for rule in self.presence_schedules]
+            if len(ids) != len(set(ids)):
+                raise ValueError("presence schedule IDs must be unique")
+        elif self.expected_presence_schedules is not None:
+            raise ValueError("expected_presence_schedules requires presence_schedules")
         return self
+
+    @field_validator("presence_timezone")
+    @classmethod
+    def validate_presence_timezone(cls, value: str | None) -> str | None:
+        if value is not None and not is_valid_timezone(value):
+            raise ValueError("must be a valid IANA timezone")
+        return value.strip() if value is not None else None
 
     @field_validator("locale")
     @classmethod

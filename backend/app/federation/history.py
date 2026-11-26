@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 import time
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -99,6 +100,7 @@ from app.federation.replication import (
 from app.federation.schemas import RemoteUserProfile
 from app.federation.security import validated_event_envelope
 from app.federation.terminal_rooms import lock_terminal_room
+from app.media.payloads import federation_attachment_duration
 from app.media.processing import normalize_declared_type, sanitize_filename
 from app.media.schemas import validate_voice_attachment_metadata
 from app.media.tombstones import (
@@ -817,13 +819,14 @@ async def history_export_page(
             author,
             attachments_by_message.get(message_ref, []),
             poll=await render_poll_payload(session, message),
+            include_forward_source=True,
         )
         # History is a federation protocol, not a client response.  Keep both
         # author fields on the strict RemoteUserProfile wire contract: the
         # general API user payload renders numeric generations as strings.
         author_profile = profile_from_user(author)
         payload["author"] = author_profile
-        payload["history_author"] = author_profile
+        payload["history_author"] = deepcopy(author_profile)
         reactions = reactions_by_message.get(message_ref, [])
         selected_pin = pins_by_message.get(message_ref)
         payload["reactions"] = [
@@ -1601,18 +1604,9 @@ def _validate_history_message(
             raise ValueError("historical attachment size is invalid")
         width, height = remote_media_dimensions(attachment)
         blurhash = sanitized_remote_blurhash(attachment.get("blurhash"))
-        duration_raw = attachment.get("duration_secs")
-        duration_secs = (
-            float(duration_raw)
-            if isinstance(duration_raw, (int, float)) and not isinstance(duration_raw, bool)
-            else None
-        )
+        duration_secs = federation_attachment_duration(attachment)
         waveform = attachment.get("waveform")
-        if (
-            duration_raw is not None
-            and duration_secs is None
-            or (waveform is not None and not isinstance(waveform, str))
-        ):
+        if waveform is not None and not isinstance(waveform, str):
             raise ValueError("historical voice metadata is invalid")
         validate_voice_attachment_metadata(
             content_type=normalized_content_type,
@@ -1625,7 +1619,7 @@ def _validate_history_message(
         )
         normalized_attachments.append(
             {
-                **attachment,
+                **{key: value for key, value in attachment.items() if key != "duration_secs_exact"},
                 "content_type": normalized_content_type,
                 "width": width,
                 "height": height,

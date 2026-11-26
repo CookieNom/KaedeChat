@@ -26,7 +26,7 @@ from app.core.permissions import Permission
 from app.core.settings import Settings
 from app.core.types import EntityRef
 from app.db.bot_models import BotInstallation, BotWorker
-from app.db.models import User
+from app.db.models import Channel, User
 from app.federation.security import FederationPrincipal
 from app.voice.background import _publish_local_room_snapshot
 from app.voice.e2ee import MediaSessionRotationError, evict_channel_media_sessions
@@ -299,6 +299,18 @@ async def test_bot_disconnect_releases_its_claim_when_livekit_is_unavailable(
 def test_invalid_room_identifiers_are_rejected(value: str) -> None:
     with pytest.raises(ValueError):
         parse_room_name(value)
+
+
+def test_media_key_upgrade_gate_applies_only_to_encrypted_rooms():
+    from app.voice.service import require_media_key_support
+
+    channel = Channel(id=42, origin_domain="voice.test", encryption_mode="plaintext")
+    require_media_key_support(channel, False)
+    channel.encryption_mode = "e2ee"
+    with pytest.raises(HTTPException) as rejected:
+        require_media_key_support(channel, False)
+    assert rejected.value.detail["code"] == "VOICE_CLIENT_UPDATE_REQUIRED"
+    require_media_key_support(channel, True)
 
 
 def test_livekit_token_is_short_lived_room_scoped_and_has_no_admin_grant() -> None:
@@ -1299,7 +1311,7 @@ async def test_successful_local_voice_replacement_revokes_federated_move_session
         "app.api.voice.load_voice_channel",
         AsyncMock(
             return_value=(
-                SimpleNamespace(id=34),
+                SimpleNamespace(id=34, encryption_mode="plaintext"),
                 SimpleNamespace(id=12, origin_domain="alpha.localhost"),
             )
         ),

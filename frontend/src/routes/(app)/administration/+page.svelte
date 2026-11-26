@@ -15,7 +15,12 @@
   import { authenticatedMedia, downloadAuthenticatedMedia } from '$lib/media/authenticated';
   import { onMount } from 'svelte';
 
+  import VendorPane from '$lib/vendor/VendorPane.svelte';
+  import type { Pane } from '$lib/vendor/panes';
+  let panes = $state<Pane[]>([]);
+  const activePane = $derived(panes.find((p) => view === 'extension-' + p.id));
   type View =
+    | `extension-${string}`
     | 'rtc'
     | 'overview'
     | 'users'
@@ -189,6 +194,13 @@
   ] as const;
 
   let sections: SectionDefinition[] = $derived([
+    ...panes.map((p): SectionDefinition => ({
+      id: `extension-${p.id}`,
+      label: p.title,
+      icon: 'server',
+      description: p.description,
+      capability: 'extensions.manage'
+    })),
     {
       id: 'rtc',
       label: 'Voice and video',
@@ -631,7 +643,7 @@
     loading[section] = true;
     sectionErrors[section] = undefined;
     try {
-      if (section === 'rtc' || section === 'child-safety') {
+      if (section.startsWith('extension-') || section === 'rtc' || section === 'child-safety') {
         /* RTCSettings owns its form and loading state. */
       } else if (section === 'overview') overview = await api('/administration/overview');
       else if (section === 'users') users = await api('/administration/users');
@@ -660,6 +672,7 @@
     globalError = '';
     try {
       me = await api<AdminIdentity>('/administration/@me');
+      if (can('extensions.manage')) panes = await api<Pane[]>('/administration/extensions');
       await Promise.all(
         sections
           .filter((section) => hasAdminCapability(me?.capabilities, section.capability))
@@ -682,7 +695,13 @@
 
   async function refreshCurrent(): Promise<void> {
     clearFeedback();
-    await loadSection(view);
+    if (view.startsWith('extension-')) {
+      try {
+        panes = await api<Pane[]>('/administration/extensions');
+      } catch (error) {
+        showError(error, 'Could not refresh extensions.');
+      }
+    } else await loadSection(view);
   }
 
   async function searchUsers(): Promise<void> {
@@ -1144,6 +1163,8 @@
             <p>{$t('ui_fetching_the_latest_instance_data_19146c34')}</p>
           </div>
         </section>
+      {:else if activePane}
+        {#key activePane}<VendorPane pane={activePane} />{/key}
       {:else if view === 'rtc'}
         <RTCSettings />
       {:else if view === 'overview'}

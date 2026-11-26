@@ -53,6 +53,7 @@ AUXILIARY_KAEDE_ENV = {
     "KAEDE_LEGAL_MINIMUM_AGE",
     "KAEDE_LEGAL_OPERATOR_NAME",
     "KAEDE_TURN_UDP_PORT",
+    "KAEDE_VENDOR_DIR",
     "KAEDE_VOICE_ENABLED",
 }
 HEADER_SECRET_RE = re.compile(r"^[A-Za-z0-9._~-]{1,256}$")
@@ -96,7 +97,146 @@ class VoiceRegionConfiguration(BaseModel):
         return normalized
 
 
-class Settings(BaseSettings):
+class StorageSettings(BaseSettings):
+    """Configuration shared by the bucket initializer and application storage client."""
+
+    model_config = SettingsConfigDict(env_prefix="KAEDE_", env_file=".env", extra="ignore")
+    environment: Literal["development", "test", "production"] = "production"
+    media_storage_backend: Literal["garage", "s3"] = "garage"
+    media_s3_endpoint: str = "http://garage:3900"
+    media_public_base_url: str | None = None
+    media_s3_region: str = "kaede"
+    media_s3_addressing_style: Literal["path", "virtual"] = "path"
+    media_s3_create_buckets: bool | None = None
+    media_s3_init_timeout_seconds: int = Field(default=120, ge=1, le=900)
+    media_s3_access_key: SecretStr | None = None
+    media_s3_secret_key: SecretStr | None = None
+    media_s3_session_token: SecretStr | None = None
+    media_attachments_bucket: str = "kaede-attachments"
+    media_derived_bucket: str = "kaede-derived"
+    media_remote_cache_bucket: str = "kaede-remote-cache"
+
+    @field_validator("media_s3_endpoint", "media_public_base_url")
+    @classmethod
+    def validate_media_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("contains an invalid port") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not valid_url_host(parsed.hostname)
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("must be an absolute HTTP(S) origin without credentials or a path")
+        return value.rstrip("/")
+
+    @field_validator(
+        "media_attachments_bucket", "media_derived_bucket", "media_remote_cache_bucket"
+    )
+    @classmethod
+    def validate_bucket_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value):
+            raise ValueError("must be a valid lower-case S3 bucket name")
+        return value
+
+    @field_validator("media_s3_access_key")
+    @classmethod
+    def validate_media_access_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not 16 <= len(raw) <= 128 or not re.fullmatch(r"[A-Za-z0-9._~-]+", raw):
+            raise ValueError("must be a 16-128 character URL-safe object-store access key")
+        return value
+
+    @field_validator("media_s3_secret_key")
+    @classmethod
+    def validate_media_secret_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not 16 <= len(raw) <= 128 or any(
+            ord(character) < 33 or ord(character) > 126 for character in raw
+        ):
+            raise ValueError("must be a 16-128 character printable object-store secret key")
+        return value
+
+    @field_validator("media_s3_session_token")
+    @classmethod
+    def validate_media_session_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not 16 <= len(raw) <= 4096 or any(
+            ord(character) < 33 or ord(character) > 126 for character in raw
+        ):
+            raise ValueError("must be a printable 16-4096 character S3 session token")
+        return value
+
+    @field_validator("media_s3_region")
+    @classmethod
+    def validate_media_region(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", value):
+            raise ValueError("must be a valid SigV4 region identifier")
+        return value
+
+    @field_validator(
+        "media_s3_create_buckets",
+        "media_s3_access_key",
+        "media_s3_secret_key",
+        "media_s3_session_token",
+        "media_public_base_url",
+        mode="before",
+    )
+    @classmethod
+    def blank_storage_option(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def validate_storage_configuration(self) -> Self:
+        if self.media_s3_create_buckets is None:
+            self.media_s3_create_buckets = self.media_storage_backend == "garage"
+        if self.media_s3_addressing_style == "virtual" and any(
+            "." in bucket
+            for bucket in (
+                self.media_attachments_bucket,
+                self.media_derived_bucket,
+                self.media_remote_cache_bucket,
+            )
+        ):
+            raise ValueError("virtual-hosted S3 addressing requires bucket names without dots")
+        if self.media_s3_addressing_style == "virtual":
+            for endpoint in (self.media_s3_endpoint, self.media_public_base_url):
+                if endpoint is None:
+                    continue
+                host = urlsplit(endpoint).hostname
+                try:
+                    ipaddress.ip_address(host or "")
+                except ValueError:
+                    continue
+                raise ValueError("virtual-hosted S3 addressing requires DNS endpoint hosts")
+        return self
+
+    def validate_storage_transport(self) -> None:
+        if self.environment == "production":
+            scheme = urlsplit(self.media_s3_endpoint).scheme
+            if self.media_storage_backend == "garage" and scheme != "http":
+                raise ValueError(
+                    "the internal Garage S3 endpoint must use HTTP inside the data network"
+                )
+            if self.media_storage_backend == "s3" and scheme != "https":
+                raise ValueError("an external S3 endpoint must use HTTPS in production")
+
+
+class Settings(StorageSettings):
     _rtc_provider: Literal["builtin", "cinnamon"] = PrivateAttr(default="builtin")
     model_config = SettingsConfigDict(
         env_prefix="KAEDE_",
@@ -117,8 +257,8 @@ class Settings(BaseSettings):
         super().__init__(**values)
 
     # Instance and API
+    software_version: str = Field(default="development", min_length=1, max_length=110)
     domain: str
-    environment: Literal["development", "test", "production"] = "production"
     service_role: Literal[
         "full", "api", "gateway", "worker", "scheduler", "migration", "preflight"
     ] = "full"
@@ -297,19 +437,6 @@ class Settings(BaseSettings):
     media_inflight_quota_bytes: int = Field(default=500 * 1024 * 1024, ge=1)
     media_upload_ttl_seconds: int = Field(default=15 * 60, ge=60, le=3600)
     media_scan_enabled: bool = True
-    media_storage_backend: Literal["garage", "s3"] = "garage"
-    media_s3_endpoint: str = "http://garage:3900"
-    media_public_base_url: str | None = None
-    media_s3_region: str = "kaede"
-    media_s3_addressing_style: Literal["path", "virtual"] = "path"
-    media_s3_create_buckets: bool | None = None
-    media_s3_init_timeout_seconds: int = Field(default=120, ge=1, le=900)
-    media_s3_access_key: SecretStr | None = None
-    media_s3_secret_key: SecretStr | None = None
-    media_s3_session_token: SecretStr | None = None
-    media_attachments_bucket: str = "kaede-attachments"
-    media_derived_bucket: str = "kaede-derived"
-    media_remote_cache_bucket: str = "kaede-remote-cache"
     media_clamav_host: str = "clamav"
     media_clamav_port: int = Field(default=3310, ge=1, le=65535)
     photodna_enabled: bool = False
@@ -622,28 +749,6 @@ class Settings(BaseSettings):
             )
         return value.rstrip("/")
 
-    @field_validator("media_s3_endpoint", "media_public_base_url")
-    @classmethod
-    def validate_media_origin(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = urlsplit(value)
-        try:
-            _ = parsed.port
-        except ValueError as exc:
-            raise ValueError("contains an invalid port") from exc
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not valid_url_host(parsed.hostname)
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
-        ):
-            raise ValueError("must be an absolute HTTP(S) origin without credentials or a path")
-        return value.rstrip("/")
-
     @field_validator("voice_public_url")
     @classmethod
     def validate_voice_public_url(cls, value: str | None) -> str | None:
@@ -716,56 +821,6 @@ class Settings(BaseSettings):
             raw = value.get_secret_value()
             if not 32 <= len(raw) <= 256 or any(ord(item) < 33 or ord(item) > 126 for item in raw):
                 raise ValueError("must be a 32-256 character printable LiveKit API secret")
-        return value
-
-    @field_validator(
-        "media_attachments_bucket", "media_derived_bucket", "media_remote_cache_bucket"
-    )
-    @classmethod
-    def validate_bucket_name(cls, value: str) -> str:
-        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value):
-            raise ValueError("must be a valid lower-case S3 bucket name")
-        return value
-
-    @field_validator("media_s3_access_key")
-    @classmethod
-    def validate_media_access_key(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is None:
-            return None
-        raw = value.get_secret_value()
-        if not 16 <= len(raw) <= 128 or not re.fullmatch(r"[A-Za-z0-9._~-]+", raw):
-            raise ValueError("must be a 16-128 character URL-safe object-store access key")
-        return value
-
-    @field_validator("media_s3_secret_key")
-    @classmethod
-    def validate_media_secret_key(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is None:
-            return None
-        raw = value.get_secret_value()
-        if not 16 <= len(raw) <= 128 or any(
-            ord(character) < 33 or ord(character) > 126 for character in raw
-        ):
-            raise ValueError("must be a 16-128 character printable object-store secret key")
-        return value
-
-    @field_validator("media_s3_session_token")
-    @classmethod
-    def validate_media_session_token(cls, value: SecretStr | None) -> SecretStr | None:
-        if value is None:
-            return None
-        raw = value.get_secret_value()
-        if not 16 <= len(raw) <= 4096 or any(
-            ord(character) < 33 or ord(character) > 126 for character in raw
-        ):
-            raise ValueError("must be a printable 16-4096 character S3 session token")
-        return value
-
-    @field_validator("media_s3_region")
-    @classmethod
-    def validate_media_region(cls, value: str) -> str:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", value):
-            raise ValueError("must be a valid SigV4 region identifier")
         return value
 
     @field_validator("photodna_subscription_key")
@@ -1022,27 +1077,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "search_url must be an HTTP(S) origin without a path, credentials, or query"
                 )
-        if self.media_s3_create_buckets is None:
-            self.media_s3_create_buckets = self.media_storage_backend == "garage"
-        if self.media_s3_addressing_style == "virtual" and any(
-            "." in bucket
-            for bucket in (
-                self.media_attachments_bucket,
-                self.media_derived_bucket,
-                self.media_remote_cache_bucket,
-            )
-        ):
-            raise ValueError("virtual-hosted S3 addressing requires bucket names without dots")
-        if self.media_s3_addressing_style == "virtual":
-            for endpoint in (self.media_s3_endpoint, self.media_public_base_url):
-                if endpoint is None:
-                    continue
-                host = urlsplit(endpoint).hostname
-                try:
-                    ipaddress.ip_address(host or "")
-                except ValueError:
-                    continue
-                raise ValueError("virtual-hosted S3 addressing requires DNS endpoint hosts")
         media_runtime = self.service_role in {"full", "api", "worker", "preflight"}
         if (
             media_runtime
@@ -1157,15 +1191,12 @@ class Settings(BaseSettings):
                 raise ValueError("federation_peer_overrides cannot be used in production")
             if self.federation_ca_file is not None:
                 raise ValueError("federation_ca_file cannot be used in production")
-            if self.media_storage_backend == "garage":
-                if urlsplit(self.media_s3_endpoint).scheme != "http":
-                    raise ValueError(
-                        "the internal Garage S3 endpoint must use HTTP inside the data network"
-                    )
-                if urlsplit(self.media_public_base_url).hostname != f"media.{self.domain}":
-                    raise ValueError("Garage media_public_base_url host must be media.<domain>")
-            elif urlsplit(self.media_s3_endpoint).scheme != "https":
-                raise ValueError("an external S3 endpoint must use HTTPS in production")
+            self.validate_storage_transport()
+            if (
+                self.media_storage_backend == "garage"
+                and urlsplit(self.media_public_base_url).hostname != f"media.{self.domain}"
+            ):
+                raise ValueError("Garage media_public_base_url host must be media.<domain>")
             if urlsplit(self.media_public_base_url).scheme != "https":
                 raise ValueError("media_public_base_url must use HTTPS in production")
             if self.voice_enabled and urlsplit(self.voice_public_url).scheme != "wss":

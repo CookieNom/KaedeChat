@@ -5,6 +5,7 @@
   import { applyTtsPreferences } from '$lib/chat/tts';
   import { entityKey } from '$lib/chat/refs';
   import LanguageSuggestion from '$lib/components/LanguageSuggestion.svelte';
+  import IncomingCall from '$lib/components/IncomingCall.svelte';
   import AppInbox from '$lib/components/AppInbox.svelte';
   import CommandSwitcher from '$lib/components/CommandSwitcher.svelte';
   import InteractionOverlay from '$lib/components/InteractionOverlay.svelte';
@@ -22,7 +23,32 @@
   import { onMount } from 'svelte';
   import { contentSafety } from '$lib/chat/content-safety.svelte';
   import { chatEntities } from '$lib/stores/entities.svelte';
+  import { presenceControl, type PresenceStatePayload } from '$lib/stores/presence.svelte';
 
+  import ShoppingPrompt from '$lib/vendor/ShoppingPrompt.svelte';
+  import { shopping } from '$lib/vendor/shopping.svelte';
+  import { untrack } from 'svelte';
+  const shoppingAccount = $derived(
+    chatEntities.currentUser ? entityKey(chatEntities.currentUser) : ''
+  );
+  $effect(() => {
+    if (!shoppingAccount) return;
+    untrack(() => {
+      if (!document.hidden) void shopping.load();
+    });
+    const refresh = () => {
+      if (!document.hidden) void shopping.load();
+    };
+    document.addEventListener('visibilitychange', refresh);
+    document.addEventListener('click', shopping.activate, true);
+    document.addEventListener('auxclick', shopping.activate, true);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      document.removeEventListener('click', shopping.activate, true);
+      document.removeEventListener('auxclick', shopping.activate, true);
+      shopping.reset();
+    };
+  });
   let { children } = $props();
   let notificationSettingsLoaded = $state(false);
   let notificationPromptBusy = $state(false);
@@ -49,10 +75,27 @@
         ))
   );
 
+  $effect(() => {
+    const user = chatEntities.currentUser;
+    if (!isNativeDesktop() || !user || !contentSafety.ready) return;
+    let current = true;
+    void import('$lib/e2ee/client')
+      .then(({ initializeE2EE }) => {
+        if (current) return initializeE2EE(user);
+      })
+      .catch(() => {
+        // Opening an encrypted room retries initialization and surfaces any error.
+      });
+    return () => {
+      current = false;
+    };
+  });
+
   interface UserSettingsPayload {
     theme: ThemePreference;
     locale: string;
     presence_preference: 'online' | 'idle' | 'dnd' | 'invisible';
+    presence_state?: PresenceStatePayload;
     notification_settings: Record<string, unknown>;
   }
 
@@ -64,17 +107,17 @@
     const controller = notificationController;
     const signal = controller?.signal;
     try {
-      const { theme, locale, presence_preference, notification_settings } =
+      const { theme, locale, presence_preference, presence_state, notification_settings } =
         await api<UserSettingsPayload>('/users/@me/settings', { signal });
       if (controller?.signal.aborted || notificationController !== controller) return;
       applyTheme(theme);
       applyLocale(locale);
-      try {
-        localStorage.setItem('kaede.presence', presence_preference);
-      } catch {
-        // The gateway still applies the account preference for this session.
+      if (presence_state) {
+        presenceControl.apply(presence_state);
+      } else {
+        presenceControl.applyFallbackPreference(presence_preference);
       }
-      authenticatedGateway.client.setPresence(presence_preference);
+      authenticatedGateway.client.rememberPresence(presence_preference);
       developerMode.apply(notification_settings);
       browserNotifications.apply(notification_settings);
       applyTtsPreferences(notification_settings);
@@ -272,6 +315,10 @@
   {/if}
 </div>
 {#if contentSafety.ready}<CommandSwitcher />{/if}
+<IncomingCall ready={notificationSettingsLoaded} />
+{#if chatEntities.currentUser}<ShoppingPrompt
+    domain={chatEntities.currentUser.origin_domain}
+  />{/if}
 {#if notificationSettingsLoaded}<LanguageSuggestion />{/if}
 {#if contentSafety.ready}<InteractionOverlay />{/if}
 

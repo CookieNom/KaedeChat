@@ -27,7 +27,12 @@ from app.automod.service import evaluate_member_profile
 from app.chat.events import guild_topic, publish_dispatch, user_topic
 from app.chat.payloads import user_payload
 from app.chat.permissions import get_permissions
-from app.chat.presence import broadcast_presence_preference
+from app.chat.presence_control import (
+    apply_presence_control_patch,
+    parse_presence_control,
+    publish_committed_presence,
+    resolve_effective_presence,
+)
 from app.chat.privacy import lock_dm_privacy
 from app.chat.schemas import ProfilePatch, ReadStateUpdate
 from app.core.guild_navigation import normalize_guild_navigation, parse_stored_guild_navigation
@@ -52,7 +57,7 @@ from app.db.models import (
 )
 from app.federation.relationships import queue_profile_updates
 from app.federation.users import resolve_handle
-from app.tasks import federation_deliver, federation_presence_fanout
+from app.tasks import federation_deliver
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 router.include_router(account_deletion_router)
@@ -192,13 +197,11 @@ async def load_settings(session: AsyncSession, auth: AuthenticatedUser) -> UserS
 
 
 def settings_payload(settings: UserSettings) -> dict[str, object]:
-    presence_preference = settings.notification_settings.get("presence_preference", "online")
-    if presence_preference not in {"online", "idle", "dnd", "invisible"}:
-        presence_preference = "online"
+    effective_presence = resolve_effective_presence(settings.notification_settings)
     notification_settings = {
         key: value
         for key, value in settings.notification_settings.items()
-        if key != "presence_preference"
+        if key not in {"presence_preference", "presence_control"}
     }
     return {
         "locale": settings.locale,
@@ -208,7 +211,8 @@ def settings_payload(settings: UserSettings) -> dict[str, object]:
         "age_restricted_dm_commands_enabled": bool(
             getattr(settings, "age_restricted_dm_commands_enabled", False)
         ),
-        "presence_preference": presence_preference,
+        "presence_preference": effective_presence.effective_status,
+        "presence_state": effective_presence.to_payload(),
         "notification_settings": notification_settings,
     }
 
@@ -328,26 +332,56 @@ async def patch_user_settings(
         raise HTTPException(status_code=500, detail={"code": "SETTINGS_MISSING"})
     if "dm_privacy" in payload.model_fields_set:
         await lock_dm_privacy(session, auth.user)
-    changes = payload.model_dump(exclude_unset=True)
+    changes = payload.model_dump(exclude_unset=True, exclude={"expected_presence_schedules"})
     presence_preference = changes.pop("presence_preference", None)
+    presence_duration_provided = "presence_duration_minutes" in changes
+    presence_duration_minutes = changes.pop("presence_duration_minutes", None)
+    presence_reset_override = bool(changes.pop("presence_reset_override", False))
+    presence_skip_active_schedule = changes.pop("presence_skip_active_schedule", False)
+    presence_timezone = changes.pop("presence_timezone", None)
+    presence_schedules = changes.pop("presence_schedules", None)
+    expected_schedules = payload.expected_presence_schedules
+    if expected_schedules is not None and [rule.model_dump() for rule in expected_schedules] != [
+        rule.to_dict() for rule in parse_presence_control(settings.notification_settings).schedules
+    ]:
+        raise HTTPException(status_code=409, detail={"code": "PRESENCE_SCHEDULES_CHANGED"})
+    presence_changed = any(
+        (
+            presence_preference is not None,
+            presence_duration_provided,
+            presence_reset_override,
+            presence_skip_active_schedule,
+            presence_timezone is not None,
+            presence_schedules is not None,
+        )
+    )
     notification_settings = changes.pop("notification_settings", None)
     for field, value in changes.items():
         setattr(settings, field, value)
     if notification_settings is not None:
         # Presence is an account-level preference. Generic notification updates
-        # must not erase a concurrent presence selection made by another client.
+        # must not erase a concurrent presence selection or schedule made by another client.
         merged_notification_settings = dict(notification_settings)
         merged_notification_settings.pop("presence_preference", None)
-        existing_presence = settings.notification_settings.get("presence_preference")
-        if existing_presence is not None:
-            merged_notification_settings["presence_preference"] = existing_presence
+        merged_notification_settings.pop("presence_control", None)
+        for reserved_key in ("presence_preference", "presence_control"):
+            existing_value = settings.notification_settings.get(reserved_key)
+            if existing_value is not None:
+                merged_notification_settings[reserved_key] = existing_value
         settings.notification_settings = merged_notification_settings
     presence_topics: list[str] = []
-    if presence_preference is not None:
-        settings.notification_settings = {
-            **settings.notification_settings,
-            "presence_preference": presence_preference,
-        }
+    if presence_changed:
+        updated_notification_settings, _ = apply_presence_control_patch(
+            settings.notification_settings,
+            presence_preference=presence_preference,
+            presence_duration_minutes=presence_duration_minutes,
+            presence_duration_provided=presence_duration_provided,
+            presence_reset_override=presence_reset_override,
+            presence_skip_active_schedule=presence_skip_active_schedule,
+            presence_timezone=presence_timezone,
+            presence_schedules=presence_schedules,
+        )
+        settings.notification_settings = updated_notification_settings
         guild_refs = (
             await session.execute(
                 select(GuildMember.guild_id, GuildMember.guild_domain).where(
@@ -361,20 +395,8 @@ async def patch_user_settings(
             *(guild_topic(domain, guild_id) for guild_id, domain in guild_refs),
         ]
     await session.commit()
-    if presence_preference is not None:
-        visible_status, generation = await broadcast_presence_preference(
-            redis,
-            auth.user,
-            presence_preference,
-            presence_topics,
-        )
-        await enqueue_best_effort(
-            federation_presence_fanout,
-            auth.user.id,
-            auth.user.origin_domain,
-            visible_status,
-            generation,
-        )
+    if presence_changed:
+        await publish_committed_presence(redis, session, auth.user, presence_topics)
     return settings_payload(settings)
 
 

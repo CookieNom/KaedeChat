@@ -592,6 +592,14 @@ def test_recurrence_calculator_handles_discord_writable_selectors() -> None:
         current_start=datetime(2026, 8, 31, 18, tzinfo=UTC),
     ) == datetime(2026, 11, 30, 18, tzinfo=UTC)
 
+    with pytest.raises(ValueError):
+        ScheduledEventRecurrenceRule(
+            start=friday,
+            frequency=0,
+            by_month=[2],
+            by_month_day=[30],
+        )
+
     leap_day = ScheduledEventRecurrenceRule(
         start=datetime(2024, 2, 29, 18, tzinfo=UTC),
         frequency=0,

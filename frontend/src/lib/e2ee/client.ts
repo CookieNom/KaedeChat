@@ -522,12 +522,10 @@ function controlCursorAfter(candidate: string, previous: string | null): boolean
 async function acquireAccountVaultLease(): Promise<AccountVaultLease> {
   for (let attempt = 0; attempt < VAULT_LEASE_ATTEMPTS; attempt += 1) {
     try {
-      const lease = await api<AccountVaultLease>('/e2ee/vault/lease', {
+      return await api<AccountVaultLease>('/e2ee/vault/lease', {
         method: 'POST',
         body: '{}'
       });
-      if (lease.vault) await verifyAccountVaultRecord(lease.vault);
-      return lease;
     } catch (caught) {
       if (
         !(caught instanceof ApiError) ||
@@ -955,6 +953,10 @@ async function registerAccountIdentity(
       })
     });
     signingInput = fromBase64url(challenge.signing_input, 2_048);
+    const prefix = utf8('kaede-device-registration-v1\0');
+    if (!sameBytes(signingInput.subarray(0, prefix.length), prefix)) {
+      throw new Error('The server returned an invalid device registration challenge.');
+    }
     signature = ownedBytes(mls.signServerChallenge(signingInput));
     const registered = await api<DeviceRegistration>('/e2ee/devices', {
       method: 'POST',
@@ -3919,6 +3921,7 @@ export class KaedeE2EEClient {
   #vaultChainRoot: string;
   #operationTail: Promise<void> = Promise.resolve();
   #closed = false;
+  #cacheConfirmed = true;
   #safetyCheckedVaultRevision = '';
 
   #purgeSafetyCache(): void {
@@ -4167,11 +4170,7 @@ export class KaedeE2EEClient {
     this.#vaultChainRoot = ancestry.checkpoint.chainRoot;
   }
 
-  async #synchronized<T>(
-    operation: (leaseToken: string) => Promise<T>,
-    persist = true,
-    rollbackOnOperationError = true
-  ): Promise<T> {
+  async #queued<T>(operation: () => Promise<T>): Promise<T> {
     if (this.#closed) throw new Error('This encryption client has been closed.');
     let releaseQueue: () => void = () => undefined;
     const previous = this.#operationTail;
@@ -4181,50 +4180,69 @@ export class KaedeE2EEClient {
     await previous;
     try {
       if (this.#closed) throw new Error('This encryption client has been closed.');
-      const lease = await acquireAccountVaultLease();
-      try {
-        const reconciledVault = await reconcilePendingAccountVault(
-          this.accountRef,
-          lease.vault,
-          lease.lease_token
-        );
-        if (!reconciledVault) {
-          throw new Error('The encrypted account vault is missing. Sign in again to recover it.');
-        }
-        await this.#restoreVault(reconciledVault);
-        await this.#reconcileRoomOperationsUnlocked(lease.lease_token);
-        const operationBaseVault =
-          this.#vaultRevision === reconciledVault.revision
-            ? reconciledVault
-            : await readAccountVault();
-        if (!operationBaseVault) {
-          throw new Error('The encrypted account vault disappeared during synchronization.');
-        }
-        if (
-          operationBaseVault.revision !== this.#vaultRevision ||
-          operationBaseVault.digest !== this.#vaultDigest
-        ) {
-          throw new Error(
-            'The encryption-vault rollback base changed unexpectedly. Encrypted changes are paused to prevent restoring a substituted state.'
-          );
-        }
-        let result: T;
-        try {
-          result = await operation(lease.lease_token);
-        } catch (caught) {
-          if (rollbackOnOperationError) await this.#restoreVault(operationBaseVault);
-          throw caught;
-        }
-        // A failed or ambiguously acknowledged write must leave the pending
-        // encrypted journal intact. Restoring the base state here would erase
-        // the recovery record that the next lease needs to reconcile.
-        if (persist) await this.#persistVault(lease.lease_token);
-        return result;
-      } finally {
-        await releaseAccountVaultLease(lease.lease_token);
-      }
+      return await operation();
     } finally {
       releaseQueue();
+    }
+  }
+
+  async #synchronized<T>(
+    operation: (leaseToken: string) => Promise<T>,
+    persist = true,
+    rollbackOnOperationError = true
+  ): Promise<T> {
+    return this.#queued(() => this.#withVault(operation, persist, rollbackOnOperationError));
+  }
+
+  async #withVault<T>(
+    operation: (leaseToken: string) => Promise<T>,
+    persist = true,
+    rollbackOnOperationError = true
+  ): Promise<T> {
+    // Failed writes must reconcile their journal before serving local history.
+    this.#cacheConfirmed = false;
+    const lease = await acquireAccountVaultLease();
+    try {
+      const reconciledVault = await reconcilePendingAccountVault(
+        this.accountRef,
+        lease.vault,
+        lease.lease_token
+      );
+      if (!reconciledVault) {
+        throw new Error('The encrypted account vault is missing. Sign in again to recover it.');
+      }
+      await this.#restoreVault(reconciledVault);
+      await this.#reconcileRoomOperationsUnlocked(lease.lease_token);
+      const operationBaseVault =
+        this.#vaultRevision === reconciledVault.revision
+          ? reconciledVault
+          : await readAccountVault();
+      if (!operationBaseVault) {
+        throw new Error('The encrypted account vault disappeared during synchronization.');
+      }
+      if (
+        operationBaseVault.revision !== this.#vaultRevision ||
+        operationBaseVault.digest !== this.#vaultDigest
+      ) {
+        throw new Error(
+          'The encryption-vault rollback base changed unexpectedly. Encrypted changes are paused to prevent restoring a substituted state.'
+        );
+      }
+      let result: T;
+      try {
+        result = await operation(lease.lease_token);
+      } catch (caught) {
+        if (rollbackOnOperationError) await this.#restoreVault(operationBaseVault);
+        throw caught;
+      }
+      // A failed or ambiguously acknowledged write must leave the pending
+      // encrypted journal intact. Restoring the base state here would erase
+      // the recovery record that the next lease needs to reconcile.
+      if (persist) await this.#persistVault(lease.lease_token);
+      this.#cacheConfirmed = true;
+      return result;
+    } finally {
+      await releaseAccountVaultLease(lease.lease_token);
     }
   }
 
@@ -5378,6 +5396,11 @@ export class KaedeE2EEClient {
     const context = utf8(mediaContext);
     let secret: Uint8Array | null = null;
     try {
+      // Each activation or rekey installs a fresh group with one Add commit.
+      // The channel's logical epoch continues counting across those groups.
+      if (this.#mls.groupEpoch(groupId) !== 1n) {
+        throw new Error('This device has not received the current encrypted call key.');
+      }
       secret = ownedBytes(this.#mls.exportEpochSecret(groupId, 'kaede livekit v1', context, 32));
       return ownedBytes(secret).buffer;
     } finally {
@@ -5505,29 +5528,59 @@ export class KaedeE2EEClient {
     channel: Channel,
     messages: readonly Message[]
   ): Promise<(DecryptedApplication | null)[]> {
-    return this.#synchronized(async () => {
-      await this.#syncControlLogUnlocked(channel);
-      const applications: (DecryptedApplication | null)[] = [];
-      for (const message of messages) {
-        if (!message.e2ee) {
-          applications.push(null);
-          continue;
-        }
-        try {
-          applications.push(await this.#decryptMessageUnlocked(channel, message));
-        } catch {
-          // A message can predate this account's first Welcome. Keep processing
-          // later records so one unavailable epoch cannot hide current history.
-          applications.push(null);
-        }
-      }
-      return applications;
+    return this.#queued(async () => {
+      requireEncryptedChannel(channel);
+      const cursor = this.#controlCursors.get(`${channel.id}@${channel.origin_domain}`);
+      const cached =
+        this.#cacheConfirmed &&
+        messages.every((message) => {
+          if (!message.e2ee) return true;
+          const { operation, ciphertext } = message.e2ee;
+          if (operation === 'welcome' || operation === 'commit') {
+            return (
+              cursor &&
+              isCanonicalSnowflake(message.id) &&
+              message.origin_domain === channel.origin_domain &&
+              !controlCursorAfter(`${message.id}@${message.origin_domain}`, cursor)
+            );
+          }
+          return (
+            (operation === 'create' || operation === 'edit') &&
+            typeof ciphertext === 'string' &&
+            this.#messageCache.get(ciphertext)?.messageRef ===
+              `${message.id}@${message.origin_domain}`
+          );
+        });
+      if (cached) return this.#decryptBatchUnlocked(channel, messages, true);
+      return this.#withVault(async () => {
+        await this.#syncControlLogUnlocked(channel);
+        return this.#decryptBatchUnlocked(channel, messages);
+      });
     });
+  }
+
+  async #decryptBatchUnlocked(channel: Channel, messages: readonly Message[], cachedOnly = false) {
+    const applications: (DecryptedApplication | null)[] = [];
+    for (const message of messages) {
+      if (!message.e2ee) {
+        applications.push(null);
+        continue;
+      }
+      try {
+        applications.push(await this.#decryptMessageUnlocked(channel, message, cachedOnly));
+      } catch {
+        // A message can predate this account's first Welcome. Keep processing
+        // later records so one unavailable epoch cannot hide current history.
+        applications.push(null);
+      }
+    }
+    return applications;
   }
 
   async #decryptMessageUnlocked(
     channel: Channel,
-    message: EncryptedMessageRecord & { apply?: boolean }
+    message: EncryptedMessageRecord & { apply?: boolean },
+    cachedOnly = false
   ): Promise<DecryptedApplication | null> {
     requireEncryptedChannel(channel);
     const envelope = message.e2ee as MlsEnvelope | null | undefined;
@@ -5556,6 +5609,7 @@ export class KaedeE2EEClient {
         ? `${message.application_id}@${message.application_domain}`
         : null;
     const webhookRef = projectedWebhookRef(message);
+    if (cachedOnly && !['create', 'edit'].includes(envelope.operation)) return null;
     const processedKey = processedMessageKey(channel, envelope, message);
     if (
       (envelope.operation === 'welcome' || envelope.operation === 'commit') &&
@@ -5640,8 +5694,9 @@ export class KaedeE2EEClient {
       : messageContextBytes(expectedContext as MessageContext);
     const cached = this.#messageCache.get(envelope.ciphertext);
     if (
-      cached &&
-      cachedContentRestricted({ ...cached, messageRef: cached.messageRef ?? messageRef })
+      (cachedOnly && cached?.messageRef !== messageRef) ||
+      (cached &&
+        cachedContentRestricted({ ...cached, messageRef: cached.messageRef ?? messageRef }))
     ) {
       clearBytes(groupId);
       clearBytes(ciphertext);
@@ -5733,8 +5788,8 @@ export class KaedeE2EEClient {
             attachments: validatedEncryptedMessageAttachments(legacy.attachments)
           };
         }
-        if (cachedContentRestricted({ ...cached, messageRef })) return null;
-        this.#processed.set(processedKey, application);
+        if (this.#closed || cachedContentRestricted({ ...cached, messageRef })) return null;
+        if (!cachedOnly) this.#processed.set(processedKey, application);
         return application;
       } finally {
         clearBytes(groupId);

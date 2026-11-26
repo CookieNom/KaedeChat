@@ -65,6 +65,8 @@ async def channel_restrictions_allow(
     session: AsyncSession,
     restrictions: Iterable[object],
     channel: Channel,
+    *,
+    loaded_channels: dict[tuple[int, str], Channel] | None = None,
 ) -> bool:
     """Apply an installation restriction to one validated Discord hierarchy.
 
@@ -81,10 +83,14 @@ async def channel_restrictions_allow(
         return True
     if channel.parent_id is None or channel.parent_domain is None:
         return False
-    parent = await session.get(
-        Channel,
-        (channel.parent_id, channel.parent_domain),
-        populate_existing=True,
+    parent = (
+        loaded_channels.get((channel.parent_id, channel.parent_domain))
+        if loaded_channels is not None
+        else await session.get(
+            Channel,
+            (channel.parent_id, channel.parent_domain),
+            populate_existing=True,
+        )
     )
     is_thread = channel.type in {10, 11, 12}
     if (
@@ -98,10 +104,14 @@ async def channel_restrictions_allow(
         return True
     if not is_thread or parent.parent_id is None or parent.parent_domain is None:
         return False
-    category = await session.get(
-        Channel,
-        (parent.parent_id, parent.parent_domain),
-        populate_existing=True,
+    category = (
+        loaded_channels.get((parent.parent_id, parent.parent_domain))
+        if loaded_channels is not None
+        else await session.get(
+            Channel,
+            (parent.parent_id, parent.parent_domain),
+            populate_existing=True,
+        )
     )
     return bool(
         category is not None
@@ -197,11 +207,8 @@ def usable_guild_installation() -> ColumnElement[bool]:
     )
 
 
-def bot_actor_active_installations_statement(
-    guild: Guild,
-    actor: User,
-) -> Select[tuple[BotInstallation]]:
-    """Select active runtime-ready installs for one exact guild bot identity."""
+def active_guild_installations_statement(guild: Guild) -> Select[tuple[BotInstallation]]:
+    """Select active runtime-ready installations belonging to this guild."""
 
     # Kept lazy because runtime_control imports installation lifecycle helpers.
     from app.bots.runtime_control import application_runtime_projection_exists
@@ -216,17 +223,24 @@ def bot_actor_active_installations_statement(
         .where(
             BotInstallation.guild_id == guild.id,
             BotInstallation.guild_domain == guild.origin_domain,
-            BotInstallation.bot_user_id == actor.id,
-            BotInstallation.bot_user_domain == actor.origin_domain,
             usable_guild_installation(),
             BotApplication.status == "active",
-            BotApplication.bot_user_id == actor.id,
-            BotApplication.bot_user_domain == actor.origin_domain,
+            BotApplication.bot_user_id == BotInstallation.bot_user_id,
+            BotApplication.bot_user_domain == BotInstallation.bot_user_domain,
             or_(
                 BotApplication.origin_domain == guild.origin_domain,
                 application_runtime_projection_exists(guild.origin_domain),
             ),
         )
+    )
+
+
+def bot_actor_active_installations_statement(
+    guild: Guild, actor: User
+) -> Select[tuple[BotInstallation]]:
+    return active_guild_installations_statement(guild).where(
+        BotInstallation.bot_user_id == actor.id,
+        BotInstallation.bot_user_domain == actor.origin_domain,
     )
 
 

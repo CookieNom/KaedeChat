@@ -1,4 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/services.dart';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
@@ -136,9 +139,18 @@ final class SessionVault {
       storage.write(key: _activeSession, value: jsonEncode(tokens.toJson()));
 
   Future<void> clear() async {
-    await storage.delete(key: _activeSession);
-    await clearRelayPushState();
-    await storage.delete(key: _pushOptIn);
+    try {
+      await storage.delete(key: _activeSession);
+    } finally {
+      // A push-plugin failure must not prevent the API from publishing expiry
+      // after it has removed the login credentials.
+      try {
+        await Future.wait(
+            [clearRelayPushState(), storage.delete(key: _pushOptIn)]);
+      } on Object {
+        // The foreground controller retries both relay stores on teardown.
+      }
+    }
   }
 
   Future<bool?> readPushOptInChoice() async {
@@ -173,7 +185,21 @@ final class SessionVault {
         value: jsonEncode(state.toJson()),
       );
 
-  Future<void> clearRelayPushState() => storage.delete(key: _relayPushState);
+  Future<void> clearRelayPushState() async {
+    await Future.wait([
+      storage.delete(key: _relayPushState),
+      if (Platform.isIOS) clearNativeRelayState(),
+    ]);
+  }
+
+  static Future<void> clearNativeRelayState() async {
+    try {
+      await const MethodChannel('chat.kaede.mobile/push_state')
+          .invokeMethod<void>('clearRelayState');
+    } on MissingPluginException {
+      // The Flutter background isolate has no AppDelegate method handler.
+    }
+  }
 
   Future<String> installationId() async {
     final existing = await storage.read(key: _installationId);

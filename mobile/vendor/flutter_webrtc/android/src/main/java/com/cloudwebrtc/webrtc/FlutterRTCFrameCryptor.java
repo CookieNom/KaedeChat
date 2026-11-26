@@ -316,7 +316,8 @@ public class FlutterRTCFrameCryptor {
             failureTolerance,
             keyRingSize,
             discardFrameWhenCryptorNotReady,
-            keyDerivationAlgorithmFromInt(keyDerivationAlgorithm));
+            keyDerivationAlgorithmFromInt(keyDerivationAlgorithm),
+            (int) keyProviderOptions.getOrDefault("keySize", 128));
         ConstraintsMap paramsResult = new ConstraintsMap();
         keyProviders.put(keyProviderId, keyProvider);
         paramsResult.putString("keyProviderId", keyProviderId);

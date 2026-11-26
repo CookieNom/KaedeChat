@@ -532,12 +532,14 @@ public class GetUserMediaImpl {
                         }
                     });
         } else {
-            getDisplayMedia(result, mediaStream, mediaProjectionData);
+            Intent consent = mediaProjectionData;
+            mediaProjectionData = null;
+            getDisplayMedia(result, mediaStream, consent);
         }
     }
 
     private void getDisplayMedia(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
-        /* Create ScreenCapture */
+        final String trackId = stateProvider.getNextTrackUUID();
         VideoTrack displayTrack = null;
         VideoCapturer videoCapturer = null;
         videoCapturer =
@@ -547,9 +549,10 @@ public class GetUserMediaImpl {
                             @Override
                             public void onStop() {
                                 super.onStop();
-                                // After Huawei P30 and Android 10 version test, the onstop method is called, which will not affect the next process,
-                                // and there is no need to call the resulterror method
-                                //resultError("MediaProjection.Callback()", "User revoked permission to capture the screen.", result);
+                                ConstraintsMap event = new ConstraintsMap();
+                                event.putString("event", "screenCaptureStopped");
+                                event.putString("trackId", trackId);
+                                FlutterWebRTCPlugin.sharedSingleton.sendEvent(event.toMap());
                             }
                         });
         if (videoCapturer == null) {
@@ -583,7 +586,6 @@ public class GetUserMediaImpl {
         videoCapturer.startCapture(info.width, info.height, info.fps);
         Log.d(TAG, "OrientationAwareScreenCapturer.startCapture: " + info.width + "x" + info.height + "@" + info.fps);
 
-        String trackId = stateProvider.getNextTrackUUID();
         mVideoCapturers.put(trackId, info);
         mSurfaceTextureHelpers.put(trackId, surfaceTextureHelper);
 

@@ -126,6 +126,9 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
     final preferences = ref.watch(mobileControllerProvider);
     ref.listen<MobileState>(mobileControllerProvider, (previous, next) {
       final voice = ref.read(voiceSessionProvider);
+      if (previous?.phase != next.phase) {
+        voice.allowPip(next.phase == SessionPhase.ready);
+      }
       if (next.phase == SessionPhase.signedOut &&
           previous?.phase != SessionPhase.signedOut) {
         _lockObserver.discardTransientRoutes();
@@ -182,7 +185,8 @@ final class _KaedeAppState extends ConsumerState<KaedeApp>
                     LanguageSuggestion(child: child ?? const SizedBox.shrink()),
               ),
             ),
-            if (voice.videoPip.active)
+            if (preferences.phase == SessionPhase.ready &&
+                voice.videoPip.active)
               Positioned.fill(
                   child: ColoredBox(
                       color: Colors.black,

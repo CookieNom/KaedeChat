@@ -9,6 +9,10 @@ import { rememberReaction } from '$lib/chat/reactions';
 import type { Channel, Guild, Message } from '$lib/chat/types';
 
 const media = vi.hoisted(() => ({ copy: vi.fn().mockResolvedValue(undefined), load: vi.fn() }));
+vi.mock('$lib/api/client', async (original) => ({
+  ...(await original<typeof import('$lib/api/client')>()),
+  api: vi.fn().mockResolvedValue({ bookmarked: false })
+}));
 vi.mock('$lib/media/authenticated', async (original) => ({
   ...(await original<typeof import('$lib/media/authenticated')>()),
   authenticatedMedia: media.load,

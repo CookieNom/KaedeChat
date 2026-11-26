@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -1171,8 +1172,10 @@ async def test_authority_media_revocation_gates_inflight_bot_callbacks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kaede_e2ee", [False, True])
 async def test_livekit_transport_publishes_distinct_camera_and_screen_tracks(
     monkeypatch: pytest.MonkeyPatch,
+    kaede_e2ee: bool,
 ) -> None:
     sources: list[Any] = []
 
@@ -1223,6 +1226,7 @@ async def test_livekit_transport_publishes_distinct_camera_and_screen_tracks(
             SOURCE_SCREENSHARE="screen",
         ),
         VideoBufferType=SimpleNamespace(RGBA="rgba"),
+        VideoCodec=SimpleNamespace(VP8=0),
         VideoFrame=lambda width, height, pixel_format, data: SimpleNamespace(
             width=width,
             height=height,
@@ -1232,9 +1236,9 @@ async def test_livekit_transport_publishes_distinct_camera_and_screen_tracks(
     )
     monkeypatch.setitem(sys.modules, "livekit", SimpleNamespace(rtc=rtc))
     participant = Participant()
-    transport = LiveKitTransport()
+    transport = LiveKitTransport(kaede_e2ee=kaede_e2ee)
     transport._room = SimpleNamespace(local_participant=participant)
-    transport._grant = voice_grant(can_stream=True)
+    transport._grant = replace(voice_grant(can_stream=True), e2ee=kaede_e2ee)
 
     await transport.send_video_frame(VideoFrame(b"\x00" * 16, 2, 2, "rgba", "camera"))
     await transport.send_video_frame(VideoFrame(b"\x01" * 16, 2, 2, "rgba", "camera"))
@@ -1245,10 +1249,42 @@ async def test_livekit_transport_publishes_distinct_camera_and_screen_tracks(
     await transport.stop_video("screen_share")
 
     assert len(participant.published) == 3
+    for (track, options), source_name in zip(
+        participant.published, ("camera", "camera", "screen_share"), strict=True
+    ):
+        if kaede_e2ee:
+            assert options.video_codec == rtc.VideoCodec.VP8
+            assert track.name == f"kaede.video.v1:{source_name}:vp8"
+        else:
+            assert not hasattr(options, "video_codec")
+            assert track.name == source_name
     assert participant.unpublished == ["track-1", "track-3"]
     assert [source.is_screencast for source in sources] == [False, False, True]
     assert [len(source.frames) for source in sources] == [2, 1, 1]
     assert sources[0].closed and sources[2].closed
+
+
+@pytest.mark.asyncio
+async def test_livekit_audio_publication_uses_granted_bitrate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rtc = pytest.importorskip("livekit.rtc")
+    source = SimpleNamespace(capture_frame=AsyncMock())
+    monkeypatch.setattr(rtc, "AudioSource", lambda *args: source)
+    monkeypatch.setattr(
+        rtc.LocalAudioTrack, "create_audio_track", lambda *args: object()
+    )
+    publish = AsyncMock()
+    transport = LiveKitTransport()
+    transport._room = SimpleNamespace(
+        local_participant=SimpleNamespace(publish_track=publish)
+    )
+    transport._grant = voice_grant()
+    await transport.send_frame(AudioFrame(bytes(960 * 2), 48_000, 1))
+    options = publish.await_args.args[1]
+    assert options.source == rtc.TrackSource.SOURCE_MICROPHONE
+    assert options.audio_encoding.max_bitrate == transport._grant.bitrate
+    source.capture_frame.assert_awaited_once()
 
 
 @pytest.mark.asyncio

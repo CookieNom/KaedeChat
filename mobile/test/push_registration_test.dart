@@ -97,14 +97,17 @@ void main() {
     expect(requests, 3);
   });
 
-  test('partial call setup keeps messages ready and throttles explicit retry',
+  test(
+      'partial call setup keeps messages ready and retries when the rate limit expires',
       () async {
-    final registration = PushRegistration();
+    var now = DateTime.utc(2026);
+    final registration = PushRegistration(now: () => now);
     var requests = 0;
     Future<bool> run({bool force = false}) => registration.run(
           session: ('account', 1),
           token: 'token',
           force: force,
+          fullyRegistered: () => false,
           register: () async {
             requests++;
             registration.recordFailure(const KaedeException(
@@ -119,5 +122,8 @@ void main() {
     expect(await run(), isTrue);
     await expectLater(run(force: true), throwsA(isA<KaedeException>()));
     expect(requests, 1);
+    now = now.add(const Duration(minutes: 1));
+    expect(await run(), isTrue);
+    expect(requests, 2);
   });
 }

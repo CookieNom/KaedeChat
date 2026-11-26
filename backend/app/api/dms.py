@@ -34,6 +34,7 @@ from app.chat.group_conversations import (
     reload_group_projection,
     require_group_invite_friend,
     require_group_member,
+    unsupported_group_invite_proof,
 )
 from app.chat.payloads import dm_channel_payload, render_message_payload
 from app.chat.privacy import blocked_between, lock_dm_policy, require_can_direct_message
@@ -51,7 +52,8 @@ from app.core.snowflake import SnowflakeGenerator
 from app.core.task_wake import enqueue_best_effort
 from app.core.types import EntityRef
 from app.db.models import Channel, DMConversation, DMParticipant, Message, User
-from app.federation.client import signed_request
+from app.federation.actor_intents import build_human_actor_intent
+from app.federation.client import UnsupportedFederationCapability, signed_request
 from app.federation.dm_storage import (
     FederatedDMQuotaExceeded,
     admit_federated_dm_conversation,
@@ -964,6 +966,23 @@ async def proxy_group_mutation(
     target: User | None = None,
     name: str | None = None,
 ) -> dict[str, object]:
+    invitation = {}
+    if (
+        action == "add"
+        and target is not None
+        and target.origin_domain != conversation.authority_domain
+    ):
+        invitation["inviter_intent"] = await build_human_actor_intent(
+            session,
+            settings,
+            actor,
+            action="dm.group.invite",
+            audience=target.origin_domain,
+            resources={
+                "conversation": f"{conversation.id}@{conversation.origin_domain}",
+                "invitee": f"{target.id}@{target.origin_domain}",
+            },
+        )
     try:
         response = await signed_request(
             session,
@@ -972,6 +991,7 @@ async def proxy_group_mutation(
             conversation.authority_domain,
             "/_kaede/v1/dm/groups/mutate",
             payload={
+                **invitation,
                 "action": action,
                 "conversation_id": str(conversation.id),
                 "conversation_domain": conversation.origin_domain,
@@ -979,9 +999,12 @@ async def proxy_group_mutation(
                 "target": profile_from_user(target) if target is not None else None,
                 "name": name,
             },
+            required_capability="dm-group-inviter-proof/1" if invitation else None,
             request_timeout=10,
             max_response_bytes=256 * 1024,
         )
+    except UnsupportedFederationCapability as exc:
+        raise unsupported_group_invite_proof(conversation.authority_domain) from exc
     except FederationNetworkError as exc:
         raise HTTPException(status_code=503, detail={"code": "GROUP_DM_HOME_UNREACHABLE"}) from exc
     if response.status_code != 200:
@@ -995,6 +1018,8 @@ async def proxy_group_mutation(
         )
     try:
         decoded = decode_federation_response_json(response)
+    except UnsupportedFederationCapability as exc:
+        raise unsupported_group_invite_proof(conversation.authority_domain) from exc
     except FederationNetworkError as exc:
         raise HTTPException(
             status_code=502, detail={"code": "GROUP_DM_HOME_INVALID_RESPONSE"}
@@ -1037,6 +1062,7 @@ async def apply_group_mutation_response(
             channel,
             before,
             participants,
+            participant_profiles=tuple(result.participants),
             previous_owner=previous_owner,
             expected_actor=(actor.id, actor.origin_domain),
         )

@@ -2,7 +2,9 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, expect, it, vi } from 'vitest';
 import Route from '../../routes/(app)/home/[dmId]/+page.svelte';
+import { ApiError } from '$lib/api/client';
 import { acknowledgeEncryptedRoom } from '$lib/e2ee/disclosures';
+import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
 import { chatEntities } from '$lib/stores/entities.svelte';
 import { draftKey, writeDraft } from './local-drafts';
 import type { Message } from './types';
@@ -119,7 +121,15 @@ it('keeps authorized pre-encryption history readable and gates sending through i
       message.e2ee ? { content: 'Verified encrypted reply', attachments: [] } : null
     );
   });
-  initializeE2EE.mockReturnValueOnce(pending).mockResolvedValueOnce({ decryptMessages });
+  const rekeyRoom = vi.fn(async () => ({
+    ...chatEntities.channels.get('2@chat.example')!,
+    encryption_state: 'active'
+  }));
+  initializeE2EE.mockReturnValueOnce(pending).mockResolvedValueOnce({
+    decryptMessages,
+    rekeyRoom,
+    safetyNumber: async () => '12345'
+  });
   acknowledgeEncryptedRoom('7@chat.example', '2@chat.example');
   chatEntities.ingestCurrentUser(viewer);
   writeDraft(key, 'Ready to send');
@@ -168,6 +178,24 @@ it('keeps authorized pre-encryption history readable and gates sending through i
     expect(document.querySelectorAll('dialog .result')).toHaveLength(matches);
   }
   expect(api.mock.calls.some(([path]) => path === '/search/messages')).toBe(false);
+
+  document.querySelector<HTMLDialogElement>('dialog[open]')?.close();
+  chatEntities.channels.upsert({
+    ...chatEntities.channels.get('2@chat.example')!,
+    encryption_state: 'rekeying'
+  });
+  flushSync();
+  expect(document.querySelector('textarea:not(:disabled)')).toBeNull();
+  document.querySelector<HTMLButtonElement>('.e2ee-status-button')!.click();
+  const secure = [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find(
+    (button) => button.textContent?.trim() === 'Secure changes'
+  );
+  expect(secure).toBeDefined();
+  secure!.click();
+  await vi.waitFor(() =>
+    expect(document.querySelector('.e2ee-status-button')?.textContent).toContain('Encrypted')
+  );
+  expect(rekeyRoom).toHaveBeenCalledExactlyOnceWith('2@chat.example');
 });
 
 it('follows an archived link through two continuations to the listed conversation', async () => {
@@ -195,4 +223,74 @@ it('follows an archived link through two continuations to the listed conversatio
   } finally {
     redirect.mockRestore();
   }
+});
+
+it('requires a local join when another session accepted the DM call', async () => {
+  const call = {
+    id: '901',
+    channel_id: '2',
+    channel_domain: 'chat.example',
+    authority_domain: 'chat.example',
+    caller: '8@chat.example',
+    participants: ['7@chat.example', '8@chat.example'],
+    created_at: 1,
+    state: 'active',
+    room: 'd.2.901',
+    ended_at: null
+  };
+  const grants = vi.fn(() => {
+    throw new ApiError('VOICE_ACTIVE_ELSEWHERE', 'Voice active elsewhere.', 409);
+  });
+  api.mockImplementation(async (path: string) => {
+    if (path === '/calls/901%40chat.example/voice/token') return grants();
+    if (path === '/users/@me') return viewer;
+    if (path === '/users/@me/channels')
+      return [
+        {
+          id: '2',
+          origin_domain: 'chat.example',
+          guild_id: null,
+          type: 1,
+          recipients: [peer],
+          encryption_mode: 'plaintext'
+        }
+      ];
+    if (path === room + '/calls/active') return { call, joined: true };
+    return [];
+  });
+  chatEntities.ingestCurrentUser(viewer);
+  component = mount(Route, { target: document.body });
+  flushSync();
+  await vi.waitFor(() => expect(document.body.textContent).toContain('Join here'));
+  const receive = (t: string, d: typeof call & { acted_by_me?: boolean }) =>
+    authenticatedGateway.client.dispatchEvent(
+      new CustomEvent('dispatch', { detail: { t, d, s: 2 } })
+    );
+  receive('CALL_ACCEPT', { ...call, acted_by_me: true });
+  flushSync();
+  expect(document.querySelector('#dm-call-stage')).toBeNull();
+  expect(document.querySelector('.call-ringing .decline')).toBeNull();
+  document.querySelector<HTMLButtonElement>('.call-ringing button')!.click();
+  flushSync();
+  expect(document.querySelector('#dm-call-stage')).not.toBeNull();
+  const keep = () =>
+    [...document.querySelectorAll<HTMLButtonElement>('.takeover-actions button')].find(
+      (button) => button.textContent?.trim() === 'Keep it there'
+    );
+  await vi.waitFor(() => expect(keep()).toBeDefined());
+  flushSync(() => keep()!.click());
+  expect(authenticatedGateway.joinedDmCall).toBeNull();
+  expect(document.querySelector('.call-ringing')?.textContent).toContain('Join here');
+  await unmount(component);
+  component = mount(Route, { target: document.body });
+  await vi.waitFor(() =>
+    expect(document.querySelector('.call-ringing')?.textContent).toContain('Join here')
+  );
+  expect(grants).toHaveBeenCalledOnce();
+  expect(document.querySelector('#dm-call-stage')).toBeNull();
+  document.querySelector<HTMLButtonElement>('.call-ringing button')!.click();
+  await vi.waitFor(() => expect(grants).toHaveBeenCalledTimes(2));
+  receive('CALL_END', { ...call, state: 'ended' });
+  flushSync();
+  expect(document.querySelector('#dm-call-stage')).toBeNull();
 });

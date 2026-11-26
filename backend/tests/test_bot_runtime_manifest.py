@@ -532,6 +532,33 @@ def test_manifest_worker_generation_replay_equivocation_and_advance() -> None:
     assert (row.name, row.generation) == ("other-production", 4)
 
 
+def test_number_command_manifest_keeps_signed_decimals_and_string_choices_distinct():
+    from app.core.federation import canonical_json
+    from app.core.json_limits import strict_json_loads
+
+    body = bot_manifest().model_dump(mode="json")
+    body["commands"][0]["options"] = [
+        {
+            "name": "gain",
+            "type": "number",
+            "description": "Gain",
+            "min_value": 0.25,
+            "choices": [{"name": "Half", "value": 0.5}],
+        },
+        {
+            "name": "label",
+            "type": "string",
+            "description": "Label",
+            "choices": [{"name": "Text", "value": "0.5"}],
+        },
+    ]
+    manifest = BotManifest.model_validate(body)
+    wire = strict_json_loads(canonical_json(manifest.federation_payload()))
+    assert BotManifest.model_validate(wire) == manifest
+    assert manifest.commands[0].options[0].choices[0].value == 0.5
+    assert manifest.commands[0].options[1].choices[0].value == "0.5"
+
+
 @pytest.mark.asyncio
 async def test_manifest_command_generation_replay_equivocation_and_advance() -> None:
     manifest = bot_manifest()

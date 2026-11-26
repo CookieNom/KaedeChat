@@ -13,7 +13,7 @@ from xml.etree import ElementTree
 
 import httpx
 
-from app.core.settings import Settings, valid_url_host
+from app.core.settings import StorageSettings, valid_url_host
 
 S3_SERVICE = "s3"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -153,7 +153,7 @@ class S3Storage:
     browsers. Browsers receive narrowly scoped, short-lived presigned URLs only.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: StorageSettings) -> None:
         if settings.media_s3_access_key is None or settings.media_s3_secret_key is None:
             raise StorageError("media object storage credentials are not configured")
         self.endpoint = settings.media_s3_endpoint

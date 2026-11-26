@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { shopping } from '$lib/vendor/shopping.svelte';
+  import { ringtoneFromSetting, playCallSound } from '$lib/voice/call-sounds';
   import { cancelableDelay } from '$lib/ui/delay';
   import { resolve } from '$app/paths';
   import { api, expireBrowserSession, userErrorMessage } from '$lib/api/client';
@@ -8,6 +10,8 @@
   import Icon from '$lib/components/Icon.svelte';
   import AccountDeletion from '$lib/components/AccountDeletion.svelte';
   import Toast from '$lib/components/Toast.svelte';
+  import PresenceSchedulesPanel from '$lib/components/PresenceSchedulesPanel.svelte';
+  import { presenceControl, type PresenceStatePayload } from '$lib/stores/presence.svelte';
   import NativeVoiceSettings from '$lib/components/NativeVoiceSettings.svelte';
   import NativeDesktopSettings from '$lib/components/NativeDesktopSettings.svelte';
   import NativeThemeSettings from '$lib/components/NativeThemeSettings.svelte';
@@ -51,6 +55,8 @@
     dm_privacy: 'everyone' | 'shared_guild' | 'friends';
     share_locale_with_bots: boolean;
     age_restricted_dm_commands_enabled: boolean;
+    presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
+    presence_state?: PresenceStatePayload;
     notification_settings: Record<string, unknown>;
   }
 
@@ -154,6 +160,11 @@
           loadedSettings.notification_settings
         );
         browserNotifications.apply(loadedSettings.notification_settings);
+        if (loadedSettings.presence_state) {
+          presenceControl.apply(loadedSettings.presence_state);
+        } else if (loadedSettings.presence_preference) {
+          presenceControl.applyFallbackPreference(loadedSettings.presence_preference);
+        }
         const tts = ttsPreferencesFromSettings(loadedSettings.notification_settings);
         ttsEnabledDraft = tts.enabled;
         ttsPlaybackDraft = tts.playback;
@@ -277,6 +288,32 @@
       actionError(caught, $t('ui_could_not_save_your_public_profile_270836b0'));
     } finally {
       if (generation === lifecycle) busy = false;
+    }
+  }
+
+  async function changeRingtone(select: HTMLSelectElement) {
+    const controller = routeController;
+    if (busy || !loaded || !controller) return;
+    const tone = ringtoneFromSetting(select.value);
+    beginAction();
+    if (tone !== 'silent') playCallSound(tone);
+    try {
+      const updated = await api<UserSettings>('/users/@me/settings', {
+        method: 'PATCH',
+        signal: controller.signal,
+        body: JSON.stringify({
+          notification_settings: { ...settings.notification_settings, call_ringtone: tone }
+        })
+      });
+      if (controller.signal.aborted) return;
+      settings.notification_settings = updated.notification_settings;
+      browserNotifications.apply(updated.notification_settings);
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      select.value = browserNotifications.ringtone;
+      actionError(caught, $t('call_ringtone_save_failed'));
+    } finally {
+      if (!controller.signal.aborted) busy = false;
     }
   }
 
@@ -1080,6 +1117,18 @@
               />
             </label>
           </div>
+          <label class="form-field">
+            <span>{$t('call_ringtone')}</span>
+            <select
+              value={browserNotifications.ringtone}
+              disabled={busy || !loaded}
+              onchange={(event) => void changeRingtone(event.currentTarget)}
+            >
+              <option value="chime">{$t('call_chime')}</option>
+              <option value="marimba">{$t('call_marimba')}</option>
+              <option value="silent">{$t('call_silent')}</option>
+            </select>
+          </label>
           {#if !browserNotifications.supported}
             <p class="settings-helper">
               {$t('ui_this_browser_does_not_support_system_notifica_2b042d5d')}
@@ -1123,6 +1172,19 @@
             </select>
           </label>
         </div>
+        <div class="settings-card">
+          <div class="settings-card-row">
+            <div>
+              <strong>Presence schedules</strong>
+              <p>
+                Automatically switch to Do Not Disturb while you sleep, Idle during focus hours, or
+                Online on your own schedule.
+              </p>
+            </div>
+            <Icon name="clock" />
+          </div>
+          <PresenceSchedulesPanel />
+        </div>
       </section>
 
       <section id="privacy" class="settings-section">
@@ -1164,6 +1226,22 @@
             </button>
           </div>
         </form>
+        {#if shopping.state.available || shopping.state.enabled}
+          <label class="settings-card toggle-row"
+            ><span
+              ><strong>Shopping affiliate links</strong><small
+                >Use this instance’s shared code when opening eligible shopping links.</small
+              ></span
+            >
+            <input
+              type="checkbox"
+              checked={shopping.state.enabled}
+              disabled={shopping.busy}
+              onchange={() => shopping.choose(!shopping.state.enabled)}
+            />
+          </label>
+          {#if shopping.error}<p role="alert">{shopping.error}</p>{/if}
+        {/if}
       </section>
 
       <UserApplicationInstallations />

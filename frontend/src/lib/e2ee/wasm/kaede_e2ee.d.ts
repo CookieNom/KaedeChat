@@ -15,6 +15,7 @@ export class KaedeMlsClient {
   ): Uint8Array;
   exportState(): Uint8Array;
   generateKeyPackage(): Uint8Array;
+  groupEpoch(group_id: Uint8Array): bigint;
   hasGroup(group_id: Uint8Array): boolean;
   inspectKeyPackage(key_package: Uint8Array): KaedeMlsKeyPackageIdentity;
   joinGroup(welcome: Uint8Array): Uint8Array;
@@ -93,6 +94,7 @@ export interface InitOutput {
   ) => void;
   readonly kaedemlsclient_exportState: (a: number, b: number) => void;
   readonly kaedemlsclient_generateKeyPackage: (a: number, b: number) => void;
+  readonly kaedemlsclient_groupEpoch: (a: number, b: number, c: number, d: number) => void;
   readonly kaedemlsclient_hasGroup: (a: number, b: number, c: number, d: number) => void;
   readonly kaedemlsclient_inspectKeyPackage: (a: number, b: number, c: number, d: number) => void;
   readonly kaedemlsclient_joinGroup: (a: number, b: number, c: number, d: number) => void;
@@ -154,5 +156,7 @@ export function initSync(module: { module: SyncInitInput } | SyncInitInput): Ini
  */
 export default function __wbg_init(
   module_or_path?:
-    { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>
+    | { module_or_path: InitInput | Promise<InitInput> }
+    | InitInput
+    | Promise<InitInput>
 ): Promise<InitOutput>;

@@ -8,9 +8,19 @@ final class VoiceBackgroundService {
 
   static const _channel = MethodChannel('chat.kaede.mobile/voice_lifecycle');
 
+  Future<void> screenCaptureStopped() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await _channel.invokeMethod<bool>('screenCaptureStopped');
+    } on MissingPluginException {
+      // Tests and other platforms do not run the Android service.
+    }
+  }
+
   Future<bool> setActive(
     bool active, {
     bool microphone = false,
+    bool camera = false,
     bool screenShare = false,
   }) async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return true;
@@ -20,6 +30,7 @@ final class VoiceBackgroundService {
             <String, Object?>{
               'active': active,
               'microphone': microphone,
+              if (camera) 'camera': true,
               'screenShare': screenShare,
             },
           ) ??

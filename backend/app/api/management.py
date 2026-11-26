@@ -5,7 +5,7 @@ from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, exists, select, update
 from sqlalchemy.dialects.postgresql import array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -455,6 +455,8 @@ async def update_channel(
             {"channel": federation_channel_state(channel)},
             channel=channel,
             snapshot_required=history_policy_changed or permission_state_changed,
+            permission_source_changed=permission_state_changed,
+            e2ee_policy_channels=e2ee_policy_channels,
         )
         for thread in tagged_thread_updates:
             await queue_guild_mutation(
@@ -487,7 +489,7 @@ async def update_channel(
             settings,
             e2ee_policy_channels,
         )
-        if not e2ee_policy_channels:
+        if channel not in e2ee_policy_channels:
             await publish_dispatch(
                 redis,
                 guild_topic(guild.origin_domain, guild.id),
@@ -761,6 +763,8 @@ async def reorder_channels(
                 {"channel": federation_channel_state(channel)},
                 channel=channel,
                 snapshot_required=channel.id in permission_changed_ids,
+                permission_source_changed=channel.id in permission_changed_ids,
+                e2ee_policy_channels=e2ee_policy_channels,
             )
         await add_audit_entry(
             session,
@@ -994,7 +998,6 @@ async def reorder_roles(
         role.position = item.position
         changed.append(role)
     if changed:
-        e2ee_policy_channels: list[Channel] = []
         guild.permission_generation += 1
         await materialize_updated_at(session, *changed)
         for role in changed:
@@ -1006,7 +1009,7 @@ async def reorder_roles(
                 "guild.role.update",
                 {"role": role_payload(role)},
                 snapshot_required=True,
-                e2ee_policy_channels=e2ee_policy_channels,
+                pause_e2ee=False,
             )
         await add_audit_entry(
             session,
@@ -1024,7 +1027,6 @@ async def reorder_roles(
         for role in changed:
             await session.refresh(role)
         await wake_queued_guild_federation(guild)
-        await publish_e2ee_policy_updates(session, redis, settings, e2ee_policy_channels)
         for role in changed:
             await publish_dispatch(
                 redis,
@@ -1101,6 +1103,7 @@ async def update_role(
             {"role": role_payload(role)},
             snapshot_required=True,
             e2ee_policy_channels=e2ee_policy_channels,
+            pause_e2ee=any(item["key"] == "permissions" for item in changes),
         )
         await add_audit_entry(
             session,
@@ -1125,6 +1128,23 @@ async def update_role(
             role_payload(role),
         )
     return role_payload(role)
+
+
+async def role_can_change_access(session: AsyncSession, role: Role) -> bool:
+    if role.permissions:
+        return True
+    return bool(
+        await session.scalar(
+            select(
+                exists().where(
+                    ChannelOverwrite.target_id == role.id,
+                    ChannelOverwrite.target_domain == role.origin_domain,
+                    ChannelOverwrite.target_type == "role",
+                    (ChannelOverwrite.allow != 0) | (ChannelOverwrite.deny != 0),
+                )
+            )
+        )
+    )
 
 
 @router.delete("/{guild_id}/roles/{role_id}", status_code=204)
@@ -1185,6 +1205,7 @@ async def delete_role(
         {"role": {"id": str(role.id), "origin_domain": role.origin_domain}},
         snapshot_required=True,
         e2ee_policy_channels=e2ee_policy_channels,
+        pause_e2ee=await role_can_change_access(session, role),
     )
     await session.execute(
         delete(ChannelOverwrite).where(
@@ -1302,6 +1323,7 @@ async def assign_role(
             },
             snapshot_required=True,
             e2ee_policy_channels=e2ee_policy_channels,
+            pause_e2ee=await role_can_change_access(session, role),
         )
         await add_audit_entry(
             session,
@@ -1461,6 +1483,9 @@ async def replace_member_roles(
                 },
                 snapshot_required=True,
                 e2ee_policy_channels=e2ee_policy_channels,
+                pause_e2ee=await role_can_change_access(
+                    session, changed_roles[(role_id, role_domain)]
+                ),
             )
     await add_audit_entry(
         session,
@@ -1564,6 +1589,7 @@ async def remove_role(
             },
             snapshot_required=True,
             e2ee_policy_channels=e2ee_policy_channels,
+            pause_e2ee=await role_can_change_access(session, role),
         )
         await add_audit_entry(
             session,

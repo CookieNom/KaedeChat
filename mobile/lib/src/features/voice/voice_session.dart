@@ -6,6 +6,8 @@ import 'dart:math';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart'
+    show MethodChannel, PlatformException, MissingPluginException;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
@@ -39,19 +41,23 @@ final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
       selfDeaf: selfDeaf,
     ),
   );
+  controller.leaveNativeCall = (call) async {
+    if (session.callRef == call) await session.leave();
+  };
+  session.allowPip(controller.currentState.phase == SessionPhase.ready);
   EntityRef? previousCall;
   session.addListener(() {
     final endedCall = previousCall;
     previousCall = session.callRef;
     if (endedCall != null && endedCall != previousCall) {
-      unawaited(controller.systemCalls.end(endedCall.wire));
-      unawaited(controller.push.dismissCall(endedCall.wire));
+      controller.localCallEnded(endedCall);
     }
   });
   final soundboardSubscription = controller.soundboardEvents.listen(
     (event) => unawaited(session.playSoundboardEvent(event)),
   );
   ref.onDispose(() {
+    controller.leaveNativeCall = null;
     if (session.callRef case final call?) {
       unawaited(controller.systemCalls.end(call.wire));
       unawaited(controller.push.dismissCall(call.wire));
@@ -60,6 +66,20 @@ final voiceSessionProvider = ChangeNotifierProvider<VoiceSession>((ref) {
   });
   return session;
 });
+
+class _FrameKeyOptions extends rtc.KeyProviderOptions {
+  _FrameKeyOptions()
+      : super(
+          sharedKey: true,
+          ratchetSalt: Uint8List.fromList(utf8.encode('kaede-livekit-v1')),
+          ratchetWindowSize: 16,
+          keyDerivationAlgorithm: rtc.KeyDerivationAlgorithm.kHKDF,
+          discardFrameWhenCryptorNotReady: true,
+        );
+
+  @override
+  Map<String, dynamic> toJson() => {...super.toJson(), 'keySize': 256};
+}
 
 enum VoiceAudioRoute { phone, speaker, bluetooth }
 
@@ -384,6 +404,25 @@ final class VoiceSession extends ChangeNotifier {
   final Future<MobileE2EEClient> Function() _e2eeClient;
   final MobileVoiceStatePublisher _voiceStatePublisher;
   final VoiceBackgroundService _backgroundService;
+  static const _cueChannel = MethodChannel('chat.kaede.mobile/voice_cues');
+  Room? _audibleRoom;
+
+  Future<void> _playCue(String cue) async {
+    try {
+      await _cueChannel.invokeMethod<void>(cue);
+    } on PlatformException {
+      // A system audio interruption must not interrupt the voice session.
+    } on MissingPluginException {
+      // Voice cues are available on Android and iOS.
+    }
+  }
+
+  Future<void> _finishRoomCues({bool silent = false}) async {
+    if (_audibleRoom == null) return;
+    _audibleRoom = null;
+    if (!_disposed && !_deafened && !silent) await _playCue('leave');
+  }
+
   final AudioPlayer _soundboardPlayer = AudioPlayer();
   String? _connectionId;
   String? _activeElsewhereClient;
@@ -404,12 +443,15 @@ final class VoiceSession extends ChangeNotifier {
   var _mediaQuality = const MobileMediaQuality();
   var _voiceMediaPolicy = VoiceMediaPolicy.defaults;
   var _speaker = true;
+  var _forceSpeaker = false;
   var _audioRoute = VoiceAudioRoute.speaker;
   var _pushToTalk = false;
   var _pushHeld = false;
+  Future<void> _pendingPushChange = Future<void>.value();
   var _canSpeak = false;
   var _canStream = false;
   var _canUseVad = false;
+  var _grantAllowsVad = true;
   var _appActive = true;
   var _recoverableDisconnect = false;
   var _retryJoinOnResume = false;
@@ -513,6 +555,14 @@ final class VoiceSession extends ChangeNotifier {
         return;
       }
       await _soundboardPlayer.stop();
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        await _soundboardPlayer.setAudioContext(AudioContext(
+          android: const AudioContextAndroid(
+            usageType: AndroidUsageType.voiceCommunication,
+            audioFocus: AndroidAudioFocus.none,
+          ),
+        ));
+      }
       await _soundboardPlayer.play(
         BytesSource(Uint8List.fromList(bytes)),
         volume: volume,
@@ -570,7 +620,6 @@ final class VoiceSession extends ChangeNotifier {
     }
     ++_microphoneGeneration;
     final requestedCamera = _camera;
-    final requestedScreen = _screen;
     final generation = ++_generation;
     if (_connectionId == null || takeover) {
       final random = Random.secure();
@@ -578,8 +627,9 @@ final class VoiceSession extends ChangeNotifier {
         List<int>.generate(32, (_) => random.nextInt(256)),
       ).replaceAll('=', '');
     }
-    await _disposeRoom(notify: false);
+    await _disposeRoom(notify: false, silent: force);
     if (generation != _generation) return;
+    _screen = false;
     _channel = target;
     _callRef = callRef;
     _connecting = true;
@@ -700,13 +750,7 @@ final class VoiceSession extends ChangeNotifier {
           ].join('\u0000'),
         );
         try {
-          final keyOptions = rtc.KeyProviderOptions(
-            sharedKey: true,
-            ratchetSalt: Uint8List.fromList(utf8.encode('kaede-livekit-v1')),
-            ratchetWindowSize: 16,
-            keyDerivationAlgorithm: rtc.KeyDerivationAlgorithm.kHKDF,
-            discardFrameWhenCryptorNotReady: true,
-          );
+          final keyOptions = _FrameKeyOptions();
           final provider = BaseKeyProvider(
             await rtc.frameCryptorFactory.createDefaultKeyProvider(keyOptions),
             keyOptions,
@@ -791,10 +835,16 @@ final class VoiceSession extends ChangeNotifier {
           if (_appActive) unawaited(_recoverDisconnectedRoom(room));
         })
         ..on<ParticipantConnectedEvent>((_) {
+          if (_audibleRoom == room && !_deafened && !_recoverableDisconnect) {
+            unawaited(_playCue('join'));
+          }
           _roomChanged(room);
           unawaited(refreshOccupancy());
         })
         ..on<ParticipantDisconnectedEvent>((_) {
+          if (_audibleRoom == room && !_deafened && !_recoverableDisconnect) {
+            unawaited(_playCue('leave'));
+          }
           _roomChanged(room);
           unawaited(refreshOccupancy());
         })
@@ -828,7 +878,7 @@ final class VoiceSession extends ChangeNotifier {
           _screen = room.localParticipant?.videoTrackPublications.any((p) =>
                   p.source == TrackSource.screenShareVideo && !p.muted) ??
               false;
-          unawaited(_activateBackgroundService(room, screenShare: _screen));
+          if (!_screen) unawaited(_backgroundService.screenCaptureStopped());
           notifyListeners();
         });
 
@@ -848,9 +898,14 @@ final class VoiceSession extends ChangeNotifier {
             );
       _canSpeak = capabilities.canSpeak;
       _canStream = capabilities.canStream;
-      _canUseVad = capabilities.canUseVad;
+      _grantAllowsVad = grant['can_use_vad'] != false;
+      _canUseVad = capabilities.canUseVad && _grantAllowsVad;
+      if (!_grantAllowsVad ||
+          (!_canUseVad && target.type != ChannelType.stage)) {
+        _pushToTalk = true;
+      }
       step = 'configure_audio';
-      await selectAudioRoute(_audioRoute);
+      await selectAudioRoute(_audioRoute, explicit: false);
       // Route selection may yield to a newer join/leave while this connected
       // room is still only a local candidate. Never publish that stale room;
       // the finally block below owns and disconnects it until this check has
@@ -910,16 +965,21 @@ final class VoiceSession extends ChangeNotifier {
       if (!_canStream) {
         _camera = false;
         _screen = false;
-      } else if (_appActive && (requestedCamera || requestedScreen)) {
+      } else if (_appActive && requestedCamera) {
         step = 'restore_video';
         await _restorePublishedMedia(
           room,
           cameraRequested: requestedCamera,
-          screenRequested: requestedScreen,
+          // A replacement room needs a fresh screen-capture authorization.
+          screenRequested: false,
         );
       }
       connectedSuccessfully = generation == _generation && _room == room;
-      if (connectedSuccessfully) _retryJoinOnResume = false;
+      if (connectedSuccessfully) {
+        _retryJoinOnResume = false;
+        _audibleRoom = room;
+        if (!force && !_deafened) unawaited(_playCue('join'));
+      }
     } on Object catch (exception) {
       if (generation == _generation) {
         if (exception is KaedeException &&
@@ -960,9 +1020,18 @@ final class VoiceSession extends ChangeNotifier {
 
   /// Applies a fresh effective-permission payload to an existing connection.
   Future<void> reconcilePermissions(KaedeChannel fresh) async {
+    final joined = _channel;
+    if (joined == null || joined.ref != fresh.ref) return;
+    if (joined.encryptionMode != fresh.encryptionMode ||
+        joined.encryptionState != fresh.encryptionState ||
+        joined.encryptionGroupId != fresh.encryptionGroupId ||
+        joined.encryptionEpoch != fresh.encryptionEpoch ||
+        joined.encryptionPolicyGeneration != fresh.encryptionPolicyGeneration) {
+      await leave(reason: L10n.current.voice_encryption_changed);
+      return;
+    }
     if (_callRef != null) return;
-    if (_channel?.ref != fresh.ref) return;
-    if (_channel?.permissions == fresh.permissions) return;
+    if (joined.permissions == fresh.permissions) return;
     _channel = fresh;
     if (!fresh.allows(Permission.connect)) {
       await leave(
@@ -972,14 +1041,14 @@ final class VoiceSession extends ChangeNotifier {
       return;
     }
     if (fresh.type == ChannelType.stage) {
-      _canUseVad = _canSpeak;
+      _canUseVad = _grantAllowsVad && _canSpeak;
       notifyListeners();
       return;
     }
     final speak = fresh.allows(Permission.speak);
     final stream = fresh.allows(Permission.stream);
     final gainedServerGrant = (speak && !_canSpeak) || (stream && !_canStream);
-    _canUseVad = voiceChannelCanUseVad(fresh);
+    _canUseVad = _grantAllowsVad && voiceChannelCanUseVad(fresh);
     if (!speak && _canSpeak) {
       ++_microphoneGeneration;
       _canSpeak = false;
@@ -1129,17 +1198,24 @@ final class VoiceSession extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    await _room?.localParticipant?.setCameraEnabled(
-      next,
-      videoPublishOptions: _room == null
-          ? null
-          : AdaptiveVideo.publishOptions(
-              _room!, TrackSource.camera, _mediaQuality,
-              controller: _adaptiveVideo),
-      cameraCaptureOptions:
-          cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
-    );
-    _camera = next;
+    final room = _room;
+    if (room == null || !_canStream) return;
+    if (next && !await _activateBackgroundService(room, camera: true)) return;
+    try {
+      await room.localParticipant?.setCameraEnabled(
+        next,
+        videoPublishOptions: AdaptiveVideo.publishOptions(
+            room, TrackSource.camera, _mediaQuality,
+            controller: _adaptiveVideo),
+        cameraCaptureOptions:
+            cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
+      );
+      if (_room == room) _camera = next;
+    } finally {
+      if (_room == room && !_camera) {
+        await _activateBackgroundService(room, camera: false);
+      }
+    }
     notifyListeners();
   }
 
@@ -1305,10 +1381,8 @@ final class VoiceSession extends ChangeNotifier {
 
   Future<void> toggleSpeaker() async {
     final next = !_speaker;
-    await AudioManager.instance.setSpeakerOutputPreferred(next);
-    _speaker = next;
-    _audioRoute = next ? VoiceAudioRoute.speaker : VoiceAudioRoute.phone;
-    notifyListeners();
+    await selectAudioRoute(
+        next ? VoiceAudioRoute.speaker : VoiceAudioRoute.phone);
   }
 
   Future<List<VoiceAudioRoute>> availableAudioRoutes() async {
@@ -1340,27 +1414,26 @@ final class VoiceSession extends ChangeNotifier {
     return routes;
   }
 
-  Future<void> selectAudioRoute(VoiceAudioRoute route) async {
+  Future<void> selectAudioRoute(VoiceAudioRoute route,
+      {bool explicit = true}) async {
     switch (route) {
       case VoiceAudioRoute.phone:
         await AudioManager.instance.setSpeakerOutputPreferred(false);
+        _forceSpeaker = false;
         _speaker = false;
         break;
       case VoiceAudioRoute.speaker:
         await AudioManager.instance
-            .setSpeakerOutputPreferred(true, force: true);
+            .setSpeakerOutputPreferred(true, force: explicit || _forceSpeaker);
+        _forceSpeaker = explicit || _forceSpeaker;
         _speaker = true;
         break;
       case VoiceAudioRoute.bluetooth:
         if (!(await _ensureBluetoothPermission())) {
-          await AudioManager.instance
-              .setSpeakerOutputPreferred(true, force: true);
-          _speaker = true;
-          _audioRoute = VoiceAudioRoute.speaker;
-          notifyListeners();
           return;
         }
-        await rtc.Helper.setSpeakerphoneOnButPreferBluetooth();
+        await AudioManager.instance.setSpeakerOutputPreferred(false);
+        _forceSpeaker = false;
         _speaker = false;
         break;
     }
@@ -1415,7 +1488,7 @@ final class VoiceSession extends ChangeNotifier {
         final gainedSpeak = capabilities.canSpeak && !_canSpeak;
         _canSpeak = capabilities.canSpeak;
         _canStream = capabilities.canStream;
-        _canUseVad = capabilities.canUseVad;
+        _canUseVad = _grantAllowsVad && capabilities.canUseVad;
         if (!_canSpeak) {
           ++_microphoneGeneration;
           _muted = true;
@@ -1540,7 +1613,7 @@ final class VoiceSession extends ChangeNotifier {
   }
 
   Future<void> toggleInputMode() async {
-    if (!_canSpeak || (!_pushToTalk && !_canUseVad)) return;
+    if (!_canSpeak || (_pushToTalk && !_canUseVad)) return;
     final next = !_pushToTalk;
     if (next) {
       await _room?.localParticipant?.setMicrophoneEnabled(false);
@@ -1566,22 +1639,38 @@ final class VoiceSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setPushHeld(bool held) async {
-    if (!_pushToTalk || _muted || held == _pushHeld) return;
+  Future<void> setPushHeld(bool held) {
     final room = _room;
-    if (held && room != null) {
-      final protected = await _activateBackgroundService(
-        room,
-        microphone: true,
-      );
-      if (defaultTargetPlatform == TargetPlatform.android && !protected) return;
+    if (room == null ||
+        !_pushToTalk ||
+        _muted ||
+        !_canSpeak ||
+        held == _pushHeld) {
+      return _pendingPushChange;
     }
     _pushHeld = held;
-    await room?.localParticipant?.setMicrophoneEnabled(held);
-    if (!held && room != null && _appActive) {
-      await _activateBackgroundService(room, microphone: false);
-    }
     notifyListeners();
+    Future<void> update() async {
+      if (room != _room || !_pushToTalk || _pushHeld != held) return;
+      if (held) {
+        final protected =
+            await _activateBackgroundService(room, microphone: true);
+        if (room != _room || !_pushToTalk || !_microphoneShouldPublish) return;
+        if (defaultTargetPlatform == TargetPlatform.android && !protected) {
+          _pushHeld = false;
+          notifyListeners();
+          return;
+        }
+      }
+      await room.localParticipant?.setMicrophoneEnabled(held);
+      if (!held && room == _room && !_pushHeld && _appActive) {
+        await _activateBackgroundService(room, microphone: false);
+      }
+    }
+
+    final change = _pendingPushChange.then((_) => update());
+    _pendingPushChange = change.catchError((Object _) {});
+    return change;
   }
 
   /// Records that the UI moved into the background without changing the
@@ -1658,7 +1747,7 @@ final class VoiceSession extends ChangeNotifier {
     }
     var deviceRestoreFailed = false;
     try {
-      await selectAudioRoute(_audioRoute);
+      await selectAudioRoute(_audioRoute, explicit: false);
     } on Object {
       deviceRestoreFailed = true;
     }
@@ -1678,7 +1767,11 @@ final class VoiceSession extends ChangeNotifier {
     final media = await _restorePublishedMedia(
       room,
       cameraRequested: _camera,
-      screenRequested: _screen,
+      screenRequested: _screen &&
+          (room.localParticipant?.videoTrackPublications.any((publication) =>
+                  publication.source == TrackSource.screenShareVideo &&
+                  !publication.muted) ??
+              false),
     );
     if (!isCurrent()) return;
     if (deviceRestoreFailed && !media.failed) {
@@ -1704,6 +1797,9 @@ final class VoiceSession extends ChangeNotifier {
           throw StateError(L10n
               .current.ui_the_local_voice_participant_is_unavailable_79825800);
         }
+        if (!await _activateBackgroundService(room, camera: true)) {
+          throw StateError(_backgroundServiceError);
+        }
         await participant.setCameraEnabled(
           true,
           videoPublishOptions: AdaptiveVideo.publishOptions(
@@ -1713,22 +1809,15 @@ final class VoiceSession extends ChangeNotifier {
               cameraCaptureOptionsForMode(_voiceMediaPolicy.videoQualityMode),
         );
       },
+      // Native screen capture requires an explicit picker. An existing
+      // publication remains active across foreground transitions.
       publishScreen: () async {
-        if (participant == null) {
-          throw StateError(L10n
-              .current.ui_the_local_voice_participant_is_unavailable_79825800);
+        if (participant?.videoTrackPublications.any((publication) =>
+                publication.source == TrackSource.screenShareVideo &&
+                !publication.muted) !=
+            true) {
+          throw StateError('Screen sharing ended.');
         }
-        await participant.setScreenShareEnabled(
-          true,
-          videoPublishOptions: AdaptiveVideo.publishOptions(
-              room, TrackSource.screenShareVideo, _mediaQuality,
-              controller: _adaptiveVideo),
-          captureScreenAudio: false,
-          screenShareCaptureOptions: _mediaQuality.screenCaptureOptions(
-            useIosBroadcastExtension:
-                !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS,
-          ),
-        );
       },
     );
     if (generation != _generation || _room != room) return result;
@@ -1751,13 +1840,15 @@ final class VoiceSession extends ChangeNotifier {
     Room room, {
     bool? microphone,
     bool? screenShare,
+    bool? camera,
   }) async {
-    if (!_appActive || _room != room) return false;
+    if ((!_appActive && screenShare != true) || _room != room) return false;
     final generation = _generation;
     final ready = await _backgroundService.setActive(
       true,
       microphone: microphone ?? _microphoneShouldPublish,
       screenShare: screenShare ?? _screen,
+      camera: camera ?? _camera,
     );
     if (generation != _generation || _room != room) return false;
     if (!ready && defaultTargetPlatform == TargetPlatform.android) {
@@ -1777,6 +1868,8 @@ final class VoiceSession extends ChangeNotifier {
     DisconnectReason? reason,
   ) async {
     if (_room != room) return;
+    await _finishRoomCues();
+    if (_room != room || _pendingDisposal != null) return;
     _generation += 1;
     final events = _events;
     _adaptiveVideo?.close();
@@ -1825,8 +1918,9 @@ final class VoiceSession extends ChangeNotifier {
 
   Future<void> leave({String? reason}) async {
     ++_microphoneGeneration;
-    _generation += 1;
+    final generation = ++_generation;
     await _disposeRoom(notify: false);
+    if (_generation != generation) return;
     _channel = null;
     _callRef = null;
     _connecting = false;
@@ -1862,14 +1956,28 @@ final class VoiceSession extends ChangeNotifier {
         tracks.firstOrNull;
   }
 
+  bool _pipAllowed = false;
+  void allowPip(bool allowed) {
+    _pipAllowed = allowed;
+    videoPip.configure(joined && allowed ? pipTrack : null);
+  }
+
   void _notify() {
     if (!_disposed) {
-      videoPip.configure(joined ? pipTrack : null);
+      videoPip.configure(joined && _pipAllowed ? pipTrack : null);
       notifyListeners();
     }
   }
 
-  Future<void> _disposeRoom({required bool notify}) async {
+  Future<void>? _pendingDisposal;
+  Future<void> _disposeRoom({required bool notify, bool silent = false}) {
+    return _pendingDisposal ??= _releaseRoom(notify: notify, silent: silent)
+        .whenComplete(() => _pendingDisposal = null);
+  }
+
+  Future<void> _releaseRoom(
+      {required bool notify, required bool silent}) async {
+    await _finishRoomCues(silent: silent);
     await _soundboardPlayer.stop();
     _occupancyTimer?.cancel();
     _occupancyTimer = null;

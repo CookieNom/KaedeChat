@@ -15,6 +15,7 @@ from app.core.federation import (
     BLOCK_POLICY_ADVISORY_NAME,
     POLICY_HELD_OUTBOX_PREFIX,
     block_covers_domain,
+    deletion_control_envelope,
     federation_policy_holds_event,
     policy_held_retry_at,
 )
@@ -137,10 +138,14 @@ async def reconcile_destination_policy(
     released_event_ids: set[str] = set()
     for outbox, event in rows:
         block_level = block.level if block is not None else None
-        should_hold = block_level is not None and federation_policy_holds_event(
-            block_level,
-            event.event_type,
-            context=getattr(event, "envelope", {}).get("context"),
+        should_hold = (
+            block_level is not None
+            and not deletion_control_envelope(getattr(event, "envelope", {}))
+            and federation_policy_holds_event(
+                block_level,
+                event.event_type,
+                context=getattr(event, "envelope", {}).get("context"),
+            )
         )
         was_policy_held = bool(
             outbox.last_error and outbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX)
@@ -184,7 +189,7 @@ async def rearm_released_event_retention(
         )
         if still_held is None:
             event = await session.get(FederationEvent, (settings.domain, event_id))
-            if event is not None:
+            if event is not None and not deletion_control_envelope(event.envelope):
                 event.expires_at = deadline
 
 

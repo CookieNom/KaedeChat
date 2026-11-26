@@ -9,6 +9,7 @@ from pydantic import ConfigDict, Field, ValidationInfo, field_validator, model_v
 from app.chat.custom_emojis import canonical_reaction_emoji
 from app.core.model_validation import UnambiguousInputModel
 from app.core.types import EntityRef
+from app.federation.numbers import WireUnitFraction
 
 
 class MessageSearchFilters(UnambiguousInputModel):
@@ -221,7 +222,7 @@ class FederatedMessageSearchResult(UnambiguousInputModel):
     author_ref: EntityRef
     snippet: str = Field(default="", max_length=280)
     created_at: datetime
-    ranking_score: float = Field(ge=0, le=1)
+    ranking_score: WireUnitFraction
     cursor_after: str = Field(min_length=1, max_length=512)
 
     @field_validator("snippet")

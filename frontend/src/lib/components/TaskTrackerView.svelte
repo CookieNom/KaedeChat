@@ -78,6 +78,11 @@
   let taskDialogLane = $state<TrackerLane | null>(null);
   let taskCreateNonce = $state('');
   let settingsOpen = $state(false);
+  let pointer = $state.raw<{ id: number; x: number; y: number; task: TrackerTask } | null>(null);
+  let dragX = $state(0);
+  let dragY = $state(0);
+  let scrollFrame = 0;
+  let suppressClick = false;
   let draggedTaskKey = $state('');
   let dropLaneKey = $state('');
   let dropIndex = $state(-1);
@@ -150,6 +155,7 @@
     window.addEventListener('focus', refreshWhenVisible);
     document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
+      clearDrag();
       loadController?.abort();
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       client.removeEventListener('dispatch', receive);
@@ -395,50 +401,100 @@
     }
   }
 
-  function dragStart(event: DragEvent, task: TrackerTask) {
-    if (!canEditTask(task) || activeFilterCount > 0 || actionBusy) {
-      event.preventDefault();
-      return;
+  function startPointer(event: PointerEvent, task: TrackerTask) {
+    if (!event.isPrimary || event.button !== 0 || pointer) return;
+    suppressClick = false;
+    if (!canEditTask(task) || activeFilterCount || actionBusy) return;
+    if (event.pointerType === 'touch' && !(event.target as Element).closest('.drag-grip')) return;
+    pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, task };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+
+  function locateDrop() {
+    const hit = document.elementFromPoint(dragX, dragY);
+    const lane = hit?.closest<HTMLElement>('[data-drop-lane]');
+    dropLaneKey = lane && trackerRoot?.contains(lane) ? lane.dataset.dropLane! : '';
+    const row = hit?.closest<HTMLElement>('[data-task-index]');
+    if (row) {
+      const bounds = row.getBoundingClientRect();
+      dropIndex = Number(row.dataset.taskIndex) + Number(dragY > bounds.top + bounds.height / 2);
+    } else if (hit?.closest('.lane-tasks') && lane) {
+      const next = Array.from(lane.querySelectorAll<HTMLElement>('[data-task-index]')).find(
+        (item) => item.getBoundingClientRect().top > dragY
+      );
+      dropIndex = Number(next?.dataset.taskIndex ?? lane.dataset.taskCount);
+    } else {
+      dropIndex = Number(lane?.dataset.taskCount ?? 0);
     }
-    draggedTaskKey = entityKey(task);
-    event.dataTransfer?.setData('application/x-kaede-tracker-task', draggedTaskKey);
-    event.dataTransfer?.setData('text/plain', task.key);
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
   }
 
-  function dragOver(event: DragEvent, lane: TrackerLane, index: number) {
-    if (!draggedTaskKey || activeFilterCount > 0 || actionBusy) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-    dropLaneKey = entityKey(lane);
-    dropIndex = index;
+  function scrollWhileDragging() {
+    if (!trackerRoot || !draggedTaskKey) return;
+    const bounds = trackerRoot.getBoundingClientRect();
+    if (
+      dragX >= bounds.left &&
+      dragX <= bounds.right &&
+      dragY >= bounds.top &&
+      dragY <= bounds.bottom
+    ) {
+      const bottom = Math.max(0, dragY - bounds.bottom + 48);
+      const top = Math.max(0, bounds.top + 48 - dragY);
+      if (bottom || top) {
+        trackerRoot.scrollTop += (bottom - top) / 4;
+        locateDrop();
+      }
+    }
+    scrollFrame = requestAnimationFrame(scrollWhileDragging);
   }
 
-  function dragOverTask(event: DragEvent, lane: TrackerLane, index: number) {
-    // Keep the lane-level dragover handler from replacing this precise task
-    // boundary with the lane's catch-all "append to bottom" boundary.
-    event.stopPropagation();
-    const target = event.currentTarget as HTMLElement;
-    const bounds = target.getBoundingClientRect();
-    dragOver(event, lane, index + Number(event.clientY > bounds.top + bounds.height / 2));
+  function movePointer(event: PointerEvent) {
+    if (pointer?.id !== event.pointerId) return;
+    if (!draggedTaskKey && Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 5)
+      return;
+    dragX = event.clientX;
+    dragY = event.clientY;
+    if (!draggedTaskKey) {
+      draggedTaskKey = entityKey(pointer.task);
+      suppressClick = true;
+      scrollFrame = requestAnimationFrame(scrollWhileDragging);
+    }
+    locateDrop();
   }
 
   function clearDrag() {
+    cancelAnimationFrame(scrollFrame);
+    pointer = null;
     draggedTaskKey = '';
     dropLaneKey = '';
     dropIndex = -1;
   }
 
-  async function dropTask(event: DragEvent, lane: TrackerLane, index: number) {
-    if (!draggedTaskKey || actionBusy) return;
-    event.preventDefault();
-    const key = draggedTaskKey;
+  function releasePointer(event: PointerEvent) {
+    if (pointer?.id !== event.pointerId) return;
+    dragX = event.clientX;
+    dragY = event.clientY;
+    locateDrop();
+    const task = draggedTaskKey ? pointer.task : null;
+    const lane = visibleLanes.find((candidate) => entityKey(candidate) === dropLaneKey);
+    const index = dropIndex;
     clearDrag();
-    const task = board?.tasks.find((candidate) => entityKey(candidate) === key);
-    if (!task) return;
+    if (!task || !lane || activeFilterCount || actionBusy || !canEditTask(task)) return;
     const position = trackerDropPosition(task, lane, trackerTasksForLane(board, lane), index);
     if (position === null) return;
-    await moveTask(task, lane, position);
+    void moveTask(task, lane, position);
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      void tick().then(() =>
+        document
+          .getElementById(taskDomId(task))
+          ?.animate(
+            [
+              { transform: 'translateY(-5px)', backgroundColor: 'var(--accent-soft)' },
+              { transform: 'none' }
+            ],
+            { duration: 220, easing: 'ease-out' }
+          )
+      );
+    }
   }
 
   async function moveTask(task: TrackerTask, lane: TrackerLane, position: number) {
@@ -585,6 +641,27 @@
 </script>
 
 <Toast message={actionNotice} onDismiss={() => (actionNotice = '')} />
+
+<svelte:window
+  onblur={clearDrag}
+  onlostpointercapture={(event) => {
+    if (pointer?.id === event.pointerId) clearDrag();
+  }}
+  onkeydown={(event) => {
+    if (event.key === 'Escape') clearDrag();
+  }}
+/>
+
+{#if draggedTaskKey && pointer}
+  <div
+    class="task-drag-preview"
+    aria-hidden="true"
+    style:left={`clamp(8px, ${dragX + 12}px, 100vw - min(16rem, 80vw) - 8px)`}
+    style:top={`min(${dragY + 12}px, 100dvh - 3rem)`}
+  >
+    {pointer.task.title}
+  </div>
+{/if}
 
 <section
   bind:this={trackerRoot}
@@ -760,8 +837,8 @@
           class="tracker-lane"
           style:--lane-color={trackerColor(lane.color)}
           aria-labelledby={`tracker-lane-${lane.id}`}
-          ondragover={(event) => dragOver(event, lane, tasks.length)}
-          ondrop={(event) => void dropTask(event, lane, dropIndex < 0 ? tasks.length : dropIndex)}
+          data-drop-lane={entityKey(lane)}
+          data-task-count={tasks.length}
         >
           <header class="lane-heading">
             <button
@@ -795,9 +872,6 @@
 
           {#if !collapsed}
             <div class="lane-tasks" id={`tracker-lane-tasks-${lane.id}`}>
-              {#if dropLaneKey === entityKey(lane) && dropIndex === 0}
-                <div class="task-drop-indicator" aria-hidden="true"></div>
-              {/if}
               {#each tasks as task, index (entityKey(task))}
                 {@const due = duePresentation(task)}
                 {@const editable = canEditTask(task)}
@@ -807,23 +881,33 @@
                   class:dragging={draggedTaskKey === entityKey(task)}
                   class:overdue={due?.overdue}
                   class="tracker-task"
-                  draggable={movable && !actionBusy}
-                  ondragstart={(event) => dragStart(event, task)}
-                  ondragend={clearDrag}
-                  ondragover={(event) => dragOverTask(event, lane, index)}
-                  ondrop={(event) => void dropTask(event, lane, dropIndex < 0 ? index : dropIndex)}
+                  id={taskId}
+                  data-task-index={index}
+                  class:drop-before={dropLaneKey === entityKey(lane) && dropIndex === index}
+                  class:drop-after={dropLaneKey === entityKey(lane) &&
+                    dropIndex === tasks.length &&
+                    index + 1 === tasks.length}
                 >
-                  {#if dropLaneKey === entityKey(lane) && dropIndex === index && index !== 0}
-                    <div class="task-drop-indicator" aria-hidden="true"></div>
-                  {/if}
                   <button
                     class="task-summary"
                     type="button"
                     aria-labelledby={`${taskId}-key ${taskId}-title`}
                     aria-describedby={`${taskId}-details`}
                     title={task.description || task.title}
-                    onclick={(event) => openTask(task, event.currentTarget)}
+                    class:has-grip={movable}
+                    class:grabbable={movable && !actionBusy}
+                    onpointerdown={(event) => startPointer(event, task)}
+                    onpointermove={movePointer}
+                    onpointerup={releasePointer}
+                    ondragstart={(event) => event.preventDefault()}
+                    onclick={(event) => {
+                      if (!event.detail || !suppressClick) openTask(task, event.currentTarget);
+                    }}
                   >
+                    {#if movable && !actionBusy}
+                      <span class="drag-grip" aria-hidden="true" title={$t('ui_drag_to_move_task')}
+                      ></span>
+                    {/if}
                     <span
                       class:priority-none={task.priority === 'none'}
                       class={`task-priority priority-${task.priority}`}
@@ -918,9 +1002,6 @@
                     </div>
                   {/if}
                 </article>
-                {#if dropLaneKey === entityKey(lane) && dropIndex === index + 1}
-                  <div class="task-drop-indicator" aria-hidden="true"></div>
-                {/if}
               {:else}
                 <div class="lane-empty">
                   {activeFilterCount
@@ -1518,12 +1599,75 @@
     font-size: 0.64rem;
   }
 
-  .task-drop-indicator {
+  .task-summary.has-grip {
+    position: relative;
+    padding-left: 2rem;
+  }
+
+  .task-summary.grabbable {
+    cursor: grab;
+    user-select: none;
+  }
+
+  .drag-grip {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 2rem;
+    display: grid;
+    place-items: center;
+    touch-action: none;
+    color: var(--text-muted);
+  }
+
+  .drag-grip::after {
+    content: '';
+    width: 10px;
+    height: 16px;
+    background: radial-gradient(circle, currentColor 1.5px, transparent 1.7px) 0 0 / 5px 5px;
+  }
+
+  .task-drag-preview {
+    position: fixed;
+    z-index: 100;
+    max-width: min(16rem, 80vw);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+    padding: 0.55rem 0.85rem;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--text);
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-sm);
+    font-size: 0.8rem;
+    animation: task-lift 120ms ease-out;
+  }
+
+  @keyframes task-lift {
+    from {
+      opacity: 0.5;
+      transform: translateY(3px) scale(0.98);
+    }
+  }
+
+  .drop-before::after,
+  .drop-after::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+    inset-inline: 0;
+    top: -2px;
     height: 2px;
     margin: 0 0.4rem;
     border-radius: 999px;
     background: var(--lane-color);
     box-shadow: 0 0 8px color-mix(in srgb, var(--lane-color) 45%, transparent);
+  }
+
+  .drop-after::after {
+    top: auto;
+    bottom: -2px;
   }
 
   .lane-empty {
@@ -1684,7 +1828,7 @@
 
     .task-summary {
       min-height: 58px;
-      grid-template-columns: 48px 62px minmax(100px, 1fr) 30px;
+      grid-template-columns: 44px minmax(32px, 62px) minmax(0, 1fr) 28px;
       grid-template-rows: auto auto;
       gap: 0.2rem 0.4rem;
     }
@@ -1749,7 +1893,11 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .task-drag-preview,
+    .tracker-task,
+    .tracker-lane,
     .tracker-loading span {
+      transition: none;
       animation: none;
     }
   }

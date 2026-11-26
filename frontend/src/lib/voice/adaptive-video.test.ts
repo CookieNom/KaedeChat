@@ -666,6 +666,7 @@ it('withdraws encrypted H.264 for legacy joiners and reconnects, and restores it
   const changes: string[] = [];
   let failVp8 = false;
   const received = (codec: string) => ({
+    isEncrypted: true,
     trackName: `kaede.video.v1:camera:${codec}`,
     trackSid: codec,
     source: Track.Source.Camera,
@@ -675,6 +676,7 @@ it('withdraws encrypted H.264 for legacy joiners and reconnects, and restores it
   });
   const h264 = received('h264');
   const vp8 = received('vp8');
+  const plaintext = { ...received('vp8'), trackSid: 'plaintext', isEncrypted: false };
   const mismatched = { ...received('vp8'), trackSid: 'substituted', mimeType: 'video/H264' };
   const unknown = {
     ...received('vp8'),
@@ -688,6 +690,7 @@ it('withdraws encrypted H.264 for legacy joiners and reconnects, and restores it
       ['h264', h264],
       ['vp8', vp8],
       ['substituted', mismatched],
+      ['plaintext', plaintext],
       ['unknown', unknown]
     ])
   };
@@ -761,6 +764,7 @@ it('withdraws encrypted H.264 for legacy joiners and reconnects, and restores it
   expect(sent.at(-1)?.codecs).toContain('h264');
   expect(changes).toEqual(['+h264', '-vp8']);
   expect(h264.setSubscribed).toHaveBeenLastCalledWith(true);
+  expect(plaintext.setSubscribed).toHaveBeenLastCalledWith(false);
   const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + VIDEO_POLICY.hintExpiryMs + 1);
   try {
     await internal.announce();

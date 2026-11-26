@@ -2,6 +2,7 @@
   import { t } from '$lib/ui/locale';
 
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { formatDateTime } from '$lib/ui/locale';
@@ -68,11 +69,7 @@
       const hydrated = await api<Guild>(`/guilds/${encodeURIComponent(entityRef(guild))}`);
       if (generation !== loadGeneration || targetCode !== code) return;
       const channel = invitedChannel(hydrated, preview?.channel_id ?? null);
-      if (!channel) {
-        window.location.assign(resolve('home'));
-        return;
-      }
-      window.location.assign(guildChannelPath(hydrated, channel));
+      await goto(channel ? guildChannelPath(hydrated, channel) : resolve('home'));
     } catch (caught) {
       if (generation !== loadGeneration || targetCode !== code) return;
       if (caught instanceof ApiError && caught.status === 401) {

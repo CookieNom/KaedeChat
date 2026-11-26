@@ -1719,7 +1719,11 @@ async def subscribe_scheduled_event(
         session,
         guild_topic(guild.origin_domain, guild.id),
         "GUILD_SCHEDULED_EVENT_USER_ADD",
-        rendered,
+        {
+            **rendered,
+            "channel_id": str(event.channel_id) if event.channel_id is not None else None,
+            "channel_domain": event.channel_domain,
+        },
     )
     await session.commit()
     await publish_committed_dispatches(session, redis)
@@ -1785,7 +1789,11 @@ async def unsubscribe_scheduled_event(
         session,
         guild_topic(guild.origin_domain, guild.id),
         "GUILD_SCHEDULED_EVENT_USER_REMOVE",
-        rendered,
+        {
+            **rendered,
+            "channel_id": str(event.channel_id) if event.channel_id is not None else None,
+            "channel_domain": event.channel_domain,
+        },
     )
     await session.commit()
     await publish_committed_dispatches(session, redis)

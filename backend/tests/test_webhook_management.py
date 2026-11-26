@@ -843,7 +843,9 @@ async def test_authenticated_get_and_channel_list_recheck_channel_permission(
     item = webhook()
     guild = SimpleNamespace(id=11, origin_domain="chat.example")
     channel = SimpleNamespace(id=13, origin_domain="chat.example")
-    auth = SimpleNamespace(user=SimpleNamespace(id=3, origin_domain="chat.example"))
+    auth = SimpleNamespace(
+        user=SimpleNamespace(id=3, origin_domain="chat.example", account_type="human")
+    )
     session = SimpleNamespace(
         scalar=AsyncMock(return_value=item),
         scalars=AsyncMock(side_effect=[[item], [], []]),

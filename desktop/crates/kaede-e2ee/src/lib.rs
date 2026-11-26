@@ -7,9 +7,9 @@
 use openmls::{
     credentials::{BasicCredential, CredentialWithKey},
     framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent},
-    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedWelcome},
+    group::{GroupId, MlsGroup, MlsGroupJoinConfig, StagedCommit, StagedWelcome},
     key_packages::{KeyPackage, KeyPackageIn},
-    prelude::{ProtocolVersion, SignatureScheme},
+    prelude::{ProtocolVersion, Sender, SignatureScheme},
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -90,6 +90,20 @@ impl DeviceIdentity {
     ///
     /// Returns [`MlsError::Identity`] if the signature operation fails.
     pub fn sign_server_challenge(&self, challenge: &[u8]) -> Result<Vec<u8>, MlsError> {
+        const CONTEXTS: &[&[u8]] = &[
+            b"kaede-device-registration-v1\0",
+            b"kaede-key-package-upload-v1\0",
+            b"kaede-bot-e2ee-device-registration-v1\n",
+            b"kaede-bot-e2ee-key-packages-v1\n",
+            b"kaede-webhook-e2ee-device-registration-v1\n",
+            b"kaede-webhook-e2ee-key-packages-v1\n",
+        ];
+        if !CONTEXTS
+            .iter()
+            .any(|prefix| challenge.starts_with(prefix) && challenge.len() > prefix.len())
+        {
+            return Err(MlsError::Identity("unrecognized signing context".into()));
+        }
         self.signer
             .sign(challenge)
             .map_err(|error| MlsError::Identity(format!("{error:?}")))
@@ -525,14 +539,21 @@ impl MlsClient {
                     credential: Zeroizing::new(credential),
                 })
             }
-            ProcessedMessageContent::ProposalMessage(proposal)
-            | ProcessedMessageContent::ExternalJoinProposalMessage(proposal) => {
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => Err(MlsError::Message(
+                "external join proposals are not supported".into(),
+            )),
+            ProcessedMessageContent::ProposalMessage(proposal) => {
                 group
                     .store_pending_proposal(self.provider.storage(), *proposal)
                     .map_err(|error| MlsError::Group(error.to_string()))?;
                 Ok(ProcessedMessage::Proposal)
             }
             ProcessedMessageContent::StagedCommitMessage(commit) => {
+                if Self::includes_external_join(&commit) {
+                    return Err(MlsError::Message(
+                        "commit contains an external join proposal".into(),
+                    ));
+                }
                 group
                     .merge_staged_commit(&self.provider, *commit)
                     .map_err(|error| MlsError::Group(error.to_string()))?;
@@ -590,9 +611,38 @@ impl MlsClient {
     }
 
     fn load_group(&self, group_id: &[u8]) -> Result<MlsGroup, MlsError> {
-        MlsGroup::load(self.provider.storage(), &GroupId::from_slice(group_id))
+        let storage = self.provider.storage();
+        let mut group = MlsGroup::load(storage, &GroupId::from_slice(group_id))
             .map_err(|error| MlsError::Group(error.to_string()))?
-            .ok_or(MlsError::GroupNotFound)
+            .ok_or(MlsError::GroupNotFound)?;
+        // Older versions persisted external proposals. Remove them before a
+        // later membership change can include them in a locally authored commit.
+        let external: Vec<_> = group
+            .pending_proposals()
+            .filter(|proposal| matches!(proposal.sender(), Sender::NewMemberProposal))
+            .map(|proposal| proposal.proposal_reference_ref().clone())
+            .collect();
+        for reference in external {
+            group
+                .remove_pending_proposal(storage, &reference)
+                .map_err(|error| MlsError::Group(error.to_string()))?;
+        }
+        if group
+            .pending_commit()
+            .is_some_and(Self::includes_external_join)
+        {
+            group
+                .clear_pending_commit(storage)
+                .map_err(|error| MlsError::Group(error.to_string()))?;
+            return Err(MlsError::Group("discarded a pending external join".into()));
+        }
+        Ok(group)
+    }
+
+    fn includes_external_join(commit: &StagedCommit) -> bool {
+        commit
+            .queued_proposals()
+            .any(|proposal| matches!(proposal.sender(), Sender::NewMemberProposal))
     }
 
     fn decode_key_package(&self, bytes: &[u8]) -> Result<KeyPackage, MlsError> {

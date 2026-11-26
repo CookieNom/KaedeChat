@@ -5,10 +5,18 @@ import binascii
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from app.chat.custom_emojis import custom_emoji_refs
 from app.chat.custom_stickers import validate_sticker_items
@@ -28,7 +36,8 @@ from app.core.model_validation import UnambiguousInputModel
 from app.core.settings import DOMAIN_RE
 from app.core.types import EntityRef, WireSnowflake
 from app.db.models import Attachment, Message
-from app.media.payloads import attachment_payload
+from app.federation.numbers import read_wire_number, write_wire_number
+from app.media.payloads import attachment_payload, federation_attachment_duration
 
 FORWARD_SNAPSHOT_FLAG_MASK = (
     (1 << 2) | MESSAGE_FLAG_IS_COMPONENTS_V2 | MESSAGE_FLAG_IS_VOICE_MESSAGE
@@ -196,7 +205,7 @@ class ForwardSourceAuthorization(UnambiguousInputModel):
             if self.source_snapshot is None:
                 raise ValueError("plaintext forward authorization requires a snapshot")
             self.source_snapshot = validate_forward_snapshot_source_binding(
-                self.source_snapshot,
+                validate_forward_snapshot(self.source_snapshot, federation=True),
                 source_projection_digest=self.source_projection_digest,
                 source_created_at=self.source_created_at,
                 source_edited_at=self.source_edited_at,
@@ -312,6 +321,16 @@ def can_forward_between_age_contexts(
     )
 
 
+def _snapshot_duration(value: object, info: ValidationInfo) -> object:
+    if value is None:
+        return None
+    if info.context and info.context.get("federation"):
+        return read_wire_number(value)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("forward attachment duration must be numeric")
+    return value
+
+
 class ForwardSnapshotAttachment(UnambiguousInputModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -323,7 +342,9 @@ class ForwardSnapshotAttachment(UnambiguousInputModel):
     plaintext_sha256: str = Field(min_length=43, max_length=43)
     width: int | None = Field(default=None, ge=1, le=16_384)
     height: int | None = Field(default=None, ge=1, le=16_384)
-    duration_secs: float | None = Field(default=None, gt=0, le=1_200)
+    duration_secs: Annotated[float | None, BeforeValidator(_snapshot_duration)] = Field(
+        default=None, gt=0, le=1_200
+    )
     waveform: str | None = Field(default=None, min_length=4, max_length=344)
     blurhash: str | None = Field(default=None, max_length=256)
     scan_status: str
@@ -336,13 +357,6 @@ class ForwardSnapshotAttachment(UnambiguousInputModel):
     def strict_integer_fields(cls, value: object) -> object:
         if value is not None and type(value) is not int:
             raise ValueError("forward attachment dimensions and size must be integers")
-        return value
-
-    @field_validator("duration_secs", mode="before")
-    @classmethod
-    def strict_duration(cls, value: object) -> object:
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise ValueError("forward attachment duration must be numeric")
         return value
 
     @field_validator("origin_domain")
@@ -454,12 +468,13 @@ def normalized_forward_mentions(
 
 def normalized_nested_forward_snapshots(
     values: list[dict[str, Any]],
+    context: Any,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for raw in values:
-        nested = ForwardSnapshot.model_validate(raw)
-        if nested.message_snapshots:
+        if raw.get("message_snapshots"):
             raise ValueError("forward snapshot nesting exceeds one level")
+        nested = ForwardSnapshot.model_validate(raw, context=context)
         normalized.append(nested.model_dump(mode="json", exclude_none=True))
     return normalized
 
@@ -503,12 +518,14 @@ class ForwardSnapshot(UnambiguousInputModel):
         return value
 
     @model_validator(mode="after")
-    def validate_projection(self) -> ForwardSnapshot:
+    def validate_projection(self, info: ValidationInfo) -> ForwardSnapshot:
         validate_forward_snapshot_metadata(self)
         self.embeds, self.components = normalized_forward_rich_content(self)
         self.sticker_items = validate_sticker_items(self.sticker_items)
         self.mention_user_refs = normalized_forward_mentions(self.mention_user_refs)
-        self.message_snapshots = normalized_nested_forward_snapshots(self.message_snapshots)
+        self.message_snapshots = normalized_nested_forward_snapshots(
+            self.message_snapshots, info.context
+        )
         require_forward_snapshot_body(self)
         return self
 
@@ -570,7 +587,11 @@ def build_forward_source_authorization_content(
 ) -> dict[str, object]:
     """Build canonical proof content after the caller authorized source access."""
 
-    if source.deleted_at is not None or source.created_at is None:
+    if (
+        source.deleted_at is not None
+        or source.created_at is None
+        or getattr(source, "safety_state", None)
+    ):
         raise ValueError("forward source is unavailable")
     if source.message_type not in FORWARDABLE_MESSAGE_TYPES:
         raise ValueError("this message type cannot be forwarded")
@@ -639,12 +660,27 @@ def build_forward_source_authorization_content(
             "expires_at": current + timedelta(seconds=FORWARD_SOURCE_AUTHORIZATION_TTL_SECONDS),
         }
     )
-    return authorization.model_dump(mode="json", exclude_none=False)
+    result = authorization.model_dump(mode="json", exclude_none=False)
+    if authorization.source_snapshot is not None:
+        result["source_snapshot"] = federation_forward_snapshot(authorization.source_snapshot)
+    return result
 
 
-def validate_forward_snapshot(value: object) -> dict[str, object]:
+def federation_forward_snapshot(value: object) -> dict[str, Any]:
+    """Preserve exact voice seconds in integer-only signed snapshots."""
+    snapshot = validate_forward_snapshot(value)
+    for attachment in snapshot["attachments"]:
+        if "duration_secs" in attachment:
+            attachment["duration_secs"] = write_wire_number(attachment["duration_secs"])
+    snapshot["message_snapshots"] = [
+        federation_forward_snapshot(child) for child in snapshot["message_snapshots"]
+    ]
+    return snapshot
+
+
+def validate_forward_snapshot(value: object, *, federation: bool = False) -> dict[str, Any]:
     try:
-        snapshot = ForwardSnapshot.model_validate(value)
+        snapshot = ForwardSnapshot.model_validate(value, context={"federation": federation})
     except (TypeError, ValueError) as exc:
         raise ValueError("forward snapshot is invalid") from exc
     return snapshot.model_dump(mode="json", exclude_none=True)
@@ -819,11 +855,7 @@ def forward_snapshot_matches_attachments(
             )
         raw_hash = item.get("content_sha256")
         plaintext_digest = _plaintext_sha256_b64(raw_hash)
-        raw_duration = item.get("duration_secs")
-        if raw_duration is not None and (
-            isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float))
-        ):
-            raise ValueError("forward attachment voice metadata is invalid")
+        raw_duration = federation_attachment_duration(item)
         return (
             str(item.get("id")),
             str(item.get("origin_domain")),
@@ -878,7 +910,7 @@ def forward_snapshot_matches_attachments(
 
 def rebind_forward_snapshot_attachments(
     value: object,
-    attachments: list[Attachment],
+    attachments: Sequence[Attachment | dict[str, object]],
 ) -> dict[str, object]:
     """Move an authoritative plaintext snapshot onto fresh destination media."""
 
@@ -887,10 +919,20 @@ def rebind_forward_snapshot_attachments(
         raise ValueError("forward snapshot attachment count is inconsistent")
     rebound: list[ForwardSnapshotAttachment] = []
     for source, destination in zip(snapshot.attachments, attachments, strict=True):
-        destination_payload = attachment_payload(destination, include_lifecycle=False) | {
-            "plaintext_sha256": _plaintext_sha256_b64(destination.content_sha256),
-            "duration_secs": destination.duration_secs,
-        }
+        if isinstance(destination, Attachment):
+            destination_payload = attachment_payload(destination, include_lifecycle=False) | {
+                "plaintext_sha256": _plaintext_sha256_b64(destination.content_sha256),
+                "duration_secs": destination.duration_secs,
+            }
+        else:
+            destination_payload = {
+                key: value
+                for key, value in destination.items()
+                if key in ForwardSnapshotAttachment.model_fields
+            } | {
+                "plaintext_sha256": _plaintext_sha256_b64(destination.get("content_sha256")),
+                "duration_secs": federation_attachment_duration(destination),
+            }
         destination_payload["variants"] = destination_payload.get("variants") or {}
         candidate = ForwardSnapshotAttachment.model_validate(destination_payload)
         if forward_snapshot_attachment_semantics(source) != forward_snapshot_attachment_semantics(
@@ -925,3 +967,19 @@ def rebind_forward_snapshot_attachments(
         snapshot.message_snapshots = [nested.model_dump(mode="json", exclude_none=True)]
     snapshot.attachments = rebound
     return snapshot.model_dump(mode="json", exclude_none=True)
+
+
+def matches_attested_plaintext_forward(
+    source: object, snapshot: object, attachments: object
+) -> bool:
+    """Allow only the source snapshot or its exact rebinding to the destination uploads."""
+    if not isinstance(source, dict) or not isinstance(snapshot, dict):
+        return False
+    if source == snapshot:
+        return True
+    if not isinstance(attachments, list) or not all(isinstance(item, dict) for item in attachments):
+        return False
+    try:
+        return rebind_forward_snapshot_attachments(source, attachments) == snapshot
+    except (TypeError, ValueError):
+        return False

@@ -8,6 +8,7 @@ import {
   type TrackPublishOptions
 } from 'livekit-client';
 import type { LocalTrackPublication, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
+import { playCallSound } from './call-sounds';
 import { AdaptiveVideoController, managedTrackName } from './adaptive-video';
 import { userErrorMessage } from '$lib/api/client';
 import type { Channel } from '$lib/chat/types';
@@ -234,6 +235,24 @@ export async function withVoiceConnectTimeout<T>(
   }
 }
 
+async function enableBrowserMediaEncryption(room: Room): Promise<void> {
+  let acknowledge!: () => void;
+  const ready = new Promise<void>((resolve) => (acknowledge = resolve));
+  const check = (enabled: boolean, participant?: Participant) => {
+    if (enabled && participant === room.localParticipant) acknowledge();
+  };
+  room.on(RoomEvent.ParticipantEncryptionStatusChanged, check);
+  try {
+    // The SDK resolves setE2EEEnabled before the encryption worker acknowledges it.
+    await withVoiceConnectTimeout(Promise.all([room.setE2EEEnabled(true), ready]));
+    if (!room.isE2EEEnabled || !room.localParticipant.isE2EEEnabled) {
+      throw new Error('This browser could not enable encrypted voice and video.');
+    }
+  } finally {
+    room.off(RoomEvent.ParticipantEncryptionStatusChanged, check);
+  }
+}
+
 export function isUsableVoiceToken(value: VoiceToken, now = Date.now()): boolean {
   const expires = Date.parse(value.expires_at);
   return (
@@ -380,6 +399,9 @@ export class VoiceSession extends EventTarget {
   #nativeMuted = false;
   #nativeDeafened = false;
   #nativeSpeakingUntil = 0;
+  #nativeSpeechFrames = 0;
+  #nativeRoomJoined = false;
+  #nativeRemoteParticipants: VoiceParticipant[] = [];
   #nativePrioritySpeakers = new Set<string>();
   #activeSpeakers = new Set<string>();
   #remoteAudio = new Set<HTMLMediaElement>();
@@ -436,8 +458,30 @@ export class VoiceSession extends EventTarget {
     room.on(RoomEvent.TrackUnsubscribed, changed);
     room.on(RoomEvent.LocalTrackPublished, changed);
     room.on(RoomEvent.LocalTrackUnpublished, changed);
-    room.on(RoomEvent.ParticipantConnected, changed);
-    room.on(RoomEvent.ParticipantDisconnected, changed);
+    let encryptionAcknowledged = false;
+    room.on(RoomEvent.ParticipantEncryptionStatusChanged, (enabled, participant) => {
+      if (participant !== room.localParticipant) return;
+      if (enabled) {
+        encryptionAcknowledged = true;
+        return;
+      }
+      if (
+        encryptionAcknowledged &&
+        ((this.room === room && this.encrypted) || this.#candidateRoom === room)
+      ) {
+        this.encrypted = false;
+        this.error = 'Call encryption stopped. Rejoin to reconnect securely.';
+        void this.disconnect();
+      }
+    });
+    room.on(RoomEvent.ParticipantConnected, () => {
+      if (this.room === room && this.connected && !this.deafened) playCallSound('join');
+      changed();
+    });
+    room.on(RoomEvent.ParticipantDisconnected, () => {
+      if (this.room === room && this.connected && !this.deafened) playCallSound('leave');
+      changed();
+    });
     room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
       if (this.room !== room) return;
       this.#activeSpeakers = new Set(speakers.map((speaker) => speaker.identity));
@@ -448,6 +492,7 @@ export class VoiceSession extends EventTarget {
       void this.#adaptiveVideo?.stop();
       this.#adaptiveVideo = null;
       this.videoDegraded = false;
+      if (this.connected) playCallSound('leave');
       this.connected = false;
       this.encrypted = null;
       this.moveSessionId = null;
@@ -482,7 +527,7 @@ export class VoiceSession extends EventTarget {
     await this.#pushToTalkQueue;
     const generation = ++this.#connectGeneration;
     const expected = expectedVoicePolicy(grant, channel);
-    if (grant.e2ee && !encryptionKey) {
+    if (grant.e2ee && encryptionKey?.byteLength !== 32) {
       throw new Error('This encrypted call has no device media key.');
     }
     if (!grant.e2ee && encryptionKey) {
@@ -504,6 +549,7 @@ export class VoiceSession extends EventTarget {
     if (previousCandidateWorker !== previousWorker) previousCandidateWorker?.terminate();
 
     this.connecting = true;
+    if (this.connected) playCallSound('leave');
     this.connected = false;
     this.encrypted = null;
     this.moveSessionId = null;
@@ -536,7 +582,10 @@ export class VoiceSession extends EventTarget {
         if (!globalThis.RTCRtpSender || !('transform' in RTCRtpSender.prototype)) {
           throw new Error('This browser does not support encrypted voice and video.');
         }
-        const keyProvider = new ExternalE2EEKeyProvider({ ratchetSalt: 'kaede-livekit-v1' });
+        const keyProvider = new ExternalE2EEKeyProvider({
+          ratchetSalt: 'kaede-livekit-v1',
+          keySize: 256
+        });
         await keyProvider.setKey(encryptionKey as ArrayBuffer);
         if (generation !== this.#connectGeneration) return;
         candidateWorker = new Worker(new URL('livekit-client/e2ee-worker', import.meta.url), {
@@ -549,10 +598,17 @@ export class VoiceSession extends EventTarget {
       this.#candidateRoom = candidate;
       this.#candidateWorker = candidateWorker;
 
+      if (grant.e2ee) {
+        await enableBrowserMediaEncryption(candidate);
+        if (generation !== this.#connectGeneration) return;
+      }
       await withVoiceConnectTimeout(
         candidate.connect(grant.url, grant.token, { autoSubscribe: false })
       );
       if (generation !== this.#connectGeneration) return;
+      if (grant.e2ee && (!candidate.isE2EEEnabled || !candidate.localParticipant.isE2EEEnabled)) {
+        throw new Error('Call encryption stopped before the connection was ready.');
+      }
 
       if (grant.can_speak && grant.can_use_vad) {
         if (generation !== this.#connectGeneration) return;
@@ -570,7 +626,8 @@ export class VoiceSession extends EventTarget {
       this.#e2eeWorker = candidateWorker;
       promoted = true;
       this.connected = true;
-      this.encrypted = expected.e2ee;
+      playCallSound('join');
+      this.encrypted = candidate.isE2EEEnabled === true;
       this.#adaptiveVideo = new AdaptiveVideoController(
         candidate,
         (degraded) => {
@@ -623,8 +680,7 @@ export class VoiceSession extends EventTarget {
     grant: VoiceToken,
     channel: VoiceChannelPolicy,
     encryptionKey?: ArrayBuffer,
-    senderDeviceId?: string,
-    takeover = false
+    senderDeviceId?: string
   ): Promise<void> {
     if (!isNativeDesktop()) throw new Error('Native voice is unavailable.');
     if (this.connected || this.connecting) return;
@@ -641,10 +697,9 @@ export class VoiceSession extends EventTarget {
         e2eeKey: encryptionKey ? base64url(new Uint8Array(encryptionKey)) : null,
         senderDeviceId: senderDeviceId ?? null,
         connectionId: grant.connection_id,
-        takeover
+        grantHandle: grant.token
       });
-      this.#startNativePolling();
-      await this.#pollNativeStatus();
+      await this.#startNativePolling();
       this.encrypted = expectedPolicy.e2ee;
       this.#voiceMediaPolicy = {
         bitrate: expectedPolicy.bitrate,
@@ -666,14 +721,30 @@ export class VoiceSession extends EventTarget {
     }
   }
 
-  #startNativePolling(): void {
+  async #startNativePolling(): Promise<void> {
     if (this.#nativePoll) clearInterval(this.#nativePoll);
-    this.#nativePoll = setInterval(() => void this.#pollNativeStatus(), 250);
+    this.#nativeSpeechFrames = 0;
+    this.#nativeSpeakingUntil = 0;
+    let pending = false;
+    const poll = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        await this.#pollNativeStatus(timer);
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = setInterval(() => void poll(), 75);
+    this.#nativePoll = timer;
+    await poll();
   }
 
-  async #pollNativeStatus(): Promise<void> {
+  async #pollNativeStatus(timer: ReturnType<typeof setInterval>): Promise<void> {
     try {
       const status = await nativeInvoke<NativeVoiceStatus>('native_voice_status');
+      if (this.#nativePoll !== timer) return;
+      const wasReconnecting = this.connecting;
       this.connected = status.state === 'connected' || status.state === 'media_error';
       this.connecting = status.state === 'connecting' || status.state === 'reconnecting';
       this.canSpeak = status.can_speak ?? false;
@@ -685,20 +756,41 @@ export class VoiceSession extends EventTarget {
         this.#listeningVolumes.set(JSON.stringify([identity, false]), volumes[0]);
         this.#listeningVolumes.set(JSON.stringify([identity, true]), volumes[1]);
       }
+      if (this.connected) {
+        const peers = status.remote_participants ?? {};
+        if (!this.#nativeRoomJoined) playCallSound('join');
+        else if (!status.deafened && !wasReconnecting) {
+          const previous = new Set(this.#nativeRemoteParticipants.map((peer) => peer.identity));
+          if (Object.keys(peers).some((identity) => !previous.has(identity))) playCallSound('join');
+          if ([...previous].some((identity) => !(identity in peers))) playCallSound('leave');
+        }
+        this.#nativeRoomJoined = true;
+      }
+      this.#nativeRemoteParticipants = Object.entries(status.remote_participants ?? {}).map(
+        ([identity, peer]) => ({
+          ...peer,
+          key: identity,
+          identity,
+          name: peer.name || identity,
+          local: false
+        })
+      );
       this.#nativeMuted = status.muted ?? this.#nativeMuted;
       this.#nativeDeafened = status.deafened ?? this.#nativeDeafened;
+      if (status.move_session_id !== undefined) this.moveSessionId = status.move_session_id;
       this.#nativePrioritySpeakers = nativePrioritySpeakerIdentities(status.priority_speakers);
       this.deafened = this.#nativeDeafened;
       this.microphone = this.connected && this.canSpeak && !this.#nativeMuted;
-      const inputLevel = Math.max(0, status.input_level ?? 0);
-      if (this.microphone && inputLevel >= 0.015) {
-        // Keep the outline stable between native meter polls and across short
-        // syllable gaps. Audio remains entirely in Rust; only the scalar meter
-        // crosses the desktop bridge.
+      const spoke =
+        status.speech_frames === undefined
+          ? (status.input_level ?? 0) >= 0.015
+          : status.speech_frames !== this.#nativeSpeechFrames;
+      if (this.microphone && spoke) {
         this.#nativeSpeakingUntil = Date.now() + 350;
       } else if (!this.microphone) {
         this.#nativeSpeakingUntil = 0;
       }
+      this.#nativeSpeechFrames = status.speech_frames ?? 0;
       const statusFallback =
         status.state === 'media_error'
           ? 'Voice connected, but a media device failed. Check your microphone and output device.'
@@ -712,6 +804,8 @@ export class VoiceSession extends EventTarget {
           )
         : statusFallback;
       if (status.state === 'disconnected' || status.state === 'failed') {
+        if (this.#nativeRoomJoined) playCallSound('leave');
+        this.#nativeRoomJoined = false;
         this.encrypted = null;
         this.moveSessionId = null;
         this.#voiceMediaPolicy = { ...DEFAULT_VOICE_MEDIA_POLICY };
@@ -1212,8 +1306,11 @@ export class VoiceSession extends EventTarget {
       this.#nativeVideoGeneration += 1;
       this.#nativeVideo.clear();
       this.#nativeSpeakingUntil = 0;
+      this.#nativeRemoteParticipants = [];
       this.#nativePrioritySpeakers.clear();
       await nativeInvoke('native_voice_leave');
+      if (this.#nativeRoomJoined) playCallSound('leave');
+      this.#nativeRoomJoined = false;
       this.connected = false;
       this.encrypted = null;
       this.moveSessionId = null;
@@ -1248,6 +1345,7 @@ export class VoiceSession extends EventTarget {
       ].map((room) => room.disconnect(true))
     ]);
     if (generation !== this.#connectGeneration) return;
+    if (this.connected) playCallSound('leave');
     this.connected = false;
     this.encrypted = null;
     this.moveSessionId = null;
@@ -1318,7 +1416,8 @@ export class VoiceSession extends EventTarget {
               microphone: this.microphone,
               camera: this.camera,
               screen: this.screen
-            }
+            },
+            ...this.#nativeRemoteParticipants
           ]
         : [];
     }
@@ -1380,6 +1479,7 @@ export class VoiceSession extends EventTarget {
       identity: string
     ): void => {
       if (!publication.track || publication.track.kind !== Track.Kind.Audio) return;
+      if (this.encrypted && !publication.isEncrypted) return;
       const media = publication.track.attach();
       media.autoplay = true;
       const stream = publication.source === Track.Source.ScreenShareAudio;

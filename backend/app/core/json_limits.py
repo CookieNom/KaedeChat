@@ -2,9 +2,21 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 
 MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+
+
+# These RPCs authenticate the original HTTP body bytes and validate a typed
+# payload. Signed durable envelopes always retain their integer-only grammar.
+_DECIMAL_RPC_PATH = re.compile(
+    r"/_kaede/v1/(?:channels/[^/]+/interactions|(?:guilds|applications|developer-teams)/[0-9]+/management)"
+)
+
+
+def federation_request_allows_floats(path: str) -> bool:
+    return _DECIMAL_RPC_PATH.fullmatch(path) is not None
 
 
 @dataclass(frozen=True, slots=True)

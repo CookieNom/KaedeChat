@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount, flushSync, tick } from 'svelte';
 import Route from '../../routes/(app)/g/[guildId]/[channelId]/+page.svelte';
+import { acknowledgeEncryptedRoom } from '$lib/e2ee/disclosures';
 import { Permission } from '$lib/generated/permissions';
 import { chatEntities } from '$lib/stores/entities.svelte';
 import type { Channel, Guild, Message } from './types';
@@ -9,6 +10,7 @@ import { interactionResponses } from './interaction-responses.svelte';
 import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
 const network = vi.hoisted(() => ({
   api: vi.fn(),
+  initializeE2EE: vi.fn().mockResolvedValue(null),
   setParams: (_params: { guildId: string; channelId: string }) => {},
   page: {
     params: { guildId: '1@chat.example', channelId: '2@chat.example' },
@@ -42,7 +44,7 @@ vi.mock('$lib/auth/config', () => ({
 }));
 vi.mock('$lib/e2ee/client', async (original) => ({
   ...(await original<typeof import('$lib/e2ee/client')>()),
-  initializeE2EE: vi.fn().mockResolvedValue(null)
+  initializeE2EE: network.initializeE2EE
 }));
 vi.mock('$lib/gateway/runtime.svelte', () => ({
   authenticatedGateway: {
@@ -126,6 +128,7 @@ async function render() {
   await tick();
 }
 beforeEach(() => {
+  network.initializeE2EE.mockReset().mockResolvedValue(null);
   network.setParams({ guildId: '1@chat.example', channelId: '2@chat.example' });
   vi.mocked(authenticatedGateway.client.subscribeMembers).mockClear();
   commands = [];
@@ -201,6 +204,26 @@ afterEach(async () => {
 });
 
 describe('live channel route permissions', () => {
+  it('reads verified history while a rekey keeps sending disabled', async () => {
+    Object.assign(guild.channels![0], { encryption_mode: 'e2ee', encryption_state: 'rekeying' });
+    const originalApi = network.api.getMockImplementation()!;
+    network.api.mockImplementation(async (path: string, ...args: unknown[]) =>
+      path === room + '/messages'
+        ? [{ ...message, content: null, e2ee: { version: 2 } }]
+        : originalApi(path, ...args)
+    );
+    acknowledgeEncryptedRoom('7@chat.example', '2@chat.example');
+    network.initializeE2EE.mockResolvedValue({
+      decryptMessages: async (_channel: Channel, messages: Message[]) =>
+        messages.map(() => ({ content: 'Verified old message', attachments: [] })),
+      safetyNumber: async () => ''
+    });
+    component = mount(Route, { target: document.body });
+    flushSync();
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Verified old message'));
+    expect(document.querySelector('textarea:not(:disabled)')).toBeNull();
+  });
+
   it('keeps guild navigation and members mounted while the next channel loads', async () => {
     guild.channels!.push({ ...guild.channels![0], id: '3', name: 'other' });
     const originalApi = network.api.getMockImplementation()!;

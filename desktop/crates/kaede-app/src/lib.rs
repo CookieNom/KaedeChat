@@ -71,7 +71,7 @@ pub struct AccountRuntime {
     pub service: KaedeService,
     pub session: Arc<NativeSession>,
     pub state: Arc<RwLock<AppState>>,
-    pub commands: mpsc::Sender<GatewayCommand>,
+    pub commands: kaede_gateway::GatewayCommands,
     pub cache: Cache,
     media_dir: PathBuf,
     public_asset_dir: PathBuf,
@@ -114,6 +114,7 @@ impl AccountRuntime {
         email: Option<&str>,
         authentication_secret: &SecretString,
         password_kdf: &serde_json::Value,
+        accepted_terms: bool,
     ) -> Result<RegistrationResult, AccountError> {
         let session = unauthenticated_session(instance, "registration")?;
         let config = session.config().await?;
@@ -126,7 +127,7 @@ impl AccountRuntime {
                 session
                     .solve_turnstile(
                         site_key,
-                        "kaede-register-v1",
+                        kaede_auth::REGISTER_ACTION,
                         uuid::Uuid::new_v4().to_string(),
                     )
                     .await?,
@@ -140,6 +141,7 @@ impl AccountRuntime {
                 email,
                 authentication_secret.expose_secret(),
                 password_kdf,
+                accepted_terms,
                 challenge.as_ref(),
             )
             .await
@@ -464,7 +466,7 @@ impl AccountRuntime {
                     changed = gateway.status.changed() => {
                         if changed.is_err() { break; }
                         let gateway_status = gateway.status.borrow().clone();
-                        if matches!(gateway_status, GatewayStatus::Disconnected | GatewayStatus::Reconnecting | GatewayStatus::AuthenticationFailed) {
+                        if matches!(gateway_status, GatewayStatus::Disconnected | GatewayStatus::Reconnecting | GatewayStatus::RateLimited { .. } | GatewayStatus::AuthenticationFailed) {
                             let mut current = state.write().await;
                             current.presences.clear();
                             current.voice_states.clear();
@@ -1559,7 +1561,11 @@ async fn authenticate_prepared(
                 .site_key
                 .ok_or(AccountError::ChallengeMisconfigured)?;
             let token = session
-                .solve_turnstile(site_key, "kaede-login-v1", uuid::Uuid::new_v4().to_string())
+                .solve_turnstile(
+                    site_key,
+                    kaede_auth::LOGIN_ACTION,
+                    uuid::Uuid::new_v4().to_string(),
+                )
                 .await?;
             match session
                 .login_with_prepared_password(

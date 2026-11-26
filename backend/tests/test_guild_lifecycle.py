@@ -769,3 +769,51 @@ async def test_guild_mutation_takes_terminal_fence_before_guild_row(monkeypatch)
         is guild
     )
     assert order == ["terminal", "guild"]
+
+
+@pytest.mark.asyncio
+async def test_guild_deletion_selects_only_its_own_expression_and_role_media(
+    postgres_schema,
+) -> None:
+    from sqlalchemy import text
+
+    guild = make_guild()
+    for table in (
+        "attachments",
+        "channels",
+        "messages",
+        "emojis",
+        "stickers",
+        "roles",
+        "media_tombstone_destinations",
+    ):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    for guild_id in (guild.id, guild.id + 1):
+        for offset, (table, suffix) in enumerate(
+            (("emojis", ""), ("stickers", ""), ("roles", ":icon"))
+        ):
+            resource = guild_id * 10 + offset
+            await postgres_schema.execute(
+                text(
+                    f"INSERT INTO {table}(id,origin_domain,guild_id,guild_domain) "  # noqa: S608
+                    "VALUES (:id,:domain,:guild,:domain)"
+                ),
+                {"id": resource, "domain": guild.origin_domain, "guild": guild_id},
+            )
+            await postgres_schema.execute(
+                text(
+                    "INSERT INTO attachments(id,origin_domain,asset_binding) "
+                    "VALUES (:id,:domain,:binding)"
+                ),
+                {
+                    "id": resource,
+                    "domain": guild.origin_domain,
+                    "binding": f"{table[:-1]}:{guild.origin_domain}:{resource}{suffix}",
+                },
+            )
+    selected = await postgres_schema.execute(guild_lifecycle._guild_content_attachment_refs(guild))
+    assert set(selected.tuples()) == {
+        (guild.id * 10 + offset, guild.origin_domain) for offset in range(3)
+    }

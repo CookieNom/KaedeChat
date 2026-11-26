@@ -1,4 +1,5 @@
 import { isNativeDesktop, nativeInvoke, nativeInvokeBytes } from '$lib/platform/native';
+import { refreshSession } from '$lib/api/client';
 import { apiErrorMessage } from '$lib/api/errors';
 import { parseCanonicalEntityRef } from '$lib/chat/refs';
 import {
@@ -49,6 +50,26 @@ export function mediaCapacityRetryDelay(
     return null;
   const requested = retryAfterMilliseconds(retryAfterHeader) ?? 1000 * (attempt + 1);
   return Math.min(5000, Math.max(500, requested)) + stableJitter(key);
+}
+
+async function fetchAuthenticatedMedia(path: string, contentType: string, signal: AbortSignal) {
+  const init: RequestInit = {
+    credentials: 'same-origin',
+    headers: { Accept: contentType },
+    cache: 'no-store',
+    signal
+  };
+  const response = await fetch(path, init);
+  if (
+    response.status === 401 &&
+    isSafeSameOriginMediaPath(path) &&
+    !signal.aborted &&
+    (await refreshSession()) === 'ok'
+  ) {
+    signal.throwIfAborted();
+    return fetch(path, init);
+  }
+  return response;
 }
 
 async function boundedBytes(response: Response, maximum: number): Promise<Uint8Array> {
@@ -270,12 +291,11 @@ export function authenticatedMedia(node: MediaElement, source: AuthenticatedMedi
       } else {
         let loaded: Uint8Array | null = null;
         for (let attempt = 0; loaded === null; attempt += 1) {
-          const fetched = await fetch(next.path, {
-            credentials: 'same-origin',
-            headers: { Accept: next.contentType },
-            cache: 'no-store',
-            signal: requestController.signal
-          });
+          const fetched = await fetchAuthenticatedMedia(
+            next.path,
+            next.contentType,
+            requestController.signal
+          );
           if (fetched.ok) {
             const declared = Number(fetched.headers.get('content-length') ?? '0');
             if (Number.isFinite(declared) && declared > MAX_THUMBNAIL_BYTES)
@@ -371,12 +391,7 @@ export async function authenticatedMediaBlob(
         source.path
       );
     }
-    const response = await fetch(source.path, {
-      credentials: 'same-origin',
-      headers: { Accept: source.contentType },
-      cache: 'no-store',
-      signal
-    });
+    const response = await fetchAuthenticatedMedia(source.path, source.contentType, signal);
     if (!response.ok) throw new Error('Could not download the authenticated media.');
     const declared = Number(response.headers.get('content-length') ?? '0');
     if (Number.isFinite(declared) && declared > maximumBytes) {

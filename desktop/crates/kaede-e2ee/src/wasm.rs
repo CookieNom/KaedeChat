@@ -220,6 +220,11 @@ impl WasmMlsClient {
         self.inner.has_group(group_id).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = groupEpoch)]
+    pub fn group_epoch(&self, group_id: &[u8]) -> Result<u64, JsError> {
+        self.inner.group_epoch(group_id).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = memberRoster)]
     pub fn member_roster(&self, group_id: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner.member_roster(group_id).map_err(js_error)

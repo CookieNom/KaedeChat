@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -627,6 +628,7 @@ def test_redeemed_notification_supports_private_sender_presentation() -> None:
 async def test_push_sync_tokens_are_hashed_bound_and_single_use() -> None:
     redis = MemoryRedis()
     event = PushSyncEvent(
+        session_id="current-session",
         device_id=str(uuid4()),
         user_id=123,
         user_domain="kaede.chat",
@@ -676,6 +678,7 @@ async def test_relationship_delivery_honors_recipient_settings(preferences, expe
     token = await issue_push_sync(
         redis,
         PushSyncEvent(
+            session_id="current-session",
             device_id=str(device_id),
             user_id=recipient.id,
             user_domain=recipient.origin_domain,
@@ -728,6 +731,7 @@ async def test_redeem_suppresses_message_blocked_after_enqueue(monkeypatch) -> N
     token = await issue_push_sync(
         redis,
         PushSyncEvent(
+            session_id="current-session",
             device_id=str(device_id),
             user_id=recipient.id,
             user_domain=recipient.origin_domain,
@@ -745,3 +749,108 @@ async def test_redeem_suppresses_message_blocked_after_enqueue(monkeypatch) -> N
     assert response.status_code == 204
     blocked.assert_awaited_once_with(session, recipient, author)
     assert await load_push_sync(redis, token) is None
+
+
+@pytest.mark.asyncio
+async def test_push_registration_requires_live_matching_login(postgres_schema):
+    from sqlalchemy import select, text
+
+    from app.db.models import PushDevice
+    from app.push.service import active_push_session
+
+    # Exercise the real SQL predicate with the minimal rows it reads.
+    for ddl in (
+        "CREATE TABLE users (id bigint, origin_domain text, "
+        "disabled_at timestamptz, deleted_at timestamptz)",
+        "CREATE TABLE sessions (id text, user_id bigint, user_domain text, "
+        "revoked_at timestamptz, expires_at timestamptz)",
+        "CREATE TABLE push_devices (id text, session_id text, user_id bigint, user_domain text)",
+        "INSERT INTO users VALUES (1, 'home.test', NULL, NULL)",
+        "INSERT INTO sessions VALUES ('live', 1, 'home.test', NULL, now() + interval '1 hour')",
+        "INSERT INTO sessions VALUES ('expired', 1, 'home.test', NULL, now() - interval '1 hour')",
+        "INSERT INTO sessions VALUES ('revoked', 1, 'home.test', now(), now() + interval '1 hour')",
+        "INSERT INTO push_devices VALUES ('valid', 'live', 1, 'home.test'), "
+        "('legacy', NULL, 1, 'home.test'), "
+        "('expired', 'expired', 1, 'home.test'), ('revoked', 'revoked', 1, 'home.test'), "
+        "('rebound', 'live', 9, 'home.test')",
+    ):
+        await postgres_schema.execute(text(ddl))
+    stmt = select(PushDevice.id).where(active_push_session())
+    assert list(await postgres_schema.scalars(stmt)) == ["valid"]
+    await postgres_schema.execute(text("UPDATE users SET disabled_at=now()"))
+    assert not list(await postgres_schema.scalars(stmt))
+
+
+@pytest.mark.asyncio
+async def test_primary_reenrollment_preserves_voip_only_for_the_same_login(
+    postgres_schema, monkeypatch
+):
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.core.settings import get_settings
+    from app.db.models import PushDevice
+    from app.push.schemas import PushRelayEnrollmentComplete
+
+    await postgres_schema.execute(
+        text("CREATE TABLE push_devices (LIKE public.push_devices INCLUDING ALL)")
+    )
+    settings = get_settings().model_copy(update={"push_relay_enabled": True})
+    monkeypatch.setattr(push_api, "verify_push_document", AsyncMock())
+    installation = uuid4()
+    redis = MemoryRedis()
+
+    async with AsyncSession(
+        bind=postgres_schema, expire_on_commit=False, join_transaction_mode="create_savepoint"
+    ) as session:
+
+        async def enroll(login, provider, mark):
+            route = mark * 43
+            receipt = {
+                "subscription_id": "kps_" + mark * 32,
+                "home_origin": settings.domain,
+                "route_id": route,
+                "app_id": settings.push_relay_app_id,
+                "platform": "ios",
+                "provider": provider,
+            }
+            pending = {
+                "user_id": "11",
+                "user_domain": settings.domain,
+                "installation_id": str(installation),
+                "session_id": login,
+                "platform": "ios",
+                "app_id": settings.push_relay_app_id,
+                "provider": provider,
+            }
+            await redis.set(relay_enrollment_key(route), json.dumps(pending))
+            auth = SimpleNamespace(
+                user=SimpleNamespace(id=11, origin_domain=settings.domain),
+                grant=SimpleNamespace(session_id=login),
+            )
+            await push_api.complete_relay_enrollment(
+                PushRelayEnrollmentComplete(
+                    installation_id=installation,
+                    platform="ios",
+                    provider=provider,
+                    route_id=route,
+                    wake_secret="A" * 43,
+                    receipt=receipt,
+                ),
+                auth,
+                session,
+                redis,
+                settings,
+            )
+            return await session.get(PushDevice, str(installation), populate_existing=True)
+
+        await enroll("first", "fcm", "a")
+        original = await enroll("first", "apns_voip", "b")
+        secret = original.relay_voip_wake_secret_encrypted
+        updated = await enroll("first", "fcm", "c")
+        assert updated.relay_voip_route_id == "b" * 43
+        assert updated.relay_voip_wake_secret_encrypted == secret
+        rebound = await enroll("second", "fcm", "d")
+        assert rebound.relay_voip_subscription_id is None
+        assert rebound.relay_voip_route_id is None
+        assert rebound.relay_voip_wake_secret_encrypted is None

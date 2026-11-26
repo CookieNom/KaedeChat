@@ -301,7 +301,7 @@ async def review_case(
         settings,
         case,
         payload.decision,
-        principal.user,
+        principal,
         redis,
         suspend_account=payload.suspend_account,
     )

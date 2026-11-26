@@ -1185,7 +1185,7 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
                     ),
                 ],
               ),
-              if (session.canSpeak && (session.pushToTalk || session.canUseVad))
+              if (session.canSpeak && session.canUseVad)
                 ActionButton(
                   kind: ActionButtonKind.text,
                   onPressed: () => _runVoiceAction(
@@ -1949,11 +1949,9 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                       leading: Icon(occupancy?['suppressed'] != false
                           ? Icons.record_voice_over_outlined
                           : Icons.hearing_outlined),
-                      title: Text(
-                          occupancy?[L10n.of(context).ui_suppressed_087253d7] !=
-                                  false
-                              ? L10n.of(context).ui_invite_to_speak_1cee4bdb
-                              : L10n.of(context).ui_move_to_audience_de051085),
+                      title: Text(occupancy?['suppressed'] != false
+                          ? L10n.of(context).ui_invite_to_speak_1cee4bdb
+                          : L10n.of(context).ui_move_to_audience_de051085),
                       onTap: () => _moderate(
                         sheetContext,
                         () => widget.session.setStageParticipantSuppressed(
@@ -1970,9 +1968,7 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                       widget.channel, Permission.muteMembers))
                     ListTile(
                       leading: Icon(Icons.mic_off_rounded),
-                      title: Text(occupancy?[
-                                  L10n.of(context).ui_server_mute_8c8094fe] ==
-                              true
+                      title: Text(occupancy?['server_mute'] == true
                           ? L10n.of(context).ui_remove_server_mute_a9a2d0ad
                           : L10n.of(context).ui_server_mute_5de99007),
                       onTap: () => _moderate(
@@ -1991,9 +1987,7 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                   if (canServerDeafenInChannel(widget.channel))
                     ListTile(
                       leading: Icon(Icons.headset_off_rounded),
-                      title: Text(occupancy?[
-                                  L10n.of(context).ui_server_deaf_513c8fbb] ==
-                              true
+                      title: Text(occupancy?['server_deaf'] == true
                           ? L10n.of(context).ui_remove_server_deafen_37df1a67
                           : L10n.of(context).ui_server_deafen_5b9a5cf9),
                       onTap: () => _moderate(

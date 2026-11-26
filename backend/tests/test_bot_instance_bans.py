@@ -87,3 +87,32 @@ async def test_bot_instance_bans_use_dedicated_ban_scope_and_human_services(
     unban_service.assert_awaited_once_with(
         guild_ref, "remote.example", principal, session, redis, snowflake, settings, "appeal"
     )
+
+
+@pytest.mark.asyncio
+async def test_instance_ban_preserves_the_current_remote_owner(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api import moderation
+
+    guild = SimpleNamespace(
+        id=10, origin_domain="chat.example", owner_id=3, owner_domain="owner.example"
+    )
+    monkeypatch.setattr(moderation, "proxy_remote_guild_management", AsyncMock(return_value=None))
+    monkeypatch.setattr(moderation, "local_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(moderation, "require_permissions", AsyncMock())
+    session = AsyncMock()
+    with pytest.raises(HTTPException) as caught:
+        await moderation.ban_instance(
+            EntityRef("10"),
+            "owner.example",
+            moderation.InstanceBanCreate(),
+            SimpleNamespace(user=SimpleNamespace()),
+            session,
+            AsyncMock(),
+            AsyncMock(),
+            SimpleNamespace(domain="chat.example"),
+            None,
+        )
+    assert caught.value.detail == {"code": "OWNER_IMMUNE"}
+    session.execute.assert_not_awaited()

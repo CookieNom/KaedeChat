@@ -42,10 +42,10 @@ const message: Message = {
   created_at: '2026-07-20T00:00:00Z'
 };
 
-function dispatch(incoming: Message) {
+function dispatch(incoming: Message, type = 'MESSAGE_CREATE') {
   authenticatedGateway.client.dispatchEvent(
     new CustomEvent('dispatch', {
-      detail: { t: 'MESSAGE_CREATE', d: incoming, s: 1 }
+      detail: { t: type, d: incoming, s: 1 }
     })
   );
 }
@@ -104,6 +104,26 @@ it('defers incoming ciphertext to channel decryption but still stores plaintext 
   const plaintext = { ...message, id: '13', client_nonce: null };
   dispatch(plaintext);
   expect(chatEntities.messages.get('13@chat.example')).toEqual(plaintext);
+});
+
+it('keeps encryption and deletion authoritative across gateway updates and duplicate creates', () => {
+  const encrypted = { ...message, content: null, e2ee: { ciphertext: 'sealed' } };
+  chatEntities.messages.upsert({
+    ...encrypted,
+    e2ee_verified: true,
+    decrypted_content: 'verified'
+  });
+  dispatch({ ...message, e2ee: null }, 'MESSAGE_UPDATE');
+  expect(chatEntities.messages.get('12@chat.example')).toMatchObject({
+    e2ee: encrypted.e2ee,
+    e2ee_verified: false,
+    decrypted_content: null
+  });
+  const deleted = { ...message, content: null, deleted_at: '2026-07-20T00:00:01Z' };
+  chatEntities.messages.upsert(deleted);
+  dispatch(message, 'MESSAGE_UPDATE');
+  dispatch(message);
+  expect(chatEntities.messages.get('12@chat.example')).toMatchObject(deleted);
 });
 
 it('keeps friend request badges current across snapshot races and clears resolved requests', async () => {
@@ -287,4 +307,63 @@ it.each(['stop', 'READY'])('discards a late cold-resume snapshot after %s', asyn
   await pending;
   expect(chatEntities.currentUser).toEqual(action === 'stop' ? null : newUser);
   expect(chatEntities.relationships.values).toEqual([]);
+});
+
+it('merges a read cursor from a sibling tab only for the active account and version', () => {
+  authenticatedGateway.stop();
+  const bus = Object.assign(new EventTarget(), { close: vi.fn(), postMessage: vi.fn() });
+  vi.stubGlobal(
+    'BroadcastChannel',
+    vi.fn().mockImplementation(function () {
+      return bus;
+    })
+  );
+  authenticatedGateway.start();
+  const domain = resumedUser.origin_domain;
+  const state = {
+    channel_id: '7',
+    channel_domain: domain,
+    guild_id: null,
+    guild_domain: null,
+    last_message_id: '20',
+    last_message_domain: domain,
+    read_message_id: '2',
+    read_message_domain: domain,
+    read_version: 3,
+    mention_count: 0,
+    unread: true
+  };
+  gatewayEvent('READY', {
+    user: resumedUser,
+    guilds: [],
+    dm_channels: [],
+    read_states: [state],
+    relationships: []
+  });
+  const account = resumedUser.id + '@' + domain;
+  const receive = (owner: string, version: number) =>
+    bus.dispatchEvent(
+      new MessageEvent('message', {
+        data: {
+          account: owner,
+          update: {
+            channel_id: '7',
+            channel_domain: domain,
+            last_message_id: '10',
+            last_message_domain: domain,
+            mention_count: 0,
+            read_version: version
+          }
+        }
+      })
+    );
+  receive('other@' + domain, 4);
+  receive(account, 2);
+  expect(chatEntities.readStates.values[0]).toEqual(state);
+  receive(account, 3);
+  expect(chatEntities.readStates.values[0]).toMatchObject({
+    last_message_id: '20',
+    read_message_id: '10',
+    unread: true
+  });
 });

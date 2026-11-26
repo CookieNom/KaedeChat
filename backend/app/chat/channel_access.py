@@ -120,6 +120,8 @@ async def lock_local_channel_mutation(
     session: AsyncSession,
     settings: Settings,
     access: ChannelAccess,
+    *,
+    include_unavailable: bool = False,
 ) -> ChannelAccess:
     """Fence a local guild mutation against membership and permission changes.
 
@@ -141,7 +143,7 @@ async def lock_local_channel_mutation(
         .where(
             Guild.id == guild.id,
             Guild.origin_domain == guild.origin_domain,
-            Guild.unavailable.is_(False),
+            *([] if include_unavailable else [Guild.unavailable.is_(False)]),
         )
         .with_for_update()
         .execution_options(populate_existing=True)
@@ -155,7 +157,7 @@ async def lock_local_channel_mutation(
             Channel.origin_domain == access.channel.origin_domain,
             Channel.guild_id == locked_guild.id,
             Channel.guild_domain == locked_guild.origin_domain,
-            Channel.unavailable.is_(False),
+            *([] if include_unavailable else [Channel.unavailable.is_(False)]),
         )
         .execution_options(populate_existing=True)
     )

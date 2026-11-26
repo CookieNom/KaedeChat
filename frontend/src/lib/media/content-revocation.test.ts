@@ -35,6 +35,25 @@ describe('revoked media', () => {
     vi.restoreAllMocks();
   });
 
+  it('refreshes expired credentials once and retries the original same-origin download', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response('image'));
+    vi.stubGlobal('fetch', fetch);
+    const path = '/api/v1/media/home.example/7004/original';
+    const blob = await authenticatedMediaBlob({ path, contentType: 'image/png' });
+    expect(await blob.text()).toBe('image');
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      path,
+      '/api/v1/users/@me',
+      '/api/v1/auth/refresh',
+      path
+    ]);
+  });
+
   it('aborts pending requests and rejects a late response even if transport ignores cancellation', async () => {
     let resolve!: (value: Response) => void;
     const fetch = vi.fn(

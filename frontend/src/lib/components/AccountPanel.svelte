@@ -8,8 +8,14 @@
   import { assetUrl } from '$lib/media/assets';
   import { isNativeDesktop } from '$lib/platform/native';
   import { chatEntities } from '$lib/stores/entities.svelte';
+  import {
+    presenceControl,
+    type PresencePreference,
+    type PresenceStatePayload
+  } from '$lib/stores/presence.svelte';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
-  import PresencePicker, { type PresencePreference } from './PresencePicker.svelte';
+  import PresencePicker from './PresencePicker.svelte';
+  import PresenceSchedulesPanel from './PresenceSchedulesPanel.svelte';
   import Icon from './Icon.svelte';
 
   let {
@@ -26,6 +32,11 @@
   let trigger = $state<HTMLButtonElement | null>(null);
   let profile = $state<UserSummary | null>(null);
   let open = $state(false);
+  let schedulesOpen = $state(false);
+  let schedulesDialog = $state<HTMLDialogElement | null>(null);
+  $effect(() => {
+    if (schedulesDialog && !schedulesDialog.open) schedulesDialog.showModal();
+  });
   let editing = $state(false);
   let status = $state('');
   let preference = $state<PresencePreference>('online');
@@ -37,6 +48,7 @@
   let bottom = $state(80);
   let generation = 0;
   const displayed = $derived(profile?.id === user?.id ? profile : user);
+  const effectivePreference = $derived(presenceControl.state?.effective_status ?? preference);
 
   async function opened(event: Event) {
     open = (event as ToggleEvent).newState === 'open';
@@ -55,12 +67,20 @@
     try {
       const [loaded, settings] = await Promise.all([
         api<UserSummary>('/users/@me'),
-        api<{ presence_preference: PresencePreference }>('/users/@me/settings')
+        api<{
+          presence_preference: PresencePreference;
+          presence_state?: PresenceStatePayload;
+        }>('/users/@me/settings')
       ]);
       if (current !== generation) return;
       profile = loaded;
       status = loaded.custom_status ?? '';
       preference = settings.presence_preference;
+      if (settings.presence_state) {
+        presenceControl.apply(settings.presence_state);
+      } else {
+        presenceControl.applyFallbackPreference(settings.presence_preference);
+      }
     } catch (caught) {
       if (current === generation) error = userErrorMessage(caught, 'Could not load your profile.');
     } finally {
@@ -86,29 +106,75 @@
     }
   }
 
-  async function changePresence(value: PresencePreference) {
+  async function changePresence(value: PresencePreference, durationMinutes?: number | null) {
     if (busy || loading) return;
     busy = true;
     error = '';
     try {
-      await api('/users/@me/settings', {
-        method: 'PATCH',
-        body: JSON.stringify({ presence_preference: value })
-      });
-      preference = value;
-      authenticatedGateway.client.setPresence(value);
-      if (user) chatEntities.setPresence(user, value === 'invisible' ? 'offline' : value);
-      try {
-        localStorage.setItem('kaede.presence', value);
-      } catch {
-        /* Live preference still applies. */
+      const payload: Record<string, unknown> = { presence_preference: value };
+      if (durationMinutes !== undefined) {
+        payload.presence_duration_minutes = durationMinutes;
       }
-      onPresenceChange?.(value);
+      const updated = await api<{
+        presence_preference?: PresencePreference;
+        presence_state?: PresenceStatePayload;
+      } | null>('/users/@me/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(payload)
+      });
+      const resolved = updated?.presence_state?.effective_status ?? value;
+      preference = resolved;
+      if (updated?.presence_state) {
+        presenceControl.apply(updated.presence_state);
+      } else {
+        presenceControl.applyFallbackPreference(resolved);
+      }
+      authenticatedGateway.client.rememberPresence(resolved);
+      if (user) chatEntities.setPresence(user, resolved === 'invisible' ? 'offline' : resolved);
+      onPresenceChange?.(resolved);
     } catch (caught) {
       error = userErrorMessage(caught, 'Could not change your presence.');
     } finally {
       busy = false;
     }
+  }
+
+  async function resetPresenceOverride() {
+    if (busy || loading) return;
+    busy = true;
+    error = '';
+    try {
+      const updated = await api<{
+        presence_preference: PresencePreference;
+        presence_state?: PresenceStatePayload;
+      }>('/users/@me/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ presence_reset_override: true })
+      });
+      preference = updated.presence_preference;
+      if (updated.presence_state) {
+        presenceControl.apply(updated.presence_state);
+      } else {
+        presenceControl.applyFallbackPreference(updated.presence_preference);
+      }
+      authenticatedGateway.client.rememberPresence(updated.presence_preference);
+      if (user) {
+        chatEntities.setPresence(
+          user,
+          updated.presence_preference === 'invisible' ? 'offline' : updated.presence_preference
+        );
+      }
+      onPresenceChange?.(updated.presence_preference);
+    } catch (caught) {
+      error = userErrorMessage(caught, 'Could not reset your presence.');
+    } finally {
+      busy = false;
+    }
+  }
+
+  function openSchedulesModal() {
+    panel?.hidePopover?.();
+    schedulesOpen = true;
   }
 
   async function editStatus() {
@@ -241,7 +307,16 @@
       <a href={resolve('settings#profile')}
         ><Icon name="edit" size={18} />Edit profile / change avatar</a
       >
-      <div class="presence"><PresencePicker value={preference} onChange={changePresence} /></div>
+      <div class="presence">
+        <PresencePicker
+          value={effectivePreference}
+          presenceState={presenceControl.state}
+          disabled={busy || loading}
+          onChange={changePresence}
+          onResetOverride={resetPresenceOverride}
+          onOpenSchedules={openSchedulesModal}
+        />
+      </div>
     </div>
     <div class="actions">
       {#if isNativeDesktop()}<a href={resolve('accounts')}
@@ -256,6 +331,44 @@
 </div>
 
 <VoiceQuickControls />
+
+{#if schedulesOpen}
+  <dialog
+    bind:this={schedulesDialog}
+    class="schedules-modal"
+    closedby="any"
+    aria-label="Presence schedules"
+    onkeydown={(event) => {
+      if (event.key === 'Escape' || event.key === 'Tab') event.stopPropagation();
+    }}
+    onclose={() => {
+      schedulesOpen = false;
+      trigger?.focus();
+    }}
+  >
+    <div class="schedules-modal-header">
+      <div>
+        <h2>Presence schedules</h2>
+        <p>Automatically change your status during sleep, work, or focus hours.</p>
+      </div>
+      <button
+        type="button"
+        class="modal-close"
+        aria-label="Close presence schedules"
+        onclick={() => schedulesDialog?.close()}
+      >
+        ×
+      </button>
+    </div>
+    <PresenceSchedulesPanel
+      compact
+      onSaved={(nextState) => {
+        preference = nextState.effective_status;
+        onPresenceChange?.(nextState.effective_status);
+      }}
+    />
+  </dialog>
+{/if}
 
 <style>
   .account-trigger {
@@ -392,17 +505,78 @@
     color: var(--text);
   }
   .presence {
-    padding: 10px;
+    margin-top: 4px;
+    padding: 4px 0 0;
     border-top: 1px solid var(--line-soft);
   }
   .presence :global(.presence-picker-trigger) {
     width: 100%;
+    min-height: 42px;
+    padding: 10px 12px;
     font-size: 0.85rem;
   }
-  .presence :global(.presence-picker-menu) {
-    bottom: calc(100% + 8px);
-    left: 0;
-    width: min(280px, calc(100vw - 70px));
+  .schedules-modal::backdrop {
+    background: rgb(0 0 0 / 58%);
+    backdrop-filter: blur(2px);
+  }
+  .schedules-modal {
+    margin: auto;
+    gap: 16px;
+    width: min(580px, calc(100vw - 32px));
+    max-height: min(88dvh, 780px);
+    overflow-y: auto;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: var(--surface-raised);
+    color: var(--text);
+    box-shadow: var(--shadow-lg, 0 24px 64px rgb(0 0 0 / 52%));
+  }
+  .schedules-modal[open] {
+    display: grid;
+  }
+  .schedules-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .schedules-modal-header h2 {
+    margin: 0 0 4px;
+    font-size: 1.15rem;
+    line-height: 1.2;
+  }
+  .schedules-modal-header p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+  .modal-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 auto;
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    background: var(--surface-subtle);
+    color: var(--text-soft);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .modal-close:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+  @media (max-width: 560px) {
+    .schedules-modal {
+      width: min(580px, calc(100vw - 20px));
+      padding: 16px;
+      border-radius: 14px;
+    }
   }
   .chevron {
     margin-left: auto;

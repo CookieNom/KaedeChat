@@ -16,6 +16,7 @@ import 'package:kaede_mobile/src/domain/guild_hierarchy.dart'
     show canViewGuildMemberRoster;
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/presence_control.dart';
 import 'package:kaede_mobile/src/domain/role_colors.dart';
 import 'package:kaede_mobile/src/domain/stage_permissions.dart';
 import 'package:kaede_mobile/src/domain/thread_permissions.dart';
@@ -28,10 +29,12 @@ import 'package:kaede_mobile/src/features/chat/dm_encryption_consent.dart';
 import 'package:kaede_mobile/src/features/chat/forum_channel_view.dart';
 import 'package:kaede_mobile/src/features/chat/message_search_screen.dart';
 import 'package:kaede_mobile/src/features/chat/read_inbox_screen.dart';
+import 'package:kaede_mobile/src/features/chat/shopping_links.dart';
 import 'package:kaede_mobile/src/features/guild/announcement_management_tab.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
 import 'package:kaede_mobile/src/features/guild/scheduled_events_tab.dart';
+import 'package:kaede_mobile/src/features/presence/presence_schedules_sheet.dart';
 import 'package:kaede_mobile/src/features/settings/settings_screen.dart';
 import 'package:kaede_mobile/src/features/shared/action_feedback.dart';
 import 'package:kaede_mobile/src/features/shared/developer_mode.dart';
@@ -123,7 +126,9 @@ String? conversationHeaderSubtitle(KaedeChannel channel) {
   if (channel.encryptionMode != 'e2ee') return ordinary;
   final status = channel.encryptionState == 'active'
       ? 'Encrypted · identities unverified'
-      : 'Encryption paused · key rotation required';
+      : channel.encryptionState == 'rekeying'
+          ? 'Encryption paused · key rotation required'
+          : 'Encryption unavailable';
   return ordinary?.isNotEmpty == true ? '$status · $ordinary' : status;
 }
 
@@ -161,8 +166,7 @@ Future<void> _showE2eeRoomSettings(
       builder: (context, setDialogState) {
         final encrypted = channel.encryptionMode == 'e2ee';
         final active = encrypted && channel.encryptionState == 'active';
-        final needsRekey = encrypted &&
-            {'rekeying', 'failed'}.contains(channel.encryptionState);
+        final needsRekey = encrypted && channel.encryptionState == 'rekeying';
         Future<void> run(Future<void> Function(MobileE2EEClient) action) async {
           if (busy) return;
           setDialogState(() {
@@ -390,6 +394,15 @@ final class MobileShell extends ConsumerStatefulWidget {
 final class _MobileShellState extends ConsumerState<MobileShell> {
   var _section = _ShellSection.messages;
   late final PageController _pages;
+  late final AppLifecycleListener _shoppingLifecycle;
+  void _openShopping() {
+    if (!mounted) return;
+    final account = ref.read(mobileControllerProvider).user?.ref;
+    if (account != null) {
+      unawaited(shoppingLinks.open(context,
+          ref.read(mobileControllerProvider.notifier).repository.api, account));
+    }
+  }
 
   /// Page index and conversation visibility are notifiers rather than state
   /// fields so settling a swipe rebuilds the back handler and nothing else.
@@ -400,6 +413,27 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
   void initState() {
     super.initState();
     _pages = PageController();
+    _shoppingLifecycle = AppLifecycleListener(onResume: _openShopping);
+    ref.listenManual(
+        mobileControllerProvider.select((state) => state.user?.ref),
+        (_, account) {
+      shoppingLinks.reset(account);
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openShopping());
+    }, fireImmediately: true);
+    ref.listenManual<IncomingCall?>(
+      mobileControllerProvider.select((state) => state.pendingCallJoin),
+      (_, call) {
+        if (call == null) return;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              ref.read(mobileControllerProvider).pendingCallJoin == call) {
+            unawaited(_joinAnsweredCall(call));
+          }
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      },
+      fireImmediately: true,
+    );
     ref.listenManual(
       mobileControllerProvider.select((state) => state.friendsRequested),
       (_, requested) {
@@ -422,6 +456,8 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
 
   @override
   void dispose() {
+    _shoppingLifecycle.dispose();
+    shoppingLinks.reset(null);
     _pages.dispose();
     _messagePage.dispose();
     _conversationVisible.dispose();
@@ -430,12 +466,6 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen<IncomingCall?>(
-      mobileControllerProvider.select((state) => state.pendingCallJoin),
-      (_, call) {
-        if (call != null) unawaited(_joinAnsweredCall(call));
-      },
-    );
     // Only the open conversation belongs to this build. Banners and the voice
     // strip watch their own slices, so an arriving message or presence update
     // cannot rebuild the page view while a swipe is still in flight.
@@ -533,13 +563,18 @@ final class _MobileShellState extends ConsumerState<MobileShell> {
     }
     if (channel == null) {
       await controller.refreshNavigation();
+      if (!mounted || !controller.isLocallyAccepted(call.call)) return;
       for (final candidate in ref.read(mobileControllerProvider).dms) {
         if (candidate.ref == call.channel) channel = candidate;
       }
     }
-    if (!mounted || channel == null) return;
+    if (!mounted || !controller.isLocallyAccepted(call.call)) return;
+    if (channel == null) {
+      controller.localCallEnded(call.call);
+      return;
+    }
     await controller.selectDm(channel);
-    if (!mounted) return;
+    if (!mounted || !controller.isLocallyAccepted(call.call)) return;
     if (_section != _ShellSection.messages) {
       setState(() => _section = _ShellSection.messages);
     }
@@ -5990,6 +6025,13 @@ final class _AccountBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final voice = ref.watch(voiceSessionProvider);
+    final presenceState = ref.watch(
+      mobileControllerProvider.select((state) => state.presenceState),
+    );
+    final statusSubtext = summarizePresenceSubtext(presenceState);
+    final statusLine = statusSubtext.isEmpty
+        ? presenceLabel(presence)
+        : '${presenceLabel(presence)} · $statusSubtext';
     return SafeArea(
       top: false,
       child: DecoratedBox(
@@ -6038,7 +6080,7 @@ final class _AccountBar extends ConsumerWidget {
                               ),
                             ),
                             Text(
-                              presenceLabel(presence),
+                              statusLine,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -6106,93 +6148,193 @@ final class _AccountBar extends ConsumerWidget {
   }
 
   Future<void> _showPresenceMenu(BuildContext context, WidgetRef ref) async {
+    final presenceState = ref.read(mobileControllerProvider).presenceState;
+    final subtext = summarizePresenceSubtext(presenceState);
+    final schedulesHint = summarizeSchedulesHint(presenceState);
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (user case final account?)
-              Padding(
-                padding: EdgeInsets.fromLTRB(20, 0, 20, 12),
-                child: Row(
-                  children: [
-                    UserAvatar(
-                      user: account,
-                      radius: 21,
-                      presence: presence,
-                      ringColor: context.kaede.panel,
-                    ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            account.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 15,
-                            ),
-                          ),
-                          Text(
-                            account.handle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: context.kaede.muted,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (user case final account?)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                  child: Row(
+                    children: [
+                      UserAvatar(
+                        user: account,
+                        radius: 21,
+                        presence: presence,
+                        ringColor: context.kaede.panel,
                       ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              account.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 15,
+                              ),
+                            ),
+                            Text(
+                              subtext.isNotEmpty
+                                  ? '${presenceLabel(presence)} · $subtext'
+                                  : account.handle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: context.kaede.muted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (presenceState != null &&
+                  (presenceState.source == 'timed' ||
+                      presenceState.source == 'schedule' ||
+                      presenceState.source == 'override'))
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+                    decoration: BoxDecoration(
+                      color: context.kaede.panel,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: context.kaede.border),
                     ),
-                  ],
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            subtext,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: context.kaede.muted,
+                            ),
+                          ),
+                        ),
+                        if (presenceState.source == 'schedule')
+                          TextButton(
+                            onPressed: () {
+                              Navigator.pop(sheetContext);
+                              unawaited(
+                                ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .setPresence(PresenceStatus.online),
+                              );
+                            },
+                            child: const Text('Skip now'),
+                          )
+                        else
+                          TextButton(
+                            onPressed: () {
+                              Navigator.pop(sheetContext);
+                              unawaited(
+                                ref
+                                    .read(mobileControllerProvider.notifier)
+                                    .resetPresenceOverride(),
+                              );
+                            },
+                            child: const Text('Reset'),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-            Divider(),
-            for (final status in const <PresenceStatus>[
-              PresenceStatus.online,
-              PresenceStatus.idle,
-              PresenceStatus.dnd,
-              PresenceStatus.invisible,
-            ])
+              const Divider(height: 1),
+              for (final status in const <PresenceStatus>[
+                PresenceStatus.online,
+                PresenceStatus.idle,
+                PresenceStatus.dnd,
+                PresenceStatus.invisible,
+              ])
+                ListTile(
+                  leading: Icon(
+                    presenceIcon(status),
+                    size: 18,
+                    color: presenceColor(context, status),
+                  ),
+                  title: Text(presenceLabel(status)),
+                  subtitle: status == PresenceStatus.dnd
+                      ? Text(
+                          L10n.of(context)
+                              .ui_notifications_stay_silent_19e683d1,
+                        )
+                      : status == PresenceStatus.invisible
+                          ? Text(
+                              L10n.of(context)
+                                  .ui_appear_offline_to_everyone_68d50fb1,
+                            )
+                          : null,
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (status == presence) const Icon(Icons.check_rounded),
+                      if (status != PresenceStatus.online)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 4),
+                          child: Icon(Icons.chevron_right_rounded, size: 18),
+                        ),
+                    ],
+                  ),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    if (status == PresenceStatus.online) {
+                      await ref
+                          .read(mobileControllerProvider.notifier)
+                          .setPresence(status);
+                      return;
+                    }
+                    if (!context.mounted) return;
+                    final picked = await showPresenceDurationSheet(
+                      context,
+                      status: status,
+                    );
+                    if (picked == null || !context.mounted) return;
+                    await ref
+                        .read(mobileControllerProvider.notifier)
+                        .setPresence(
+                          status,
+                          durationMinutes: picked.minutes,
+                          includeDuration: true,
+                        );
+                  },
+                ),
+              const Divider(height: 1),
               ListTile(
-                leading: Icon(
-                  presenceIcon(status),
-                  size: 18,
-                  color: presenceColor(context, status),
-                ),
-                title: Text(presenceLabel(status)),
-                subtitle: status == PresenceStatus.dnd
-                    ? Text(
-                        L10n.of(context).ui_notifications_stay_silent_19e683d1)
-                    : status == PresenceStatus.invisible
-                        ? Text(L10n.of(context)
-                            .ui_appear_offline_to_everyone_68d50fb1)
-                        : null,
-                trailing: status == presence ? Icon(Icons.check_rounded) : null,
+                leading: const Icon(Icons.schedule_rounded),
+                title: const Text('Schedules'),
+                subtitle: Text(schedulesHint),
+                trailing: const Icon(Icons.chevron_right_rounded, size: 18),
                 onTap: () {
                   Navigator.pop(sheetContext);
-                  ref
-                      .read(mobileControllerProvider.notifier)
-                      .setPresence(status);
+                  unawaited(showPresenceSchedulesSheet(context, ref));
                 },
               ),
-            Divider(),
-            ListTile(
-              leading: Icon(Icons.settings_outlined),
-              title: Text(L10n.of(context).ui_account_settings_358e8719),
-              onTap: () {
-                Navigator.pop(sheetContext);
-                onTap();
-              },
-            ),
-          ],
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.settings_outlined),
+                title: Text(L10n.of(context).ui_account_settings_358e8719),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  onTap();
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );

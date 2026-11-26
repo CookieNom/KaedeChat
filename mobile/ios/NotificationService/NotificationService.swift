@@ -12,14 +12,14 @@ final class NotificationService: UNNotificationServiceExtension {
   ) {
     handler = contentHandler
     guard let fallback = request.content.mutableCopy() as? UNMutableNotificationContent else {
-      contentHandler(request.content)
+      finish(request.content)
       return
     }
     content = fallback
     guard let state = relayState(), let wake = wake(from: request.content.userInfo),
           state.routeID == wake.routeID, authenticate(wake, secret: state.wakeSecret),
           let url = URL(string: "https://\(state.home)/api/v1/users/@me/push-devices/notifications/redeem-wake") else {
-      contentHandler(fallback)
+      finish(fallback)
       return
     }
     var call = URLRequest(url: url)
@@ -36,14 +36,25 @@ final class NotificationService: UNNotificationServiceExtension {
       "wake_mac": wake.mac,
     ])
     URLSession.shared.dataTask(with: call) { [weak self] data, response, _ in
-      guard let self, let response = response as? HTTPURLResponse,
+      guard let self else { contentHandler(fallback); return }
+      if (response as? HTTPURLResponse)?.statusCode == 204 {
+        fallback.sound = nil
+        fallback.badge = nil
+        if #available(iOS 15.0, *) { fallback.interruptionLevel = .passive }
+        self.includeRedemption(Data(), wake: wake, state: state, content: fallback)
+        self.finish(fallback)
+        return
+      }
+      guard let response = response as? HTTPURLResponse,
+            self.relayState()?.routeID == state.routeID,
             response.statusCode == 200, let data,
             let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let title = result["title"] as? String,
             let body = result["body"] as? String else {
-        contentHandler(fallback)
+        self.finish(fallback)
         return
       }
+      self.includeRedemption(data, wake: wake, state: state, content: fallback)
       fallback.title = title
       fallback.body = body
       fallback.categoryIdentifier = self.category(for: result["kind"] as? String)
@@ -57,14 +68,29 @@ final class NotificationService: UNNotificationServiceExtension {
       if let message = result["message_ref"] as? String {
         fallback.userInfo["message_ref"] = message
       }
-      contentHandler(fallback)
-      self.handler = nil
+      self.finish(fallback)
     }.resume()
   }
 
-  override func serviceExtensionTimeWillExpire() {
-    if let handler, let content { handler(content) }
+  private func includeRedemption(_ data: Data, wake: Wake, state: RelayState, content: UNMutableNotificationContent) {
+    guard let key = Data(base64URLEncoded: state.wakeSecret) else { return }
+    let encoded = data.base64EncodedString()
+    let canonical = Data("kaede-nse-v1\n\(wake.mac)\n\(encoded)".utf8)
+    content.userInfo["kaede_nse_payload"] = encoded
+    content.userInfo["kaede_nse_signature"] = Data(HMAC<SHA256>.authenticationCode(for: canonical, using: SymmetricKey(data: key))).base64EncodedString()
+  }
+
+  private let completionLock = NSLock()
+  private func finish(_ value: UNNotificationContent) {
+    completionLock.lock()
+    let complete = handler
     handler = nil
+    completionLock.unlock()
+    complete?(value)
+  }
+
+  override func serviceExtensionTimeWillExpire() {
+    if let content { finish(content) }
   }
 
   private func category(for kind: String?) -> String {

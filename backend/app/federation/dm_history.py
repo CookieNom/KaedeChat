@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
+
+from sqlalchemy import select, tuple_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.custom_emojis import canonical_reaction_emoji
 from app.chat.e2ee import validate_e2ee_envelope, validate_e2ee_message_projection
@@ -13,19 +17,25 @@ from app.chat.message_flags import MESSAGE_FLAG_HAS_SNAPSHOT
 from app.chat.message_references import validate_message_reference_projection
 from app.chat.pins import PIN_NOTICE_MESSAGE_TYPE
 from app.core.base64url import encode_base64url
+from app.core.dm import GROUP_DM_MEMBER_ADDED, GROUP_DM_MEMBER_LEFT, GROUP_DM_MEMBER_REMOVED
+from app.core.federation import canonical_json
 from app.core.settings import Settings
+from app.db.models import User
 from app.federation.content_safety import safety_projection, safety_state, safety_timestamp
 from app.federation.message_content import validate_replicated_rich_projection
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.federation.replication import (
     client_user_payload_from_profile,
     database_snowflake,
+    profile_from_user,
     remote_media_dimensions,
     sanitized_remote_blurhash,
     sanitized_remote_variants,
     validate_snowflake_timestamp,
 )
 from app.federation.schemas import RemoteUserProfile
+from app.federation.security import sign_federation_document, verify_federation_document
+from app.media.payloads import federation_attachment_duration
 from app.media.processing import normalize_declared_type, sanitize_filename
 from app.media.schemas import validate_voice_attachment_metadata
 
@@ -328,20 +338,11 @@ def _validated_attachment(
         raise FederationNetworkError("DM history attachment metadata is invalid") from exc
     encryption_mode = raw.get("encryption_mode", "plaintext")
     encryption_protocol = raw.get("encryption_protocol")
-    duration_raw = raw.get("duration_secs")
-    duration_secs = (
-        float(duration_raw)
-        if isinstance(duration_raw, (int, float)) and not isinstance(duration_raw, bool)
-        else None
-    )
     waveform = raw.get("waveform")
-    if (
-        duration_raw is not None
-        and duration_secs is None
-        or (waveform is not None and not isinstance(waveform, str))
-    ):
+    if waveform is not None and not isinstance(waveform, str):
         raise FederationNetworkError("DM history voice metadata is invalid")
     try:
+        duration_secs = federation_attachment_duration(raw)
         validate_voice_attachment_metadata(
             content_type=content_type,
             encryption_mode=str(encryption_mode),
@@ -395,6 +396,89 @@ def _validated_attachment(
     return rendered
 
 
+GROUP_HISTORY_PROOF_TYPE = "dm.group.history.page"
+GROUP_HISTORY_PROOF_TTL = 60
+
+
+async def sign_group_history_page(
+    session: AsyncSession,
+    settings: Settings,
+    page: dict[str, Any],
+    nonce: str,
+    requester: tuple[int, str],
+) -> dict[str, Any]:
+    now = int(time.time())
+    return await sign_federation_document(
+        session,
+        settings,
+        {
+            "type": GROUP_HISTORY_PROOF_TYPE,
+            "issued_at": now,
+            "expires_at": now + GROUP_HISTORY_PROOF_TTL,
+            "request_nonce": nonce,
+            "requester": f"{requester[0]}@{requester[1]}",
+            "page_sha256": hashlib.sha256(canonical_json(page)).hexdigest(),
+        },
+    )
+
+
+async def verified_group_history_profiles(
+    session: AsyncSession,
+    settings: Settings,
+    page: object,
+    *,
+    authority: str,
+    nonce: str,
+    requester: tuple[int, str],
+    limit: int,
+    trusted_profiles: dict[tuple[int, str], dict[str, object]],
+) -> bool:
+    if not isinstance(page, dict) or "group_history_proof" not in page:
+        return False
+    proof = page["group_history_proof"]
+    messages = page.get("messages")
+    if not isinstance(proof, dict) or not isinstance(messages, list) or len(messages) > limit:
+        raise FederationNetworkError("Invalid group history proof")
+    try:
+        await verify_federation_document(
+            session,
+            settings,
+            proof,
+            expected_origin=authority,
+            expected_type=GROUP_HISTORY_PROOF_TYPE,
+            maximum_age=GROUP_HISTORY_PROOF_TTL,
+        )
+        unsigned = {key: value for key, value in page.items() if key != "group_history_proof"}
+        if (
+            proof.get("request_nonce") != nonce
+            or proof.get("requester") != f"{requester[0]}@{requester[1]}"
+            or proof.get("page_sha256") != hashlib.sha256(canonical_json(unsigned)).hexdigest()
+        ):
+            raise ValueError("unbound page")
+        # Only immutable composite references cross this trust boundary. Resolve
+        # third-party profile data locally, even for a formerly unseen member.
+        refs = {
+            (
+                database_snowflake(raw.get("author_id"), "history author"),
+                normalize_domain(str(raw.get("author_domain", ""))),
+            )
+            for raw in messages
+            if isinstance(raw, dict) and raw.get("author_domain") != authority
+        } - trusted_profiles.keys()
+    except (ValueError, TypeError) as exc:
+        raise FederationNetworkError("Invalid group history proof") from exc
+    if refs:
+        users = await session.scalars(
+            select(User).where(tuple_(User.id, User.origin_domain).in_(refs))
+        )
+        for user in users:
+            if user.account_type != "system":
+                trusted_profiles[(user.id, user.origin_domain)] = profile_from_user(user) | {
+                    "profile_resolved": user.profile_resolved
+                }
+    return True
+
+
 def validate_dm_history_page(
     body: object,
     *,
@@ -405,6 +489,7 @@ def validate_dm_history_page(
     trusted_profiles: Mapping[tuple[int, str], Mapping[str, object]],
     before: tuple[int, str] | None,
     limit: int,
+    verified_group_history: bool = False,
 ) -> ValidatedDMHistoryPage:
     """Strictly validate and sanitize an untrusted authority history page."""
 
@@ -458,13 +543,20 @@ def validate_dm_history_page(
             raise FederationNetworkError(
                 "DM history authority returned invalid references"
             ) from exc
+        authority_group_notice = (
+            verified_group_history
+            and reference[1] == authority_domain
+            and message_type
+            in {GROUP_DM_MEMBER_ADDED, GROUP_DM_MEMBER_LEFT, GROUP_DM_MEMBER_REMOVED}
+        )
         if (
             (previous is not None and reference >= previous)
             or reference in seen
             or channel_ref != conversation_ref
-            or author_ref not in participant_refs
+            or (not verified_group_history and author_ref not in participant_refs)
             or (
                 reference[1] != author_ref[1]
+                and not authority_group_notice
                 and not (
                     message_type in {PIN_NOTICE_MESSAGE_TYPE, 46}
                     and reference[1] == authority_domain
@@ -472,10 +564,9 @@ def validate_dm_history_page(
             )
         ):
             raise FederationNetworkError("DM history authority returned mismatched references")
-        # The authority orders the conversation, but it is not authoritative
-        # for bodies authored on this home. Advance the signed cursor past
-        # these rows and use only the local durable copy during merge.
-        if author_ref[1] == settings.domain:
+        # Local user messages are always merged from their durable home copy.
+        # Membership notices are generated by the authority about a participant.
+        if author_ref[1] == settings.domain and not authority_group_notice:
             if safety_state(raw) is not None or safety_timestamp(raw) is not None:
                 result.append(
                     safety_projection(
@@ -508,12 +599,30 @@ def validate_dm_history_page(
         # Use locally trusted/cached identity data unless the author is hosted
         # by the authority that signed this response.
         profile = supplied_profile
+        unresolved_author = False
         if author_ref[1] != authority_domain:
             trusted_raw = trusted_profiles.get(author_ref)
             if trusted_raw is None:
-                raise FederationNetworkError("DM history author is not locally trusted")
+                if not verified_group_history or author_ref[1] == settings.domain:
+                    raise FederationNetworkError("DM history author is not locally trusted")
+                # Ephemeral history lookups must not create durable identities.
+                # Use a stable local opaque handle until the author is resolved.
+                opaque = hmac.digest(
+                    settings.secret_key_bytes,
+                    f"dm-history-author/{author_ref[0]}@{author_ref[1]}".encode(),
+                    "sha256",
+                )
+                trusted_raw = {
+                    "id": str(author_ref[0]),
+                    "origin_domain": author_ref[1],
+                    "username": f"history_{opaque.hex()[:24]}",
+                }
+                unresolved_author = True
+            unresolved_author = unresolved_author or trusted_raw.get("profile_resolved") is False
             try:
-                profile = RemoteUserProfile.model_validate(trusted_raw)
+                profile = RemoteUserProfile.model_validate(
+                    {key: value for key, value in trusted_raw.items() if key != "profile_resolved"}
+                )
             except (TypeError, ValueError) as exc:
                 raise FederationNetworkError("trusted DM history author is invalid") from exc
             if (int(profile.id), profile.origin_domain) != author_ref:
@@ -585,7 +694,15 @@ def validate_dm_history_page(
         ):
             raise FederationNetworkError("DM history message has no content")
         if forwarded_ref is not None and (
-            deleted_at is not None or e2ee is not None or raw_attachments
+            deleted_at is not None
+            or (not rich.has_encrypted_forward and e2ee is not None)
+            or (
+                rich.has_encrypted_forward
+                and any(
+                    not isinstance(item, dict) or item.get("encryption_mode") != "e2ee"
+                    for item in raw_attachments
+                )
+            )
         ):
             raise FederationNetworkError("DM history forward is invalid")
         client_nonce = raw.get("client_nonce")
@@ -608,7 +725,9 @@ def validate_dm_history_page(
                 )
             except (ValueError, FederationNetworkError) as exc:
                 raise FederationNetworkError("DM history mention is invalid") from exc
-            if mention not in participant_refs or mention in mention_seen:
+            if (
+                not verified_group_history and mention not in participant_refs
+            ) or mention in mention_seen:
                 raise FederationNetworkError("DM history mention is not a participant")
             mention_seen.add(mention)
             mention_refs.append({"id": str(mention[0]), "origin_domain": mention[1]})
@@ -650,6 +769,25 @@ def validate_dm_history_page(
             )
         except ValueError as exc:
             raise FederationNetworkError("DM history message reference is invalid") from exc
+        if authority_group_notice and (
+            flags != 4
+            or not isinstance(content, str)
+            or e2ee is not None
+            or raw_attachments
+            or rich.embeds
+            or rich.components
+            or rich.sticker_items
+            or rich.poll is not None
+            or forwarded_ref is not None
+            or referenced_id is not None
+            or rich.application_ref is not None
+            or rich.interaction_metadata is not None
+            or tts
+            or client_nonce is not None
+            or mention_refs
+            or message_reference is not None
+        ):
+            raise FederationNetworkError("DM history membership notice fields are invalid")
         if message_type == PIN_NOTICE_MESSAGE_TYPE and (
             reference[1] != authority_domain
             or content is not None
@@ -703,7 +841,8 @@ def validate_dm_history_page(
                 "channel_domain": conversation_ref[1],
                 "author_id": str(author_ref[0]),
                 "author_domain": author_ref[1],
-                "author": client_user_payload_from_profile(profile),
+                "author": client_user_payload_from_profile(profile)
+                | ({"profile_resolved": False} if unresolved_author else {}),
                 "content": None if deleted_at is not None else content,
                 "safety_state": safety_state(raw),
                 "safety_updated_at": raw.get("safety_updated_at"),

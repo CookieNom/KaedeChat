@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -169,6 +169,18 @@ def test_voice_context_binds_group_epoch_and_exporter_context() -> None:
     ]
 
 
+def test_rotated_voice_channel_uses_first_commit_of_new_group() -> None:
+    group_id = b"g" * 32
+    provider = DeterministicMLSProvider(1)
+    context = replace(e2ee_context(provider, group_id, epoch=7), mls_epoch=1)
+    assert context.derive_media_key(encrypted_grant(group_id, epoch=7)) == bytes(
+        [1] * MEDIA_KEY_BYTES
+    )
+    provider.epoch = 2
+    with pytest.raises(ValueError, match="stale"):
+        context.derive_media_key(encrypted_grant(group_id, epoch=7))
+
+
 def test_voice_context_rejects_mismatched_group_and_stale_provider_epoch() -> None:
     provider = DeterministicMLSProvider(7)
     context = e2ee_context(provider, b"a" * 32)
@@ -231,9 +243,11 @@ class FakeE2EEManager:
 class FakeRoom:
     def __init__(self) -> None:
         self.handlers: dict[str, Any] = {}
+        self.remote_participants: dict[str, Any] = {}
         self.e2ee_manager = FakeE2EEManager()
         self.connected_key: bytes | None = None
         self.ratchet_salt: bytes | None = None
+        self.key_derivation_function: int | None = None
         self.auto_subscribe: bool | None = None
         self.disconnected = False
 
@@ -245,8 +259,11 @@ class FakeRoom:
         return register
 
     async def connect(self, _url: str, _token: str, *, options: Any) -> None:
-        self.connected_key = options.encryption.key_provider_options.shared_key
-        self.ratchet_salt = options.encryption.key_provider_options.ratchet_salt
+        if options.encryption is not None:
+            provider = options.encryption.key_provider_options
+            self.connected_key = provider.shared_key
+            self.ratchet_salt = provider.ratchet_salt
+            self.key_derivation_function = provider.key_derivation_function
         self.auto_subscribe = options.auto_subscribe
 
     async def disconnect(self) -> None:
@@ -258,6 +275,7 @@ class FakeE2EEOptions:
         self.key_provider_options = SimpleNamespace(
             shared_key=None,
             ratchet_salt=b"default",
+            key_derivation_function=0,
         )
 
 
@@ -269,6 +287,10 @@ class FakeRoomOptions:
 class FakeRTC:
     E2EEOptions = FakeE2EEOptions
     RoomOptions = FakeRoomOptions
+    KeyDerivationFunction = SimpleNamespace(HKDF=1)
+    EncryptionType = SimpleNamespace(GCM=1)
+    TrackKind = SimpleNamespace(KIND_AUDIO=1, KIND_VIDEO=2)
+    __version__ = "1.1.18"
 
     def __init__(self) -> None:
         self.rooms: list[FakeRoom] = []
@@ -278,15 +300,25 @@ class FakeRTC:
         self.rooms.append(room)
         return room
 
+    def install(self, monkeypatch: pytest.MonkeyPatch, core: Any) -> None:
+        monkeypatch.setitem(sys.modules, "livekit", SimpleNamespace(rtc=self))
+        ffi = SimpleNamespace(instance=SimpleNamespace(_ffi_lib=core))
+        monkeypatch.setitem(
+            sys.modules, "livekit.rtc._ffi_client", SimpleNamespace(FfiClient=ffi)
+        )
+
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kaede_e2ee", [False, True])
 async def test_livekit_transport_installs_key_before_connect_and_clears_on_leave(
     monkeypatch: pytest.MonkeyPatch,
+    kaede_e2ee: bool,
 ) -> None:
     rtc = FakeRTC()
-    monkeypatch.setitem(sys.modules, "livekit", SimpleNamespace(rtc=rtc))
+    marker = Mock(return_value=256)
+    rtc.install(monkeypatch, SimpleNamespace(kaede_livekit_ffi_abi_v1=marker))
     grant = encrypted_grant(b"g" * 32)
-    transport = LiveKitTransport()
+    transport = LiveKitTransport(kaede_e2ee=kaede_e2ee)
     staged = bytearray(b"k" * MEDIA_KEY_BYTES)
     transport.configure_e2ee(grant, staged)
     owned_key = transport._configured_media_key
@@ -295,11 +327,21 @@ async def test_livekit_transport_installs_key_before_connect_and_clears_on_leave
     async def listener(_frame: AudioFrame, _participant: str) -> None:
         return None
 
+    if not kaede_e2ee:
+        with pytest.raises(RuntimeError, match="kaede_e2ee=True"):
+            await transport.connect(grant, listener)
+        assert not rtc.rooms
+        assert owned_key == bytearray(MEDIA_KEY_BYTES)
+        assert transport._configured_media_key is None
+        return
+
     await transport.connect(grant, listener)
     room = rtc.rooms[0]
     assert room.connected_key == b"k" * MEDIA_KEY_BYTES
     assert room.ratchet_salt == MEDIA_RATCHET_SALT
-    assert room.auto_subscribe is True
+    assert room.key_derivation_function == 1
+    marker.assert_called_once_with()
+    assert not room.auto_subscribe
 
     await transport.disconnect()
     assert room.e2ee_manager.enabled_updates == [False]
@@ -307,6 +349,88 @@ async def test_livekit_transport_installs_key_before_connect_and_clears_on_leave
     assert room.disconnected
     assert owned_key == bytearray(MEDIA_KEY_BYTES)
     assert transport._configured_media_key is None
+
+
+@pytest.mark.asyncio
+async def test_opt_in_receives_encrypted_audio_and_vp8_without_a_codec_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rtc = FakeRTC()
+    rtc.install(
+        monkeypatch, SimpleNamespace(kaede_livekit_ffi_abi_v1=Mock(return_value=256))
+    )
+    room = FakeRoom()
+    monkeypatch.setattr(rtc, "Room", lambda: room)
+
+    def publication(kind: int, name: str, mime: str, encryption: int = 1) -> Any:
+        return SimpleNamespace(
+            kind=kind,
+            name=name,
+            mime_type=mime,
+            encryption_type=encryption,
+            set_subscribed=Mock(),
+        )
+
+    audio = publication(1, "microphone", "audio/opus")
+    screen = publication(2, "kaede.video.v1:screen_share:vp8", "")
+    camera = publication(2, "camera", "video/VP8; test=1")
+    premium = publication(2, "kaede.video.v1:camera:av1", "video/av1")
+    plaintext = publication(1, "microphone", "audio/opus", encryption=0)
+    mislabeled = publication(2, "kaede.video.v1:camera:vp8", "video/h264")
+    peer = SimpleNamespace(track_publications={"a": audio, "v": screen, "p": premium})
+    room.remote_participants["alice"] = peer
+    grant = encrypted_grant(b"g" * 32)
+    transport = LiveKitTransport(kaede_e2ee=True)
+    transport.configure_e2ee(grant, bytearray(b"k" * MEDIA_KEY_BYTES))
+    await transport.connect(grant, AsyncMock())
+    for late in (camera, plaintext, mislabeled):
+        room.handlers["track_published"](late, peer)
+    for allowed in (audio, screen, camera):
+        allowed.set_subscribed.assert_called_once_with(True)
+    for ignored in (premium, plaintext, mislabeled):
+        ignored.set_subscribed.assert_not_called()
+        room.handlers["track_subscribed"](
+            SimpleNamespace(kind=ignored.kind), ignored, peer
+        )
+    assert not transport._receive_tasks
+    await transport.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version", "native", "message"),
+    [
+        ("1.1.19", SimpleNamespace(), "livekit==1.1.18"),
+        ("1.1.18", SimpleNamespace(), "LIVEKIT_LIB_PATH"),
+        (
+            "1.1.18",
+            SimpleNamespace(kaede_livekit_ffi_abi_v1=Mock(return_value=128)),
+            "LIVEKIT_LIB_PATH",
+        ),
+    ],
+)
+async def test_opt_in_rejects_incompatible_core_before_joining_an_encrypted_room(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    native: Any,
+    message: str,
+) -> None:
+    rtc = FakeRTC()
+    rtc.__version__ = version
+    rtc.install(monkeypatch, native)
+    grant = encrypted_grant(b"g" * 32)
+    transport = LiveKitTransport(kaede_e2ee=True)
+    transport.configure_e2ee(grant, bytearray(b"k" * MEDIA_KEY_BYTES))
+    owned_key = transport._configured_media_key
+    listener = AsyncMock()
+    with pytest.raises(RuntimeError, match=message):
+        await transport.connect(grant, listener)
+    assert rtc.rooms == []
+    assert owned_key == bytearray(MEDIA_KEY_BYTES)
+
+    await transport.connect(replace(grant, e2ee=False), listener)
+    assert rtc.rooms[0].connected_key is None
+    await transport.disconnect()
 
 
 class EncryptedFakeTransport:

@@ -5,7 +5,7 @@ mod themes;
 mod windows_hotkeys;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Display,
     net::IpAddr,
     str::FromStr,
@@ -34,7 +34,7 @@ use kaede_protocol::{Domain, EntityRef};
 use kaede_turnstile::EmbeddedTurnstile;
 use kaede_voice::{
     ExpectedVoicePolicy, MediaPublishSettings, ScreenShareSettings, VoiceCommand, VoiceError,
-    VoiceGrantRequest, VoiceHandle, VoiceMediaSettings, VoiceStatus, camera_devices,
+    VoiceGrant, VoiceGrantRequest, VoiceHandle, VoiceMediaSettings, VoiceStatus, camera_devices,
     screen_source_thumbnail, screen_sources,
 };
 use parking_lot::Mutex as SyncMutex;
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri::{
-    AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
     ipc::{InvokeBody, Request, Response},
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -70,7 +70,48 @@ fn is_autostart_launch(arguments: &[String]) -> bool {
         .any(|argument| argument == AUTOSTART_ARGUMENT)
 }
 
+struct PendingVoiceGrant {
+    handle: String,
+    grant: VoiceGrant,
+    connection_id: String,
+    routing: Option<Value>,
+}
+
+type PendingVoiceGrants = Arc<SyncMutex<VecDeque<PendingVoiceGrant>>>;
+
+fn retain_native_grant(
+    pending: &PendingVoiceGrants,
+    body: &mut Value,
+    routing: Option<Value>,
+) -> Result<(), NativeError> {
+    let invalid = || {
+        NativeError::local(
+            "INVALID_VOICE_GRANT",
+            "The server returned an invalid voice grant.",
+        )
+    };
+    let grant: VoiceGrant = serde_json::from_value(body.clone()).map_err(|_| invalid())?;
+    let connection_id = body["connection_id"]
+        .as_str()
+        .ok_or_else(invalid)?
+        .to_owned();
+    let handle = uuid::Uuid::new_v4().to_string();
+    body["token"] = json!(handle);
+    let mut grants = pending.lock();
+    if grants.len() >= 8 {
+        grants.pop_front();
+    }
+    grants.push_back(PendingVoiceGrant {
+        handle,
+        grant,
+        connection_id,
+        routing,
+    });
+    Ok(())
+}
+
 struct NativeAccount {
+    pending_grants: PendingVoiceGrants,
     api: ApiClient,
     session: Arc<NativeSession>,
     account_key: String,
@@ -83,17 +124,23 @@ struct PendingMfa {
     ticket: SecretString,
 }
 
+#[derive(Clone)]
+struct NativeGateway {
+    commands: kaede_gateway::GatewayCommands,
+    events: Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
+    generation: u64,
+}
+
 struct NativeState {
     instance: RwLock<Option<Domain>>,
     account: RwLock<Option<Arc<NativeAccount>>>,
     restore_lock: Mutex<()>,
     revoked_media: RwLock<BTreeMap<String, BTreeSet<String>>>,
     pending_mfa: Mutex<Option<PendingMfa>>,
-    gateway_commands: RwLock<Option<mpsc::Sender<GatewayCommand>>>,
+    gateway: RwLock<Option<NativeGateway>>,
     gateway_generation: AtomicU64,
+    attached_gateway: Mutex<Option<u64>>,
     gateway_changed: Notify,
-    gateway_events_tx: mpsc::UnboundedSender<(u64, Value)>,
-    gateway_events_rx: Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
     voice: Mutex<Option<VoiceHandle>>,
     input_test: Mutex<Option<InputTest>>,
     voice_target: RwLock<Option<InstalledVoiceTarget>>,
@@ -196,6 +243,7 @@ struct VoiceTarget {
     e2ee_key: Option<SecretString>,
     sender_device_id: Option<String>,
     connection_id: String,
+    routing: Option<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -839,6 +887,12 @@ async fn native_set_instance(
 async fn native_restore_session(
     state: State<'_, NativeState>,
 ) -> Result<NativeSessionBootstrap, NativeError> {
+    let current = state.account.read().await.clone();
+    if let Some(account) = current
+        && account.session.access_token().await.is_err()
+    {
+        close_account(&state, &account, false).await?;
+    }
     let instance = restore_known_account(&state, None).await?;
     Ok(NativeSessionBootstrap {
         instance: instance.map(|domain| domain.to_string()),
@@ -921,6 +975,7 @@ async fn native_switch_account(
     *state.pending_mfa.lock().await = None;
     activate_account(
         NativeAccount {
+            pending_grants: Default::default(),
             api,
             session,
             account_key,
@@ -1000,9 +1055,7 @@ async fn restore_known_account(
     // but deliberately keeps its refresh credential in the OS vault so the
     // user can switch back without re-entering a password.
     if preferred.is_some() && state.account.write().await.take().is_some() {
-        if let Some(commands) = state.gateway_commands.write().await.take() {
-            let _ = commands.send(GatewayCommand::Shutdown).await;
-        }
+        stop_account_gateway(state).await;
         leave_active_voice(state).await;
     }
 
@@ -1047,6 +1100,7 @@ async fn restore_known_account(
             Ok(true) => {
                 activate_account(
                     NativeAccount {
+                        pending_grants: Default::default(),
                         api,
                         session,
                         account_key: known.account_key.clone(),
@@ -1069,9 +1123,11 @@ async fn restore_known_account(
     Ok(Some(domain))
 }
 
-async fn configured_api(state: &NativeState) -> Result<ApiClient, NativeError> {
+async fn configured_api(
+    state: &NativeState,
+) -> Result<(ApiClient, Option<Arc<NativeAccount>>), NativeError> {
     if let Some(account) = state.account.read().await.as_ref() {
-        return Ok(account.api.clone());
+        return Ok((account.api.clone(), Some(account.clone())));
     }
 
     // A hard process restart can reach an API command before the WebView's
@@ -1080,7 +1136,7 @@ async fn configured_api(state: &NativeState) -> Result<ApiClient, NativeError> {
     let preferred = state.instance.read().await.clone();
     restore_known_account(state, preferred.as_ref()).await?;
     if let Some(account) = state.account.read().await.as_ref() {
-        return Ok(account.api.clone());
+        return Ok((account.api.clone(), Some(account.clone())));
     }
     let domain = state
         .instance
@@ -1089,7 +1145,27 @@ async fn configured_api(state: &NativeState) -> Result<ApiClient, NativeError> {
         .clone()
         .ok_or_else(|| NativeError::local("INSTANCE_REQUIRED", "Choose your home instance."))?;
     let endpoint = InstanceEndpoint::production(domain).map_err(NativeError::from)?;
-    ApiClient::new(endpoint).map_err(NativeError::from)
+    Ok((ApiClient::new(endpoint).map_err(NativeError::from)?, None))
+}
+
+async fn require_current_account(
+    state: &NativeState,
+    account: &Arc<NativeAccount>,
+) -> Result<(), NativeError> {
+    if state
+        .account
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|active| Arc::ptr_eq(active, account))
+    {
+        Ok(())
+    } else {
+        Err(NativeError::local(
+            "SESSION_CHANGED",
+            "The signed-in account changed during this request.",
+        ))
+    }
 }
 
 fn new_session(api: ApiClient, account_key: String) -> Arc<NativeSession> {
@@ -1122,11 +1198,62 @@ async fn challenge_token(
         .map_err(NativeError::from)
 }
 
-async fn activate_account(account: NativeAccount, state: &NativeState) -> Result<(), NativeError> {
-    leave_active_voice(state).await;
-    if let Some(commands) = state.gateway_commands.write().await.take() {
-        let _ = commands.send(GatewayCommand::Shutdown).await;
+async fn close_account(
+    state: &NativeState,
+    closing: &Arc<NativeAccount>,
+    remote_logout: bool,
+) -> Result<(), NativeError> {
+    let mut active = state.account.write().await;
+    if !active
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, closing))
+    {
+        return Ok(());
     }
+    *active = None;
+    stop_account_gateway(state).await;
+    leave_active_voice(state).await;
+    let credentials = if remote_logout {
+        closing.session.logout().await
+    } else {
+        closing.session.clear_credentials().await
+    };
+    let registry = forget_account(state, &closing.account_key).await;
+    credentials.map_err(NativeError::from)?;
+    registry
+}
+
+async fn refresh_account(
+    state: &NativeState,
+    account: &Arc<NativeAccount>,
+) -> Result<(), NativeError> {
+    if let Err(error) = account.session.refresh().await {
+        if account.session.access_token().await.is_err() {
+            close_account(state, account, false).await?;
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+async fn activate_account(account: NativeAccount, state: &NativeState) -> Result<(), NativeError> {
+    let mut active = state.account.write().await;
+    stop_account_gateway(state).await;
+    leave_active_voice(state).await;
+    start_account_gateway(&account, state).await;
+    *active = Some(Arc::new(account));
+    Ok(())
+}
+
+async fn stop_account_gateway(state: &NativeState) {
+    if let Some(gateway) = state.gateway.write().await.take() {
+        state.gateway_generation.fetch_add(1, Ordering::SeqCst);
+        state.gateway_changed.notify_waiters();
+        let _ = gateway.commands.send(GatewayCommand::Shutdown).await;
+    }
+}
+
+async fn start_account_gateway(account: &NativeAccount, state: &NativeState) {
     let session = account.session.clone();
     let gateway = kaede_gateway::spawn(
         account.api.endpoint().gateway_url().clone(),
@@ -1140,21 +1267,43 @@ async fn activate_account(account: NativeAccount, state: &NativeState) -> Result
             }
         },
     );
-    start_gateway_forwarder(gateway, state).await;
-    *state.account.write().await = Some(Arc::new(account));
-    Ok(())
+    start_gateway_forwarder(gateway, state, account.pending_grants.clone()).await;
 }
 
-async fn start_gateway_forwarder(gateway: GatewayHandle, state: &NativeState) {
-    *state.gateway_commands.write().await = Some(gateway.commands.clone());
+async fn start_gateway_forwarder(
+    gateway: GatewayHandle,
+    state: &NativeState,
+    pending_grants: PendingVoiceGrants,
+) {
     let mut events = gateway.events;
     let generation = state.gateway_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    state.gateway_changed.notify_waiters();
-    let sender = state.gateway_events_tx.clone();
+    let (sender, receiver) = mpsc::unbounded_channel();
+    *state.gateway.write().await = Some(NativeGateway {
+        commands: gateway.commands,
+        events: Arc::new(Mutex::new(receiver)),
+        generation,
+    });
+    let status_sender = sender.clone();
+    let mut status = gateway.status;
     tokio::spawn(async move {
-        while let Some(envelope) = events.recv().await {
-            if let Ok(value) = serde_json::to_value(envelope) {
-                let _ = sender.send((generation, value));
+        while status.changed().await.is_ok() {
+            let value = json!({"native_status": &*status.borrow_and_update()});
+            if status_sender.send(value).is_err() {
+                break;
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(mut envelope) = events.recv().await {
+            if envelope.t.as_deref() == Some("VOICE_TOKEN")
+                && retain_native_grant(&pending_grants, &mut envelope.d["grant"], None).is_err()
+            {
+                continue;
+            }
+            if let Ok(value) = serde_json::to_value(envelope)
+                && sender.send(value).is_err()
+            {
+                break;
             }
         }
     });
@@ -1264,7 +1413,8 @@ fn validate_native_password_request(
 ) -> Result<(), NativeError> {
     let password_bearing = body.get("password").is_some();
     match (method, path) {
-        ("POST", "auth/login" | "auth/email/change" | "auth/mfa/setup" | "auth/mfa/disable") => {
+        ("POST", "auth/login" | "auth/email/change" | "auth/mfa/setup" | "auth/mfa/disable")
+        | ("DELETE", "users/@me" | "users/@me/content") => {
             submitted_derived_password(body)?;
             submitted_password_kdf_version(body)?;
             if path == "auth/login" && body.get("password_upgrade").is_some() {
@@ -1330,7 +1480,7 @@ async fn login_request(body: &Value, state: &NativeState) -> Result<Value, Nativ
         .await
         .map_err(NativeError::from)?;
     if matches!(outcome, LoginOutcome::ChallengeRequired) {
-        let token = challenge_token(&session, "kaede-login-v1").await?;
+        let token = challenge_token(&session, kaede_auth::LOGIN_ACTION).await?;
         outcome = session
             .login_with_password_protocol(identifier, password, "Kaede Desktop", token.as_ref())
             .await
@@ -1341,6 +1491,7 @@ async fn login_request(body: &Value, state: &NativeState) -> Result<Value, Nativ
             let remembered_key = account_key.clone();
             activate_account(
                 NativeAccount {
+                    pending_grants: Default::default(),
                     api,
                     session,
                     account_key,
@@ -1396,6 +1547,7 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
             let remembered_key = pending.account_key.clone();
             activate_account(
                 NativeAccount {
+                    pending_grants: Default::default(),
                     api: pending.api,
                     session: pending.session,
                     account_key: pending.account_key,
@@ -1414,7 +1566,7 @@ async fn mfa_request(body: &Value, state: &NativeState) -> Result<Value, NativeE
 }
 
 async fn register_request(body: &Value, state: &NativeState) -> Result<Value, NativeError> {
-    let api = configured_api(state).await?;
+    let (api, _) = configured_api(state).await?;
     let session = new_session(api, "registration".to_owned());
     let username = body
         .get("username")
@@ -1434,13 +1586,16 @@ async fn register_request(body: &Value, state: &NativeState) -> Result<Value, Na
                 "This Kaede client did not prepare password protection metadata. Update the app and try again.",
             )
         })?;
-    let challenge = challenge_token(&session, "kaede-register-v1").await?;
+    let challenge = challenge_token(&session, kaede_auth::REGISTER_ACTION).await?;
     let result = session
         .register_with_password_protocol(
             username,
             email,
             password,
             password_kdf,
+            body.get("accepted_terms")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             challenge.as_ref(),
         )
         .await
@@ -1500,55 +1655,77 @@ async fn native_api_request(
                     "Your session is no longer available. Sign in again to continue.",
                 )
             })?;
-            account.session.refresh().await.map_err(NativeError::from)?;
+            refresh_account(&state, &account).await?;
             Some(json!({"status": "ok"}))
         }
         ("POST", "auth/logout") => {
-            if let Some(account) = state.account.write().await.take() {
-                let account_key = account.account_key.clone();
-                account.session.logout().await.map_err(NativeError::from)?;
-                forget_account(&state, &account_key).await?;
+            let closing = state.account.read().await.clone();
+            if let Some(account) = closing {
+                close_account(&state, &account, true).await?;
             }
-            if let Some(commands) = state.gateway_commands.write().await.take() {
-                let _ = commands.send(GatewayCommand::Shutdown).await;
-            }
-            leave_active_voice(&state).await;
             Some(json!({"status": "ok"}))
         }
         _ => {
-            let api = configured_api(&state).await?;
-            let response = match generic_request(&api, &request, &forwarded_headers).await {
+            let (api, account) = configured_api(&state).await?;
+            let response = generic_request(&api, &request, &forwarded_headers).await;
+            if let Some(owner) = &account {
+                require_current_account(&state, owner).await?;
+            }
+            let mut response = match response {
                 Ok(response) => response,
-                Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
-                    let account = state.account.read().await.clone().ok_or_else(|| {
+                Err(ApiClientError::Server { status, error })
+                    if status.as_u16() == 401 && error.code == "AUTHENTICATION_REQUIRED" =>
+                {
+                    let account = account.as_ref().ok_or_else(|| {
                         NativeError::local(
                             "NOT_AUTHENTICATED",
                             "Your session is no longer available. Sign in again to continue.",
                         )
                     })?;
-                    account.session.refresh().await.map_err(NativeError::from)?;
-                    generic_request(&api, &request, &forwarded_headers)
-                        .await
-                        .map_err(NativeError::from)?
+                    refresh_account(&state, account).await?;
+                    require_current_account(&state, account).await?;
+                    let response = generic_request(&api, &request, &forwarded_headers).await;
+                    require_current_account(&state, account).await?;
+                    response.map_err(NativeError::from)?
                 }
                 Err(error) => return Err(error.into()),
             };
+            if request.method == "POST"
+                && path
+                    .split('?')
+                    .next()
+                    .is_some_and(|route| route.trim_end_matches('/').ends_with("/voice/token"))
+                || ["token", "room", "url", "connection_id"]
+                    .iter()
+                    .all(|key| response.body.get(*key).is_some())
+            {
+                let owner = account.as_ref().ok_or_else(|| {
+                    NativeError::local("NOT_AUTHENTICATED", "Sign in before joining voice.")
+                })?;
+                retain_native_grant(
+                    &owner.pending_grants,
+                    &mut response.body,
+                    body.get("routing").cloned(),
+                )?;
+            }
+            if request.method == "DELETE"
+                && path == "users/@me"
+                && let Some(account) = account.as_ref()
+            {
+                close_account(&state, account, false).await?;
+            }
             if path == "auth/config" {
                 let mut body = response.body;
                 if body.get("turnstile").is_some() {
+                    body["native_challenge"] = body["turnstile"]["enabled"].clone();
                     body["turnstile"]["enabled"] = Value::Bool(false);
-                    body["native_challenge"] = Value::Bool(true);
                 }
                 return Ok(NativeResponse { body, ..response });
             }
             return Ok(response);
         }
     };
-    let mut value = special.unwrap_or(Value::Null);
-    if path == "auth/config" && value.get("turnstile").is_some() {
-        value["turnstile"]["enabled"] = Value::Bool(false);
-        value["native_challenge"] = Value::Bool(true);
-    }
+    let value = special.unwrap_or(Value::Null);
     Ok(NativeResponse {
         status: 200,
         body: value,
@@ -1556,6 +1733,7 @@ async fn native_api_request(
     })
 }
 
+const ATTACHMENT_SAVE_MAX_BYTES: usize = 100 * 1024 * 1024;
 const NATIVE_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
 const NATIVE_SOUNDBOARD_MAX_BYTES: usize = 512 * 1024;
 
@@ -1657,6 +1835,38 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+fn private_interaction_attachment<'a>(parts: &[&'a str]) -> Option<&'a str> {
+    let [
+        "api",
+        "v1",
+        "interactions",
+        interaction,
+        "responses",
+        response,
+        "attachments",
+        attachment,
+        variant,
+    ] = parts
+    else {
+        return None;
+    };
+    if !matches!(
+        *variant,
+        "original" | "thumbnail_128" | "thumbnail_512" | "thumbnail_1024" | "poster"
+    ) {
+        return None;
+    }
+    let canonical = |value: &str| {
+        value
+            .parse::<EntityRef>()
+            .ok()
+            .filter(|r| r.to_string() == value)
+    };
+    let owner = canonical(interaction)?.domain;
+    (canonical(response)?.domain == owner && canonical(attachment)?.domain == owner)
+        .then_some(*attachment)
+}
+
 fn validate_attachment_media_path(path: &str) -> Result<&str, NativeError> {
     if path.contains(['#', '\\']) || !path.starts_with('/') || path.starts_with("//") {
         return Err(NativeError::local(
@@ -1674,6 +1884,9 @@ fn validate_attachment_media_path(path: &str) -> Result<&str, NativeError> {
         ));
     }
     let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    if private_interaction_attachment(&parts).is_some() {
+        return Ok(path.trim_start_matches('/'));
+    }
     let ["media", domain, id, variant] = parts.as_slice() else {
         return Err(NativeError::local(
             "INVALID_MEDIA_PATH",
@@ -1768,7 +1981,7 @@ fn attachment_ref_for_media_path(path: &str) -> Option<String> {
     let reference = match parts.as_slice() {
         ["media", domain, id, _] => format!("{id}@{domain}"),
         ["api", "v1", "dms", _, "history-media", _, attachment, _] => attachment.to_string(),
-        _ => return None,
+        _ => private_interaction_attachment(&parts)?.to_owned(),
     };
     reference
         .parse::<EntityRef>()
@@ -1837,45 +2050,38 @@ async fn native_media_request(
     let path = validate_attachment_media_path(&path)?;
     let attachment = attachment_ref_for_media_path(path)
         .ok_or_else(|| NativeError::local("INVALID_MEDIA_PATH", "This media link is invalid."))?;
-    let account_key = state
+    let account = state
         .account
         .read()
         .await
-        .as_ref()
-        .map(|account| account.account_key.clone())
+        .clone()
         .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in to continue."))?;
-    require_available_media(&state, &account_key, &attachment).await?;
-    let api = configured_api(&state).await?;
-    let bytes = match api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES).await {
+    require_available_media(&state, &account.account_key, &attachment).await?;
+    let max_bytes = if path
+        .split('?')
+        .next()
+        .is_some_and(|route| route.ends_with("/original"))
+    {
+        ATTACHMENT_SAVE_MAX_BYTES
+    } else {
+        NATIVE_MEDIA_MAX_BYTES
+    };
+    let bytes = match account.api.get_root_bytes(path, max_bytes).await {
         Ok(bytes) => bytes,
         Err(ApiClientError::Server { status, .. }) if status.as_u16() == 401 => {
-            let account = state.account.read().await.clone().ok_or_else(|| {
-                NativeError::local(
-                    "NOT_AUTHENTICATED",
-                    "Your session is no longer available. Sign in again to continue.",
-                )
-            })?;
-            account.session.refresh().await.map_err(NativeError::from)?;
-            api.get_root_bytes(path, NATIVE_MEDIA_MAX_BYTES)
+            require_current_account(&state, &account).await?;
+            refresh_account(&state, &account).await?;
+            require_current_account(&state, &account).await?;
+            account
+                .api
+                .get_root_bytes(path, max_bytes)
                 .await
                 .map_err(NativeError::from)?
         }
         Err(error) => return Err(error.into()),
     };
-    require_available_media(&state, &account_key, &attachment).await?;
-    if state
-        .account
-        .read()
-        .await
-        .as_ref()
-        .map(|account| account.account_key.as_str())
-        != Some(account_key.as_str())
-    {
-        return Err(NativeError::local(
-            "SESSION_CHANGED",
-            "The signed-in account changed during the download.",
-        ));
-    }
+    require_available_media(&state, &account.account_key, &attachment).await?;
+    require_current_account(&state, &account).await?;
     Ok(Response::new(bytes.to_vec()))
 }
 
@@ -1893,7 +2099,7 @@ async fn native_soundboard_media(
             "Kaede blocked a guild sound with invalid integrity information.",
         ));
     }
-    let api = configured_api(&state).await?;
+    let (api, _) = configured_api(&state).await?;
     let configured_origin = api.endpoint().public_origin();
     let target = validate_soundboard_media_url(
         &url,
@@ -1952,7 +2158,7 @@ fn attachment_save_payload(payload: &[u8]) -> Option<(&str, &[u8])> {
         return None;
     }
     let bytes = payload.get(4 + length..)?;
-    (bytes.len() <= 100 * 1024 * 1024).then_some((filename, bytes))
+    (bytes.len() <= ATTACHMENT_SAVE_MAX_BYTES).then_some((filename, bytes))
 }
 
 #[tauri::command]
@@ -2047,7 +2253,7 @@ async fn native_upload_object(
             error,
         )
     })?;
-    let api = configured_api(&state).await?;
+    let (api, _) = configured_api(&state).await?;
     api.upload_presigned(
         url,
         &ticket.content_type,
@@ -2060,40 +2266,67 @@ async fn native_upload_object(
 }
 
 #[tauri::command]
-async fn native_gateway_next(state: State<'_, NativeState>) -> Result<Option<Value>, NativeError> {
+async fn native_gateway_next(
+    attach: Option<bool>,
+    state: State<'_, NativeState>,
+) -> Result<Option<Value>, NativeError> {
+    let active = state.account.read().await;
+    let account = active
+        .as_ref()
+        .ok_or_else(|| NativeError::local("NOT_AUTHENTICATED", "Sign in to continue."))?;
+    if account.session.access_token().await.is_err() {
+        let closing = account.clone();
+        drop(active);
+        close_account(&state, &closing, false).await?;
+        return Err(NativeError::local(
+            "NOT_AUTHENTICATED",
+            "Sign in to continue.",
+        ));
+    }
+    if attach == Some(true) {
+        let mut attached = state.attached_gateway.lock().await;
+        if *attached == Some(state.gateway_generation.load(Ordering::SeqCst)) {
+            // A replacement WebView needs its own READY with a fresh account snapshot.
+            stop_account_gateway(&state).await;
+            start_account_gateway(account, &state).await;
+        }
+        *attached = Some(state.gateway_generation.load(Ordering::SeqCst));
+    }
+    let gateway = state.gateway.read().await.clone().ok_or_else(|| {
+        NativeError::local("GATEWAY_DISCONNECTED", "Live updates are reconnecting.")
+    })?;
+    drop(active);
     Ok(next_account_gateway_event(
-        &state.gateway_events_rx,
+        &gateway.events,
         &state.gateway_generation,
         &state.gateway_changed,
+        gateway.generation,
     )
     .await)
 }
 
 async fn next_account_gateway_event(
-    receiver: &Mutex<mpsc::UnboundedReceiver<(u64, Value)>>,
+    receiver: &Mutex<mpsc::UnboundedReceiver<Value>>,
     current_generation: &AtomicU64,
     account_changed: &Notify,
+    generation: u64,
 ) -> Option<Value> {
-    let generation = current_generation.load(Ordering::SeqCst);
     let changed = account_changed.notified();
     let mut receiver = receiver.lock().await;
     if generation != current_generation.load(Ordering::SeqCst) {
         return None;
     }
-    // Events queued by the previous account must never enter the new UI.
-    let next = async {
-        while let Some((generation, value)) = receiver.recv().await {
-            if generation == current_generation.load(Ordering::SeqCst) {
-                return Some(value);
-            }
-        }
-        None
-    };
-    // Cancel old WebView polls before they can consume the new account's READY.
+    // Each gateway has its own queue. Discard a completed poll if the account changed.
     tokio::select! {
         biased;
         () = changed => None,
-        result = tokio::time::timeout(Duration::from_secs(25), next) => result.ok().flatten(),
+        result = tokio::time::timeout(Duration::from_secs(25), receiver.recv()) => {
+            if generation == current_generation.load(Ordering::SeqCst) {
+                result.ok().flatten()
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2104,18 +2337,13 @@ async fn native_gateway_command(
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
     let command = decode_gateway_command(&command, &payload)?;
-    state
-        .gateway_commands
-        .read()
-        .await
-        .as_ref()
-        .ok_or_else(|| {
-            NativeError::local(
-                "GATEWAY_DISCONNECTED",
-                "Realtime updates are offline. Check your connection and wait for Kaede to reconnect.",
-            )
-        })?
-        .send(command)
+    let gateway = state.gateway.read().await.clone().ok_or_else(|| {
+        NativeError::local(
+            "GATEWAY_DISCONNECTED",
+            "Realtime updates are offline. Check your connection and wait for Kaede to reconnect.",
+        )
+    })?;
+    gateway.commands.send(command)
         .await
         .map_err(|_| {
             NativeError::local(
@@ -2555,9 +2783,10 @@ async fn toggle_global_voice(app: AppHandle, deafen: bool) {
         ui.deafened = deafened;
         return;
     };
-    let gateway = state.gateway_commands.read().await;
-    let published = if let Some(sender) = gateway.as_ref() {
-        sender
+    let gateway = state.gateway.read().await.clone();
+    let published = if let Some(gateway) = gateway {
+        gateway
+            .commands
             .send(GatewayCommand::VoiceState {
                 self_mute: muted,
                 self_deaf: deafened,
@@ -2899,10 +3128,40 @@ async fn native_voice_join(
     e2ee_key: Option<String>,
     sender_device_id: Option<String>,
     connection_id: String,
-    takeover: bool,
+    grant_handle: String,
     state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
-    join_native_voice(
+    let account =
+        state.account.read().await.clone().ok_or_else(|| {
+            NativeError::local("NOT_AUTHENTICATED", "Sign in before joining voice.")
+        })?;
+    let pending = {
+        let mut grants = account.pending_grants.lock();
+        grants
+            .iter()
+            .position(|g| g.handle == grant_handle && g.connection_id == connection_id)
+            .and_then(|index| grants.remove(index))
+    }
+    .ok_or_else(|| {
+        NativeError::local(
+            "VOICE_GRANT_EXPIRED",
+            "Join this voice room again to get a fresh grant.",
+        )
+    })?;
+    let generation = state.voice_install.begin().await;
+    if !state
+        .account
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|a| Arc::ptr_eq(a, &account))
+    {
+        return Err(NativeError::local(
+            "SESSION_CHANGED",
+            "The account changed before the voice call connected.",
+        ));
+    }
+    join_native_voice_reserved(
         VoiceTarget {
             reference,
             is_call,
@@ -2910,26 +3169,19 @@ async fn native_voice_join(
             e2ee_key: e2ee_key.map(SecretString::from),
             sender_device_id,
             connection_id,
+            routing: pending.routing,
         },
-        takeover,
+        Some(pending.grant),
         &state,
+        generation,
     )
     .await
-}
-
-async fn join_native_voice(
-    target: VoiceTarget,
-    takeover: bool,
-    state: &NativeState,
-) -> Result<(), NativeError> {
-    let generation = state.voice_install.begin().await;
-    join_native_voice_reserved(target, takeover, state, generation).await
 }
 
 #[allow(clippy::too_many_lines)] // One fenced join keeps validation and installation ordered.
 async fn join_native_voice_reserved(
     target: VoiceTarget,
-    takeover: bool,
+    prepared: Option<VoiceGrant>,
     state: &NativeState,
     generation: u64,
 ) -> Result<(), NativeError> {
@@ -2997,9 +3249,31 @@ async fn join_native_voice_reserved(
     let grant_request = VoiceGrantRequest {
         sender_device_id: target.sender_device_id.as_deref(),
         connection_id: &target.connection_id,
-        takeover,
+        takeover: false,
+        routing: target.routing.as_ref(),
     };
-    let mut handle = if target.is_call {
+    let mut handle = if let Some(grant) = prepared {
+        let expected_room_kind = if target.is_call { "d" } else { "g" };
+        let mut parts = grant.room.split('.');
+        if parts.next() != Some(expected_room_kind)
+            || parts.next().is_none()
+            || parts.next() != Some(entity.id.to_string().as_str())
+            || parts.next().is_some()
+        {
+            return Err(NativeError::local(
+                "INVALID_VOICE_REFERENCE",
+                "The voice grant belongs to a different room.",
+            ));
+        }
+        Box::pin(kaede_voice::join(
+            grant,
+            media,
+            target.expected_policy.clone(),
+            media_key,
+            !target.is_call,
+        ))
+        .await
+    } else if target.is_call {
         kaede_voice::join_call(
             account.api.clone(),
             &entity,
@@ -3031,10 +3305,12 @@ async fn join_native_voice_reserved(
     // that remains installed; a control cannot be stranded on the old room.
     let mut installed_voice = state.voice.lock().await;
     let voice_ui = state.voice_ui.read().await.clone();
+    let gateway = state.gateway.read().await.clone();
     if (voice_ui.muted || voice_ui.deafened)
-        && let Some(sender) = state.gateway_commands.read().await.as_ref()
+        && let Some(gateway) = gateway
     {
-        let _ = sender
+        let _ = gateway
+            .commands
             .send(GatewayCommand::VoiceState {
                 self_mute: voice_ui.muted || voice_ui.deafened,
                 self_deaf: voice_ui.deafened,
@@ -3243,7 +3519,7 @@ async fn native_media_quality_set(
         None
     };
     if let Some((generation, target)) = restart
-        && let Err(error) = join_native_voice_reserved(target, false, &state, generation).await
+        && let Err(error) = join_native_voice_reserved(target, None, &state, generation).await
     {
         let rollback_result = previous_preferences.save(&state.paths).await;
         *state.preferences.write().await = previous_preferences;
@@ -3319,6 +3595,7 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
     };
     let ui = state.voice_ui.read().await;
     if let Value::Object(map) = &mut value {
+        map.insert("move_session_id".to_owned(), json!(voice.move_session_id));
         map.insert(
             "video_degraded".to_owned(),
             Value::Bool(
@@ -3334,11 +3611,24 @@ async fn native_voice_status(state: State<'_, NativeState>) -> Result<Value, Nat
         map.insert("muted".to_owned(), Value::Bool(ui.muted));
         map.insert("deafened".to_owned(), Value::Bool(ui.deafened));
         map.insert(
+            "speech_frames".to_owned(),
+            json!(
+                voice
+                    .input_level
+                    .as_ref()
+                    .map_or(0, |gate| gate.speech_frames())
+            ),
+        );
+        map.insert(
             "input_level".to_owned(),
             json!(
                 test_level
                     .unwrap_or_else(|| voice.input_level.as_ref().map_or(0.0, |gate| gate.level()))
             ),
+        );
+        map.insert(
+            "remote_participants".to_owned(),
+            json!(voice.remote_participants()),
         );
         map.insert(
             "priority_speakers".to_owned(),
@@ -3568,9 +3858,52 @@ async fn native_preferences_set(
         None
     };
     if let Some((generation, target)) = restart {
-        join_native_voice_reserved(target, false, &state, generation).await?;
+        join_native_voice_reserved(target, None, &state, generation).await?;
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct NotificationDestination {
+    route: String,
+    account: std::sync::Weak<NativeAccount>,
+}
+
+fn notification_route(path: &str) -> bool {
+    let parts: Vec<_> = path.split('/').collect();
+    let valid = |component: &str| {
+        let value = component.replace("%40", "@");
+        value
+            .parse::<EntityRef>()
+            .is_ok_and(|r| r.to_string() == value)
+    };
+    match parts.as_slice() {
+        ["", "home", channel] => valid(channel),
+        ["", "g", guild, channel] => valid(guild) && valid(channel),
+        _ => false,
+    }
+}
+
+impl NotificationDestination {
+    fn activate(&self, app: &AppHandle) {
+        let destination = self.clone();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(owner) = destination.account.upgrade() else {
+                return;
+            };
+            let state = app.state::<NativeState>();
+            let active = state.account.read().await;
+            if active.as_ref().is_some_and(|a| Arc::ptr_eq(a, &owner))
+                && let Some(window) = app.get_webview_window("main")
+            {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                let _ = app.emit_to("main", "kaede-notification-open", destination.route);
+            }
+        });
+    }
 }
 
 #[tauri::command]
@@ -3579,14 +3912,34 @@ async fn native_notify(
     title: String,
     body: String,
     sensitive: bool,
-    _deep_link: Option<String>,
+    deep_link: Option<String>,
+    state: State<'_, NativeState>,
 ) -> Result<(), NativeError> {
     let body = if sensitive {
         "Open Kaede Chat to view this message."
     } else {
         &body
     };
-    show_native_notification(&app, &title, body)
+    let destination = if let Some(route) = deep_link {
+        if !notification_route(&route) {
+            return Err(NativeError::local(
+                "INVALID_NOTIFICATION_ROUTE",
+                "This notification destination is unavailable.",
+            ));
+        }
+        state
+            .account
+            .read()
+            .await
+            .as_ref()
+            .map(|owner| NotificationDestination {
+                route,
+                account: Arc::downgrade(owner),
+            })
+    } else {
+        None
+    };
+    show_native_notification(&app, &title, body, destination)
 }
 
 #[tauri::command]
@@ -3683,12 +4036,24 @@ fn prepare_native_notifications() -> Result<(), NativeError> {
 }
 
 #[cfg(target_os = "windows")]
-fn show_native_notification(_app: &AppHandle, title: &str, body: &str) -> Result<(), NativeError> {
+fn show_native_notification(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+    destination: Option<NotificationDestination>,
+) -> Result<(), NativeError> {
     prepare_native_notifications()?;
-    tauri_winrt_notification::Toast::new(WINDOWS_NOTIFICATION_APP_ID)
+    let mut toast = tauri_winrt_notification::Toast::new(WINDOWS_NOTIFICATION_APP_ID)
         .title(title)
-        .text1(body)
-        .show()
+        .text1(body);
+    if let Some(destination) = destination {
+        let app = app.clone();
+        toast = toast.on_activated(move |_| {
+            destination.activate(&app);
+            Ok(())
+        });
+    }
+    toast.show()
         .map_err(|error| {
             NativeError::operation(
                 "NOTIFICATION_FAILED",
@@ -3699,7 +4064,53 @@ fn show_native_notification(_app: &AppHandle, title: &str, body: &str) -> Result
 }
 
 #[cfg(not(target_os = "windows"))]
-fn show_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), NativeError> {
+fn show_native_notification(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+    destination: Option<NotificationDestination>,
+) -> Result<(), NativeError> {
+    if let Some(destination) = destination {
+        #[cfg(target_os = "macos")]
+        let _ = notify_rust::set_application(if tauri::is_dev() {
+            "com.apple.Terminal"
+        } else {
+            &app.config().identifier
+        });
+        let handle = notify_rust::Notification::new()
+            .appname("Kaede Chat")
+            .summary(title)
+            .body(body)
+            .action("default", "Open")
+            .show()
+            .map_err(|e| {
+                NativeError::operation(
+                    "NOTIFICATION_FAILED",
+                    "Your system could not display the notification.",
+                    e,
+                )
+            })?;
+        let app = app.clone();
+        #[cfg(target_os = "macos")]
+        tauri::async_runtime::spawn_blocking(move || {
+            handle.wait_for_action(|action| {
+                if matches!(action, "default" | "Open") {
+                    destination.activate(&app);
+                }
+            })
+        });
+        #[cfg(not(target_os = "macos"))]
+        tauri::async_runtime::spawn(async move {
+            handle
+                .wait_for_action_async(|action| {
+                    if matches!(action, notify_rust::NotificationResponse::Default) {
+                        destination.activate(&app);
+                    }
+                })
+                .await;
+        });
+        return Ok(());
+    }
     app.notification()
         .builder()
         .title(title)
@@ -3795,7 +4206,6 @@ fn main() {
                 )
         }
     };
-    let (gateway_events_tx, gateway_events_rx) = mpsc::unbounded_channel();
     let (voice_restart_tx, mut voice_restart_rx) = mpsc::unbounded_channel();
     let push_to_talk_sender = Arc::new(SyncMutex::new(None::<mpsc::UnboundedSender<VoiceCommand>>));
     let hotkey = Arc::new(SyncMutex::new(HotkeyRegistration {
@@ -3812,11 +4222,10 @@ fn main() {
         restore_lock: Mutex::new(()),
         revoked_media: RwLock::new(BTreeMap::new()),
         pending_mfa: Mutex::new(None),
-        gateway_commands: RwLock::new(None),
+        gateway: RwLock::new(None),
         gateway_generation: AtomicU64::new(0),
+        attached_gateway: Mutex::new(None),
         gateway_changed: Notify::new(),
-        gateway_events_tx,
-        gateway_events_rx: Mutex::new(gateway_events_rx),
         voice: Mutex::new(None),
         input_test: Mutex::new(None),
         voice_target: RwLock::new(None),
@@ -3832,6 +4241,12 @@ fn main() {
     };
 
     tauri::Builder::default()
+        // WebView2 also injects startup scripts into third-party player frames.
+        .plugin(
+            tauri::plugin::Builder::new("prototype-protection")
+                .js_init_script("if (window === window.top) Object.freeze(Object.prototype);")
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -3868,7 +4283,7 @@ fn main() {
                         continue;
                     };
                     if let Err(error) =
-                        join_native_voice_reserved(target, false, &state, generation).await
+                        join_native_voice_reserved(target, None, &state, generation).await
                     {
                         tracing::warn!(?error, "native voice grant refresh failed");
                         if let Some(_install_guard) =
@@ -3925,7 +4340,7 @@ fn main() {
                     .build()?;
             if let Some(notice) = startup_notice.as_deref()
                 && let Err(error) =
-                    show_native_notification(app.handle(), "Desktop settings were reset", notice)
+                    show_native_notification(app.handle(), "Desktop settings were reset", notice, None)
             {
                 tracing::warn!(?error, "desktop settings warning could not be displayed");
             }
@@ -4098,6 +4513,41 @@ mod tests {
     };
 
     #[test]
+    fn native_voice_grant_replaces_the_bearer_and_retains_routing() {
+        let mut body = serde_json::json!({
+            "token": "server-token", "url": "wss://voice.example", "room": "g.1.2",
+            "connection_id": "connection-one", "generation": 1,
+            "expires_at": "2030-01-01T00:00:00Z", "can_speak": true, "can_stream": false,
+            "bitrate": 64000, "user_limit": 0, "rtc_region": null, "video_quality_mode": 1,
+            "e2ee": false
+        });
+        let pending = super::PendingVoiceGrants::default();
+        let routing = serde_json::json!({"region": "test"});
+        assert!(super::retain_native_grant(&pending, &mut body, Some(routing.clone())).is_ok());
+        let retained = pending.lock();
+        let first = &retained[0];
+        assert!(uuid::Uuid::parse_str(&first.handle).is_ok());
+        assert_eq!(body["token"], first.handle);
+        assert_eq!(first.connection_id, "connection-one");
+        assert_eq!(first.routing.as_ref(), Some(&routing));
+        assert!(!body.to_string().contains("server-token"));
+    }
+
+    #[test]
+    fn private_response_media_is_bound_to_its_attachment_authority() {
+        let path = "/api/v1/interactions/1@chat.example/responses/2@chat.example/attachments/3@chat.example/original";
+        assert_eq!(validate_attachment_media_path(path).ok(), Some(&path[1..]));
+        assert_eq!(
+            super::attachment_ref_for_media_path(path).as_deref(),
+            Some("3@chat.example")
+        );
+        assert!(
+            validate_attachment_media_path(&path.replace("3@chat.example", "3@peer.example"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn attachment_save_payload_preserves_bytes_and_rejects_invalid_names() {
         fn payload(filename: &[u8], contents: &[u8]) -> Vec<u8> {
             let mut payload = u32::try_from(filename.len())
@@ -4213,6 +4663,7 @@ mod tests {
             e2ee_key: None,
             sender_device_id: None,
             connection_id: "voice-connection".to_owned(),
+            routing: None,
         }
     }
 
@@ -4227,22 +4678,28 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use tokio::sync::{Mutex, Notify, mpsc};
 
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let receiver = Mutex::new(receiver);
+        let (old_sender, old_receiver) = mpsc::unbounded_channel();
+        let (new_sender, new_receiver) = mpsc::unbounded_channel();
+        let old_receiver = Mutex::new(old_receiver);
+        let new_receiver = Mutex::new(new_receiver);
         let generation = AtomicU64::new(1);
         let changed = Notify::new();
-        let old_poll = next_account_gateway_event(&receiver, &generation, &changed);
+        let old_poll = next_account_gateway_event(&old_receiver, &generation, &changed, 1);
         let switch = async {
             tokio::task::yield_now().await;
             generation.store(2, Ordering::SeqCst);
             changed.notify_waiters();
-            assert!(sender.send((1, json!({"t": "MESSAGE_CREATE"}))).is_ok());
-            assert!(sender.send((2, json!({"t": "READY"}))).is_ok());
+            assert!(old_sender.send(json!({"t": "MESSAGE_CREATE"})).is_ok());
+            assert!(new_sender.send(json!({"t": "READY"})).is_ok());
         };
         let (result, ()) = tokio::join!(old_poll, switch);
         assert_eq!(result, None);
         assert_eq!(
-            next_account_gateway_event(&receiver, &generation, &changed).await,
+            next_account_gateway_event(&old_receiver, &generation, &changed, 1).await,
+            None
+        );
+        assert_eq!(
+            next_account_gateway_event(&new_receiver, &generation, &changed, 2).await,
             Some(json!({"t": "READY"}))
         );
     }
@@ -4771,6 +5228,14 @@ mod tests {
             "password": derived_password(),
             "password_kdf_version": 2,
         });
+        for path in ["users/@me", "users/@me/content"] {
+            assert!(validate_native_password_request("DELETE", path, &payload).is_ok());
+            assert_invalid_password_request(
+                "DELETE",
+                path,
+                &serde_json::json!({"password": "raw"}),
+            );
+        }
         assert_invalid_password_request("GET", "auth/login", &payload);
         assert_invalid_password_request("POST", "auth/login?retry=1", &payload);
         assert_invalid_password_request("POST", "users/@me", &payload);

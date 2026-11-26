@@ -252,7 +252,7 @@ async def test_group_dm_authorize_checks_friendship_before_inviter_admission(
         detail={"code": "USER_SUSPENDED_FROM_INSTANCE"},
     )
 
-    async def upsert(_session: object, _settings: object, profile: object) -> object:
+    async def upsert(_session: object, _settings: object, profile: object, **_: object) -> object:
         return inviter if cast(Any, profile).origin_domain == REMOTE_DOMAIN else invitee
 
     calls: list[str] = []
@@ -267,6 +267,7 @@ async def test_group_dm_authorize_checks_friendship_before_inviter_admission(
     session = SimpleNamespace(commit=AsyncMock())
     monkeypatch.setattr(federation_api, "enforce_federation_route_rate_limit", AsyncMock())
     monkeypatch.setattr(federation_api, "upsert_remote_user", upsert)
+    monkeypatch.setattr(federation_api, "resolve_delegated_profile", upsert)
     monkeypatch.setattr(
         federation_api,
         "require_remote_user_creation_allowed",
@@ -289,6 +290,29 @@ async def test_group_dm_authorize_checks_friendship_before_inviter_admission(
 
 
 @pytest.mark.asyncio
+async def test_group_invitee_home_requires_the_relayed_inviters_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = DMGroupAuthorizeRequest.model_validate(
+        {
+            "conversation_id": "3",
+            "conversation_domain": REMOTE_DOMAIN,
+            "inviter": {**remote_profile(), "origin_domain": "inviter.example"},
+            "invitee": local_profile(),
+        }
+    )
+    monkeypatch.setattr(federation_api, "enforce_federation_route_rate_limit", AsyncMock())
+    friendship = AsyncMock()
+    monkeypatch.setattr(federation_api, "require_group_invite_friend", friendship)
+    with pytest.raises(HTTPException) as caught:
+        await federation_api.federation_group_dm_authorize(
+            payload, principal(), cast(Any, object()), cast(Any, object()), cast(Any, settings())
+        )
+    assert caught.value.status_code == 403
+    friendship.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_group_dm_add_authorizes_actor_and_invite_before_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,7 +326,7 @@ async def test_group_dm_add_authorizes_actor_and_invite_before_admission(
         detail={"code": "USER_SUSPENDED_FROM_INSTANCE"},
     )
 
-    async def upsert(_session: object, _settings: object, profile: object) -> object:
+    async def upsert(_session: object, _settings: object, profile: object, **_: object) -> object:
         return actor if cast(Any, profile).origin_domain == REMOTE_DOMAIN else target
 
     async def member(*_args: object) -> None:
@@ -319,6 +343,7 @@ async def test_group_dm_add_authorizes_actor_and_invite_before_admission(
     apply_mutation = AsyncMock()
     monkeypatch.setattr(federation_api, "enforce_federation_route_rate_limit", AsyncMock())
     monkeypatch.setattr(federation_api, "upsert_remote_user", upsert)
+    monkeypatch.setattr(federation_api, "resolve_delegated_profile", upsert)
     monkeypatch.setattr(federation_api, "load_authoritative_group", load_group)
     monkeypatch.setattr(federation_api, "require_group_member", member)
     monkeypatch.setattr(federation_api, "authorize_group_invitee_at_home", authorize)

@@ -29,6 +29,7 @@ from app.federation.management_rpc import (
     validate_management_json,
     validate_management_request_shape,
 )
+from app.federation.network import peer_advertises
 from app.federation.schemas import FederationDomain, SnowflakeString
 from app.federation.security import (
     FederationPrincipal,
@@ -1784,8 +1785,24 @@ async def proxy_remote_guild_management(
     guild = await remote_management_guild(session, settings, guild_ref, actor)
     if guild is None:
         return None
+    legacy_webhook_read = (
+        actor.account_type == "bot"
+        and operation in {"webhook.get", "webhook.list", "webhook.list_channel"}
+        and payload is not None
+        and payload.get("recover_tokens") is True
+        and not await peer_advertises(session, guild.origin_domain, "webhook-token-recovery/1")
+    )
+    if legacy_webhook_read and payload is not None:
+        payload = {key: value for key, value in payload.items() if key != "recover_tokens"}
     request = new_guild_management_request(settings, guild, actor, operation, payload)
-    return await request_guild_management(session, settings, request)
+    result = await request_guild_management(session, settings, request)
+    if legacy_webhook_read:
+        # Older authorities cannot attest the extra scope required to return secrets.
+        for item in result.body if isinstance(result.body, list) else [result.body]:
+            if isinstance(item, dict):
+                item.pop("token", None)
+                item.pop("execution_url", None)
+    return result
 
 
 async def proxy_remote_guild_management_body(
@@ -1880,6 +1897,14 @@ async def authorize_guild_management_request(
             raise HTTPException(status_code=404, detail={"code": "BOT_INSTALLATION_NOT_FOUND"})
         installation = installations[0]
         granted_scopes = set(installation.granted_scopes or [])
+        if (
+            request.operation in {"webhook.get", "webhook.list", "webhook.list_channel"}
+            and request.payload.get("recover_tokens") is True
+            and "webhooks.manage" not in granted_scopes
+        ):
+            raise HTTPException(
+                status_code=403, detail={"code": "BOT_SCOPE_REQUIRED", "scope": "webhooks.manage"}
+            )
         if not any(set(option).issubset(granted_scopes) for option in contract.scope_options):
             missing_options = [
                 tuple(scope for scope in option if scope not in granted_scopes)

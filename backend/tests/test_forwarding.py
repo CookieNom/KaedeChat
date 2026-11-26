@@ -19,21 +19,25 @@ from app.chat.forwarding import (
     authority_attested_forward_source,
     build_forward_snapshot,
     build_forward_source_authorization_content,
+    federation_forward_snapshot,
     forward_snapshot_custom_emoji_tokens,
     forward_snapshot_matches_attachments,
     forward_snapshot_projection_digest,
     forward_snapshot_sticker_items,
+    matches_attested_plaintext_forward,
     rebind_forward_snapshot_attachments,
     validate_forward_snapshot,
     validate_forward_snapshot_source_binding,
     validate_forward_source_authorization,
 )
 from app.chat.schemas import MessageForwardPrepare
-from app.core.federation import sign_envelope
+from app.core.federation import canonical_json, sign_envelope
+from app.core.permissions import Permission
 from app.core.settings import Settings
 from app.core.types import EntityRef
-from app.db.models import Attachment, Channel, Message, User
+from app.db.models import Attachment, Channel, Guild, Message, User
 from app.federation.forwarding import validated_forward_source_proof
+from app.media.payloads import federation_attachment_payload
 
 VALID_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode()
 
@@ -235,6 +239,14 @@ def test_plaintext_forward_rebinds_authoritative_snapshot_to_fresh_media() -> No
     assert forward_snapshot_projection_digest(rebound) == forward_snapshot_projection_digest(value)
     assert forward_snapshot_matches_attachments(rebound, [destination])
 
+    attached = federation_attachment_payload(destination)
+    assert attached["duration_secs"] == 2 and attached["duration_secs_exact"] == "1.2"
+    assert matches_attested_plaintext_forward(value, rebound, [attached])
+    assert not matches_attested_plaintext_forward(
+        value, dict(rebound, content="changed"), [attached]
+    )
+    assert not matches_attested_plaintext_forward(value, rebound, [dict(attached, duration_secs=3)])
+
     destination.duration_secs = 1.3
     with pytest.raises(ValueError, match="bytes or metadata"):
         rebind_forward_snapshot_attachments(value, [destination])
@@ -276,6 +288,38 @@ def test_plaintext_forward_rebinds_nested_snapshot_media_once() -> None:
     stale = dict(rebound)
     stale["message_snapshots"] = [dict(nested) | {"attachments": value["attachments"]}]
     assert not forward_snapshot_matches_attachments(stale, [destination])
+
+
+def test_signed_nested_voice_forward_round_trips_exact_public_seconds() -> None:
+    source = source_message(encrypted=False)
+    candidate = snapshot(plaintext_sha256=base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode())
+    attachment = cast(list[dict[str, object]], candidate["attachments"])[0]
+    attachment["duration_secs"] = 1.23456
+    source.forward_snapshot = candidate
+    content = build_forward_source_authorization_content(
+        source,
+        [],
+        requester_ref="7@user.example",
+        requester_type="human",
+        source_channel_ref="70@source.example",
+        destination_channel_ref="80@destination.example",
+        destination_encryption_mode="plaintext",
+        source_nsfw=False,
+        nonce="voice-forward",
+    )
+    canonical_json(content)
+    signed = cast(dict[str, Any], content["source_snapshot"])
+    assert signed["message_snapshots"][0]["attachments"][0]["duration_secs"] == "1.23456"
+    validated = validate_forward_source_authorization(content, expected_authority="source.example")
+    public = cast(dict[str, Any], validated["source_snapshot"])
+    assert public["message_snapshots"][0]["attachments"][0]["duration_secs"] == 1.23456
+    assert public == build_forward_snapshot(source, [])
+    assert forward_snapshot_projection_digest(public) == content["source_projection_digest"]
+    assert federation_forward_snapshot(public) == signed
+    for invalid in ("1 ", "NaN", "2e999", "0", "1201", True):
+        signed["message_snapshots"][0]["attachments"][0]["duration_secs"] = invalid
+        with pytest.raises(ValueError):
+            validate_forward_source_authorization(content, expected_authority="source.example")
 
 
 def test_forward_projection_ignores_attachment_transport_but_not_plaintext() -> None:
@@ -785,9 +829,15 @@ async def test_bot_forward_source_access_never_composes_grants_across_installati
         intents={"message_content"},
     )
     session = SimpleNamespace(
-        get=AsyncMock(return_value=source),
+        get=AsyncMock(
+            side_effect=lambda model, _: Guild(unavailable=False) if model is Guild else source
+        ),
         scalar=AsyncMock(return_value=True),
     )
+    permission_check = AsyncMock(
+        return_value=(Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY, None)
+    )
+    monkeypatch.setattr(bots_api, "calculate_permissions", permission_check)
     installation_lookup = AsyncMock(return_value=(source_channel, exact_installation))
     floor_check = AsyncMock(
         return_value=[{"id": str(source.id), "origin_domain": source.origin_domain}]
@@ -849,6 +899,17 @@ async def test_bot_forward_source_access_never_composes_grants_across_installati
     assert resolved == (source, source_channel, exact_installation, participation)
     assert installation_lookup.await_args.args[5] == 77
     assert floor_check.await_count == 4
+    permission_check.return_value = (Permission.VIEW_CHANNEL, None)
+    with pytest.raises(HTTPException) as missing_history:
+        await bots_api.require_bot_forward_source_access(
+            cast(Any, session),
+            settings(),
+            cast(Any, principal),
+            EntityRef("700@source.example"),
+            e2ee_device_id=None,
+            installation_id=77,
+        )
+    assert missing_history.value.detail == {"code": "MISSING_PERMISSIONS"}
 
 
 @pytest.mark.asyncio
@@ -875,7 +936,16 @@ async def test_bot_encrypted_forward_source_must_be_above_exact_history_floor(
         worker=SimpleNamespace(id=5),
         scopes={"messages.history", "messages.content", "attachments.read"},
     )
-    session = SimpleNamespace(get=AsyncMock(return_value=source))
+    session = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=lambda model, _: Guild(unavailable=False) if model is Guild else source
+        )
+    )
+    monkeypatch.setattr(
+        bots_api,
+        "calculate_permissions",
+        AsyncMock(return_value=(Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY, None)),
+    )
     monkeypatch.setattr(
         bots_api,
         "installation_for_channel",

@@ -296,6 +296,7 @@ async def test_terminal_role_icon_is_cleared_and_federated_atomically(
         "guild.role.update",
         {"role": result.dispatch_payload},
         snapshot_required=True,
+        pause_e2ee=False,
     )
 
 

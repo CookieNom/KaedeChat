@@ -54,6 +54,24 @@ def test_http_errors_use_top_level_safe_envelope() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("code", "extra", "expected"),
+    [
+        ("VOICE_ACTIVE_ELSEWHERE", {"active_client": "mobile"}, {"active_client": "mobile"}),
+        ("VOICE_ACTIVE_ELSEWHERE", {"active_client": {"unexpected": True}}, {}),
+        ("INVALID_CREDENTIALS", {"turnstile_required": True}, {"turnstile_required": True}),
+        ("PUSH_RELAY_RATE_LIMITED", {"retry_after": 3}, {"retry_after_ms": 3000}),
+        ("ACCOUNT_SUSPENDED", {"suspended_until": "2026-12-01"}, {"suspended_until": "2026-12-01"}),
+        ("UNRELATED", {"turnstile_required": True, "active_client": "web"}, {}),
+    ],
+)
+def test_public_error_details_are_typed_and_scoped(code, extra, expected):
+    body = response_body(
+        http_exception_response(request(), HTTPException(409, detail={"code": code, **extra}))
+    )
+    assert {k: v for k, v in body.items() if k not in {"code", "message", "trace_id"}} == expected
+
+
 def test_http_errors_replace_invalid_codes_and_messages() -> None:
     response = http_exception_response(
         request(), HTTPException(404, detail={"code": "bad-code", "message": "x" * 600})

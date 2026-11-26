@@ -685,7 +685,7 @@ final class _DeveloperApplicationScreenState
   final _permissionBits = TextEditingController();
   final _commands = TextEditingController();
   DeveloperApplicationDetail? _application;
-  List<DeveloperCredential> _credentials = const [];
+  List<DeveloperCredential>? _credentials;
   List<DeveloperWorker> _workers = const [];
   List<DeveloperInstallTemplate> _templates = const [];
   List<DeveloperInstallation> _installations = const [];
@@ -731,16 +731,28 @@ final class _DeveloperApplicationScreenState
     super.dispose();
   }
 
+  Future<List<DeveloperCredential>?> _loadCredentials() async {
+    try {
+      return await repository.applicationCredentials(widget.application);
+    } on KaedeException catch (error) {
+      if (error.status == 403 &&
+          error.code == 'APPLICATION_PERMISSION_DENIED') {
+        return null;
+      }
+      rethrow;
+    }
+  }
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final results = await Future.wait<Object>([
+      final results = await Future.wait<Object?>([
         repository.developerApplication(widget.application),
         repository.applicationCommands(widget.application),
-        repository.applicationCredentials(widget.application),
+        _loadCredentials(),
         repository.applicationWorkers(widget.application),
         repository.applicationInstallTemplates(widget.application),
         repository.applicationInstallations(widget.application),
@@ -764,7 +776,7 @@ final class _DeveloperApplicationScreenState
         _e2eeModes = application.e2eeModes.toSet();
         _savedSettings = _settingsDraft;
         _commands.text = const JsonEncoder.withIndent('  ').convert(results[1]);
-        _credentials = results[2] as List<DeveloperCredential>;
+        _credentials = results[2] as List<DeveloperCredential>?;
         _workers = results[3] as List<DeveloperWorker>;
         _templates = results[4] as List<DeveloperInstallTemplate>;
         _installations = results[5] as List<DeveloperInstallation>;
@@ -1585,36 +1597,37 @@ final class _DeveloperApplicationScreenState
                             Text(L10n.of(context).ui_publish_commands_667259a6),
                       ),
                     ),
-                    _ResourceSection(
-                      title: L10n.of(context).ui_control_credentials_b091abbc,
-                      actionLabel: 'New credential',
-                      onAction: _createCredential,
-                      children: [
-                        for (final credential in _credentials)
-                          ActionTile(
-                            leading: const Icon(Icons.key_outlined),
-                            title: Text(credential.label),
-                            subtitle: Text(
-                              L10n.of(context).ui_value0_value1_947523d9(
-                                  (credential.tokenHint).toString(),
-                                  (credential.revokedAt == null
-                                          ? 'active'
-                                          : 'revoked')
-                                      .toString()),
+                    if (_credentials case final credentials?)
+                      _ResourceSection(
+                        title: L10n.of(context).ui_control_credentials_b091abbc,
+                        actionLabel: 'New credential',
+                        onAction: _createCredential,
+                        children: [
+                          for (final credential in credentials)
+                            ActionTile(
+                              leading: const Icon(Icons.key_outlined),
+                              title: Text(credential.label),
+                              subtitle: Text(
+                                L10n.of(context).ui_value0_value1_947523d9(
+                                    (credential.tokenHint).toString(),
+                                    (credential.revokedAt == null
+                                            ? 'active'
+                                            : 'revoked')
+                                        .toString()),
+                              ),
+                              trailing: credential.revokedAt == null
+                                  ? ActionButton(
+                                      kind: ActionButtonKind.icon,
+                                      tooltip:
+                                          L10n.of(context).ui_revoke_2219c453,
+                                      onPressed: () =>
+                                          _revokeCredential(credential),
+                                      icon: const Icon(Icons.delete_outline),
+                                    )
+                                  : null,
                             ),
-                            trailing: credential.revokedAt == null
-                                ? ActionButton(
-                                    kind: ActionButtonKind.icon,
-                                    tooltip:
-                                        L10n.of(context).ui_revoke_2219c453,
-                                    onPressed: () =>
-                                        _revokeCredential(credential),
-                                    icon: const Icon(Icons.delete_outline),
-                                  )
-                                : null,
-                          ),
-                      ],
-                    ),
+                        ],
+                      ),
                     _ResourceSection(
                       title: L10n.of(context).ui_worker_keys_5a856f3d,
                       actionLabel: 'Enroll worker',

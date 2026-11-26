@@ -17,6 +17,13 @@ class KaedeSystemCallsPlugin : FlutterPlugin {
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(binding.binaryMessenger, "chat.kaede.mobile/system_calls").apply {
             setMethodCallHandler { call, result ->
+                val context = binding.applicationContext
+                if (call.method == "ready" || call.method == "reset") {
+                    if (call.method == "ready") CallPresentation.ready(context, call.argument<String>("accountKey")!!, this)
+                    else CallPresentation.reset(context)
+                    result.success(null)
+                    return@setMethodCallHandler
+                }
                 val callId = call.argument<String>("callId")
                 if (callId.isNullOrBlank()) {
                     result.error("INVALID_CALL", "A call identifier is required.", null)
@@ -25,12 +32,20 @@ class KaedeSystemCallsPlugin : FlutterPlugin {
                 try {
                     when (call.method) {
                         "showIncoming" -> showIncoming(
-                            binding.applicationContext,
+                            context,
                             callId,
                             call.argument<String>("callerName") ?: "Kaede caller",
+                            call.argument<String>("channelRef")!!, call.argument<String>("accountKey")!!,
                         )
-                        "setActive" -> KaedeConnectionService.setActive(callId)
-                        "end" -> KaedeConnectionService.end(callId)
+                        "deferDecline" -> {
+                            if (CallPresentation.details(context, callId) == null) {
+                                CallPresentation.remember(context, callId, call.argument<String>("callerName") ?: "Kaede caller",
+                                    call.argument<String>("channelRef")!!, call.argument<String>("accountKey")!!)
+                            }
+                            CallPresentation.action(context, callId, "decline")
+                        }
+                        "setActive" -> KaedeConnectionService.setActive(context, callId)
+                        "end" -> KaedeConnectionService.end(context, callId)
                         else -> {
                             result.notImplemented()
                             return@setMethodCallHandler
@@ -45,14 +60,18 @@ class KaedeSystemCallsPlugin : FlutterPlugin {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        CallPresentation.detach(channel)
         channel?.setMethodCallHandler(null)
         channel = null
     }
 
-    private fun showIncoming(context: Context, callId: String, callerName: String) {
-        // Self-managed Telecom is available from Android 8; older devices use
-        // the same call notification without registering a Telecom connection.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    private fun showIncoming(context: Context, callId: String, callerName: String, channelRef: String, accountKey: String) {
+        if (!KaedeConnectionService.begin(context, callId)) return
+        CallPresentation.remember(context, callId, callerName, channelRef, accountKey)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            CallPresentation.show(context, callId)
+            return
+        }
         val telecom = context.getSystemService(TelecomManager::class.java)
         val account = PhoneAccountHandle(
             ComponentName(context, KaedeConnectionService::class.java),
@@ -63,14 +82,13 @@ class KaedeSystemCallsPlugin : FlutterPlugin {
                 .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
                 .build(),
         )
-        if (!KaedeConnectionService.begin(callId)) return
         try {
             telecom.addNewIncomingCall(account, Bundle().apply {
                 putString(KaedeConnectionService.EXTRA_CALL_ID, callId)
                 putString(KaedeConnectionService.EXTRA_CALLER_NAME, callerName)
             })
         } catch (error: Exception) {
-            KaedeConnectionService.end(callId)
+            KaedeConnectionService.end(context, callId)
             throw error
         }
     }

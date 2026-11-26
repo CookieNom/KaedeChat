@@ -1,0 +1,134 @@
+diff --git a/livekit-ffi/src/cabi.rs b/livekit-ffi/src/cabi.rs
+--- a/livekit-ffi/src/cabi.rs
++++ b/livekit-ffi/src/cabi.rs
+@@ -23,6 +23,12 @@
+     server::{self, FfiConfig},
+     FfiError, FfiHandleId, FFI_SERVER, INVALID_HANDLE,
+ };
++
++/// Identifies the Python 1.1.18 FFI with Kaede's HKDF frame-key selection.
++#[no_mangle]
++pub extern "C" fn kaede_livekit_ffi_abi_v1() -> u32 {
++    256
++}
+ 
+ /// # SAFTEY: The "C" callback must be threadsafe and not block
+ pub type FfiCallbackFn = unsafe extern "C" fn(*const u8, usize);
+diff --git a/webrtc-sys/build.rs b/webrtc-sys/build.rs
+--- a/webrtc-sys/build.rs
++++ b/webrtc-sys/build.rs
+@@ -25,6 +25,7 @@
+     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+     let is_desktop = target_os == "linux" || target_os == "windows" || target_os == "macos";
+ 
++    println!("cargo:rerun-if-changed=src/frame_crypto_transformer.cc");
+     println!("cargo:rerun-if-env-changed=LK_DEBUG_WEBRTC");
+     println!("cargo:rerun-if-env-changed=LK_CUSTOM_WEBRTC");
+ 
+@@ -92,6 +93,7 @@
+         "src/adm_proxy.cpp",
+         "src/audio_resampler.cpp",
+         "src/frame_cryptor.cpp",
++        "src/frame_crypto_transformer.cc",
+         "src/global_task_queue.cpp",
+         "src/prohibit_libsrtp_initialization.cpp",
+         "src/apm.cpp",
+@@ -116,6 +118,7 @@
+     builder.includes(&[
+         path::PathBuf::from("./include"),
+         webrtc_include.clone(),
++        webrtc_include.join("third_party/boringssl/src/include"),
+         webrtc_include.join("third_party/abseil-cpp/"),
+         webrtc_include.join("third_party/libyuv/include/"),
+         webrtc_include.join("third_party/libc++/"),
+diff --git a/webrtc-sys/src/frame_crypto_transformer.cc b/webrtc-sys/src/frame_crypto_transformer.cc
+--- a/webrtc-sys/src/frame_crypto_transformer.cc
++++ b/webrtc-sys/src/frame_crypto_transformer.cc
+@@ -14,6 +14,8 @@
+  * limitations under the License.
+  */
+ 
++// The upstream Linux static archive prefixes its BoringSSL symbols.
++#define BORINGSSL_PREFIX LK
+ #include "api/crypto/frame_crypto_transformer.h"
+ 
+ #include <openssl/aes.h>
+@@ -24,10 +26,12 @@
+ #include <openssl/pem.h>
+ #include <openssl/rand.h>
+ 
++#include <algorithm>
+ #include <iomanip>
+ #include <iostream>
+ #include <sstream>
+ #include <string>
++#include <string_view>
+ 
+ #include "absl/container/inlined_vector.h"
+ #include "absl/types/optional.h"
+@@ -147,16 +151,6 @@
+       return true;
+   }
+   return false;
+-}
+-
+-std::string to_uint8_list(std::span<const uint8_t> data) {
+-  std::stringstream ss;
+-  ss << "[";
+-  for (uint8_t b : data) {
+-    ss << static_cast<unsigned>(b) << ",";
+-  }
+-  ss << "]";
+-  return ss.str();
+ }
+ 
+ std::string to_hex(std::span<const uint8_t> data) {
+@@ -261,13 +255,6 @@
+     return ErrorUnexpected;
+   }
+ 
+-  RTC_LOG(LS_INFO) << "secret " << to_uint8_list(secret)
+-                   << " len " << secret.size() << " slat << "
+-                   << to_uint8_list(salt) << " len "
+-                   << salt.size() << "\n derived_key "
+-                   << to_uint8_list(derived_key)
+-                   << " len " << derived_key.size();
+-
+   return Success;
+ }
+ 
+@@ -284,14 +271,6 @@
+     RTC_LOG(LS_ERROR) << "Failed to derive AES key from password.";
+     return ErrorUnexpected;
+   }
+-
+-  RTC_LOG(LS_INFO) << "raw_key "
+-                   << to_uint8_list(raw_key) << " len "
+-                   << raw_key.size() << " slat << "
+-                   << to_uint8_list(salt) << " len "
+-                   << salt.size() << "\n derived_key "
+-                   << to_uint8_list(derived_key)
+-                   << " len " << derived_key.size();
+ 
+   return Success;
+ }
+@@ -384,9 +363,17 @@
+     case KeyDerivationAlgorithm::kPBKDF2:
+       return DerivePBKDF2KeyFromRawKey(key, salt, optional_length_bits,
+                                        derived_key);
+-    case KeyDerivationAlgorithm::kHKDF:
++    case KeyDerivationAlgorithm::kHKDF: {
++      // Initial keys and both ratchet paths share this derivation. Upstream
++      // requests 128 bits for frame keys and 256 bits for ratchet material.
++      constexpr std::string_view kaede_salt = "kaede-livekit-v1";
++      if (optional_length_bits == 128 &&
++          std::equal(salt.begin(), salt.end(), kaede_salt.begin(), kaede_salt.end())) {
++        optional_length_bits = 256;
++      }
+       return DeriveHkdfSha256FromSecret(key, salt, optional_length_bits,
+-                                        derived_key);
++                                       derived_key);
++    }
+     default:
+       break;
+   }

@@ -13,15 +13,34 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from sqlalchemy import exists, func, select
+from sqlalchemy.sql.expression import Exists
 
 from app.auth.security import decrypt_secret
 from app.core.base64url import encode_base64url
 from app.core.settings import Settings
-from app.db.models import PushDevice
+from app.db.models import PushDevice, Session, User
 from app.push.sync import PUSH_SYNC_TOKEN_RE
 
 PUSH_TOKEN_CONTEXT = b"kaede-push-device-v1"
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
+
+
+def active_push_session() -> Exists:
+    return exists(
+        select(Session.id)
+        .join(User, (User.id == Session.user_id) & (User.origin_domain == Session.user_domain))
+        .where(
+            Session.id == PushDevice.session_id,
+            Session.user_id == PushDevice.user_id,
+            Session.user_domain == PushDevice.user_domain,
+            Session.revoked_at.is_(None),
+            Session.expires_at > func.now(),
+            User.disabled_at.is_(None),
+            User.deleted_at.is_(None),
+        )
+        .correlate(PushDevice)
+    )
 
 
 def decrypt_device_token(device: PushDevice, settings: Settings) -> str:

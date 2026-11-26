@@ -203,7 +203,7 @@ from app.chat.payloads import (
     sticker_payload,
     user_payload,
 )
-from app.chat.permissions import get_permissions, require_permissions
+from app.chat.permissions import calculate_permissions, get_permissions, require_permissions
 from app.chat.privacy import blocked_between, lock_dm_policy
 from app.chat.schemas import (
     BanCreate,
@@ -1099,6 +1099,16 @@ async def require_bot_forward_source_access(
         "messages.history",
         installation_id,
     )
+    if source_channel.guild_id is not None:
+        guild = await session.get(Guild, (source_channel.guild_id, source_channel.guild_domain))
+        if guild is None or guild.unavailable:
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+        permissions, _ = await calculate_permissions(
+            session, guild, principal.user, channel=source_channel
+        )
+        required = Permission.VIEW_CHANNEL | Permission.READ_MESSAGE_HISTORY
+        if permissions & required != required:
+            raise HTTPException(status_code=403, detail={"code": "MISSING_PERMISSIONS"})
     participation = await require_bot_channel_e2ee_access(
         session,
         source_channel,
@@ -1134,7 +1144,6 @@ async def require_bot_forward_source_access(
             principal.application.origin_domain,
         ),
         direct_message=source_channel.guild_id is None,
-        interaction_context=source_message.message_type in {20, 23},
     )
     if not can_read_content:
         raise HTTPException(
@@ -3282,6 +3291,7 @@ async def bot_act_on_call(
         updated,
         event,
         changed=changed,
+        actor=identity,
     )
     return bot_call_response(updated, capability)
 

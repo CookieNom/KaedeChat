@@ -180,32 +180,44 @@ it('acknowledges only visible messages in a focused tab while catching up', asyn
   vi.useRealTimers();
 });
 
-it('does not paginate from a programmatic target scroll at the end of a short history page', async () => {
-  vi.stubGlobal(
-    'ResizeObserver',
-    class {
-      observe() {}
-      disconnect() {}
-    }
-  );
-  const newer = vi.fn();
-  component = mount(VirtualMessageList, {
-    target: document.body,
-    props: {
-      items: [{ key: 'message:9007199254741010@remote.example' }],
-      targetKey: 'message:9007199254741010@remote.example',
-      hasLater: true,
-      onLoadLater: newer,
-      renderItem: createRawSnippet(() => ({ render: () => '<p>Remote saved message</p>' }))
-    }
-  });
-  flushSync();
-  await tick();
-  await tick();
-  const viewport = document.querySelector<HTMLElement>('.virtual-message-viewport')!;
-  viewport.dispatchEvent(new Event('scroll'));
-  expect(newer).not.toHaveBeenCalled();
-  viewport.dispatchEvent(new Event('wheel'));
-  viewport.dispatchEvent(new Event('scroll'));
-  expect(newer).toHaveBeenCalledOnce();
-});
+it.each([false, true])(
+  'shows newer controls on a short anchored page only with more history (%s)',
+  async (hasLater) => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+    const newer = vi.fn();
+    component = mount(VirtualMessageList, {
+      target: document.body,
+      props: {
+        items: [{ key: 'message:9007199254741010@remote.example' }],
+        targetKey: 'message:9007199254741010@remote.example',
+        hasLater,
+        onLoadLater: newer,
+        renderItem: createRawSnippet(() => ({ render: () => '<p>Remote saved message</p>' }))
+      }
+    });
+    flushSync();
+    const viewport = document.querySelector<HTMLElement>('.virtual-message-viewport')!;
+    Object.defineProperties(viewport, {
+      clientHeight: { value: 600 },
+      scrollHeight: { value: 600 },
+      // A browser clamps every scroll attempt to zero when the whole page fits.
+      scrollTop: { get: () => 0, set: () => {} }
+    });
+    await tick();
+    await tick();
+    await tick();
+    expect(Boolean(document.querySelector('.new-message-pill'))).toBe(hasLater);
+    expect(Boolean(document.querySelector('.history-button'))).toBe(hasLater);
+    viewport.dispatchEvent(new Event('scroll'));
+    expect(newer).not.toHaveBeenCalled();
+    viewport.dispatchEvent(new Event('wheel'));
+    viewport.dispatchEvent(new Event('scroll'));
+    expect(newer).toHaveBeenCalledTimes(hasLater ? 1 : 0);
+  }
+);

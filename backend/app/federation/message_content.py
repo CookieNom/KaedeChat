@@ -708,7 +708,11 @@ def validate_replicated_rich_projection(
             normalize_domain(str(raw_forward_channel_domain)),
         )
     raw_snapshot = raw.get("forward_snapshot")
-    forward_snapshot = validate_forward_snapshot(raw_snapshot) if raw_snapshot is not None else None
+    forward_snapshot = (
+        validate_forward_snapshot(raw_snapshot, federation=True)
+        if raw_snapshot is not None
+        else None
+    )
     crosspost = False if is_crosspost is None else is_crosspost
     if forward_snapshot is not None and (
         forwarded_ref is None or forwarded_channel_ref is None or crosspost

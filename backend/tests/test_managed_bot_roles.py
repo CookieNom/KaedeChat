@@ -10,7 +10,7 @@ from sqlalchemy import text
 from app.api import management
 from app.chat.hierarchy import require_can_manage_role, require_unmanaged_role
 from app.chat.payloads import role_payload
-from app.chat.schemas import MemberRoleSet
+from app.chat.schemas import MemberRoleSet, RoleUpdate
 from app.core.permissions import Permission
 from app.core.types import EntityRef
 from app.db.models import Role
@@ -43,6 +43,39 @@ async def test_managed_role_permissions_remain_editable_by_owner() -> None:
         require_unmanaged_role(role)
     role.managed = False
     require_unmanaged_role(role)
+
+
+@pytest.mark.parametrize("change,rekey", [({"color": 10}, False), ({"permissions": "0"}, True)])
+async def test_role_edits_pause_only_for_permission_changes(monkeypatch, change, rekey):
+    role = bot_role()
+    guild = SimpleNamespace(
+        id=10, origin_domain=DOMAIN, owner_id=1, owner_domain=DOMAIN, permission_generation=1
+    )
+    actor = SimpleNamespace(id=1, origin_domain=DOMAIN)
+    for name, result in {
+        "proxy_remote_guild_management": None,
+        "local_guild": guild,
+        "guild_role": role,
+        "require_permissions": int(Permission.MANAGE_ROLES | Permission.SEND_MESSAGES),
+        "queue_guild_mutation": None,
+        "publish_e2ee_policy_updates": None,
+        "add_audit_entry": None,
+        "wake_queued_guild_federation": None,
+        "publish_dispatch": None,
+    }.items():
+        monkeypatch.setattr(management, name, AsyncMock(return_value=result))
+    await management.update_role(
+        EntityRef(f"10@{DOMAIN}"),
+        EntityRef(f"20@{DOMAIN}"),
+        RoleUpdate.model_validate(change),
+        SimpleNamespace(user=actor),
+        AsyncMock(),
+        AsyncMock(),
+        AsyncMock(),
+        SimpleNamespace(domain=DOMAIN),
+        if_match=role.updated_at.isoformat(),
+    )
+    assert management.queue_guild_mutation.await_args.kwargs["pause_e2ee"] is rekey
 
 
 @pytest.mark.parametrize("operation", ["assign_role", "remove_role", "delete_role"])

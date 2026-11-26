@@ -357,6 +357,11 @@ def voice_metadata_matches_policy(
     }
 
 
+def require_media_key_support(channel: Channel, supports_aes256: bool) -> None:
+    if channel.encryption_mode == "e2ee" and not supports_aes256:
+        raise HTTPException(status_code=409, detail={"code": "VOICE_CLIENT_UPDATE_REQUIRED"})
+
+
 def require_voice_enabled(settings: Settings) -> None:
     if not settings.voice_enabled:
         raise HTTPException(status_code=503, detail={"code": "VOICE_DISABLED"})
@@ -547,6 +552,7 @@ async def authoritative_guild_token(
         "can_speak": can_speak,
         "can_stream": can_stream,
         "can_priority_speak": can_priority_speak,
+        "video_control_data": actor.account_type == "human",
         "can_listen": can_listen,
         "allow_speak": allow_speak,
         "allow_stream": allow_stream,
@@ -569,7 +575,7 @@ async def authoritative_guild_token(
             can_speak=can_speak,
             can_stream=can_stream,
             can_subscribe=can_listen,
-            can_publish_data=can_priority_speak,
+            can_publish_data=actor.account_type == "human" or can_priority_speak,
         )
     except LiveKitError as exc:
         try:
@@ -657,7 +663,7 @@ async def _apply_authoritative_occupant_transition(
         can_speak=can_speak,
         can_stream=can_stream,
         can_subscribe=can_subscribe,
-        can_publish_data=can_priority_speak,
+        can_publish_data=metadata.get("video_control_data") is True or can_priority_speak,
         metadata=metadata,
     )
     rotated = await rotate_occupant_grant(

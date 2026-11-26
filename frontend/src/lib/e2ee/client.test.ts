@@ -234,6 +234,30 @@ async function senderClient(recoverActivation: boolean) {
   return { client, controls, other, key, getVault: () => vault };
 }
 
+it('exports the peer media key after room rotation and rejects an unexpected MLS epoch', async () => {
+  const { client, other, controls } = await senderClient(false);
+  const groupId = fromBase64url(channel.encryption_group_id);
+  try {
+    await decryptConversationMessages(client, channel, controls);
+    const rotated = { ...channel, encryption_epoch: '7' };
+    const mediaContext = 'kaede-livekit-key-v1\0test';
+    expect(new Uint8Array(await client.exportMediaKey(rotated, mediaContext))).toEqual(
+      other.exportEpochSecret(groupId, 'kaede livekit v1', utf8(mediaContext), 32)
+    );
+    const epoch = vi.spyOn(KaedeMlsClient.prototype, 'groupEpoch').mockReturnValue(2n);
+    try {
+      await expect(client.exportMediaKey(rotated, mediaContext)).rejects.toThrow(
+        'current encrypted call key'
+      );
+    } finally {
+      epoch.mockRestore();
+    }
+  } finally {
+    await client.close();
+    other.free();
+  }
+});
+
 it.each([false, true])(
   'verifies restored text then removes confirmed content from both vaults (recover activation: %s)',
   async (recoverActivation) => {
@@ -281,14 +305,24 @@ it.each([false, true])(
       await expect(client.decryptMessage(channel, message)).resolves.toMatchObject({
         content: 'Hello'
       });
+      io.api.mockClear();
       const [verified] = await decryptConversationMessages(client, channel, [message]);
       expect(verified).toMatchObject({ e2ee_verified: true, decrypted_content: 'Hello' });
+      expect(io.api).not.toHaveBeenCalled();
       await client.close();
       const restored = await KaedeE2EEClient.initialize(user);
       try {
-        await expect(restored.decryptMessage(channel, message)).resolves.toMatchObject({
-          content: 'Hello'
-        });
+        io.api.mockClear();
+        const reopened = await decryptConversationMessages(restored, channel, [
+          ...controls,
+          message
+        ]);
+        expect(reopened.at(-1)).toMatchObject({ e2ee_verified: true, decrypted_content: 'Hello' });
+        const [altered] = await decryptConversationMessages(restored, channel, [
+          { ...message, author_id: '8' }
+        ]);
+        expect(altered.e2ee_verified).toBe(false);
+        expect(io.api).not.toHaveBeenCalled();
         const messageRef = `${message.id}@${message.origin_domain}`;
         for (const state of ['pending_review', 'unavailable'] as const) {
           applyContentSafetyUpdate({
@@ -298,7 +332,7 @@ it.each([false, true])(
             attachment_refs: []
           });
           await restored.purgeSafetyCache();
-          await expect(restored.decryptMessage(channel, message)).resolves.toBeNull();
+          await expect(restored.decryptMessages(channel, [message])).resolves.toEqual([null]);
           const retained = await openAccountVaultState('7@chat.example', key, getVault().envelope);
           expect(
             Object.values(retained.messageCache ?? {}).some(

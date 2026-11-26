@@ -16,6 +16,7 @@ Choose a guide by what you want to do. First-time server setup lives in the
 | Work with boards, lanes, and tasks | [Task tracker](task-tracker.md) |
 | Configure/test calls and screen sharing | [Media quality and call routing](screen-sharing-quality.md) |
 | Configure mobile notification delivery | [Mobile push](mobile-push.md) |
+| Run a local development cluster and checks | [Development guide](development.md) |
 | Build and release native clients | [Desktop](../desktop/README.md) · [Mobile](../mobile/README.md) · [iOS signing](ios-release.md) |
 | Translate the interface | [Localization guide](localization/README.md) |
 | Publish the Python SDK | [SDK release guide](../sdk/python/RELEASING.md) |

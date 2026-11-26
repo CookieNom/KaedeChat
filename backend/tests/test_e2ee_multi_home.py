@@ -143,6 +143,108 @@ async def test_every_guild_access_change_pauses_all_active_encrypted_channels() 
     assert first.encryption_state == second.encryption_state == "rekeying"
 
 
+async def test_permission_inheritance_and_device_roster_rekey_only_affected_rooms(migrate_to):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db.models import E2EERoomOperation, Guild, GuildMember, Instance, User
+
+    connection = await migrate_to("head")
+    domain = "alpha.localhost"
+    now = datetime.now(UTC)
+    async with AsyncSession(bind=connection) as session:
+        session.add(Instance(domain=domain, is_self=False))
+        await session.flush()
+        user = User(
+            id=7,
+            origin_domain=domain,
+            username="member",
+            is_local=False,
+            federation_introduced_by_domain=domain,
+        )
+        session.add(user)
+        await session.flush()
+        guild = Guild(
+            id=1, origin_domain=domain, name="Guild", owner_id=user.id, owner_domain=domain
+        )
+        session.add(guild)
+        await session.flush()
+        session.add(
+            GuildMember(
+                guild_id=1, guild_domain=domain, user_id=7, user_domain=domain, joined_at=now
+            )
+        )
+        rooms = {}
+        for room_id, kind, parent, synced in [
+            (10, 4, None, False),
+            (11, 0, 10, True),
+            (12, 0, 10, False),
+            (13, 11, 11, False),
+            (14, 11, 12, False),
+        ]:
+            room = Channel(
+                id=room_id,
+                origin_domain=domain,
+                guild_id=1,
+                guild_domain=domain,
+                name=f"room-{room_id}",
+                type=kind,
+                parent_id=parent,
+                parent_domain=domain if parent else None,
+                permissions_synced=synced,
+                created_floor_id=room_id,
+            )
+            if kind == 11:
+                room.owner_id, room.owner_domain = user.id, domain
+                room.archived = room.locked = False
+                room.auto_archive_duration = 1440
+                room.archive_timestamp = room.last_activity_at = now
+                room.message_count = room.total_message_sent = room.member_count = 0
+            if parent:
+                room.encryption_mode = "e2ee"
+                room.encryption_state = "active"
+                room.encryption_policy_generation = room.encryption_epoch = 1
+                room.encryption_protocol = "mls10"
+                room.encryption_suite = e2ee_api.E2EE_SUITE_MLS_128
+                room.encryption_group_id = GROUP_ID
+            rooms[room_id] = room
+            session.add(room)
+            await session.flush()
+        paused = await pause_guild_e2ee_for_membership_change(session, guild, rooms[10])
+        assert {room.id for room in paused} == {11, 13}
+        for identifier, member_id in [(12, "8"), (14, "7")]:
+            session.add(
+                E2EERoomOperation(
+                    id="keo_" + str(identifier)[-1] * 43,
+                    authority_domain=domain,
+                    channel_id=identifier,
+                    channel_domain=domain,
+                    actor_id=7,
+                    actor_domain=domain,
+                    sender_device_id=DEVICE_ID,
+                    kind="activate",
+                    status="committed",
+                    request_digest=bytes(32),
+                    activation_request_digest=bytes(32),
+                    base_policy_generation=0,
+                    policy_generation=1,
+                    group_id=GROUP_ID,
+                    participant_refs=[{"id": member_id, "domain": domain}],
+                    prepared_response={},
+                    committed_response={},
+                    prepared_vault_revision=1,
+                    prepared_vault_digest=bytes(32),
+                    committed_at=now,
+                    expires_at=now,
+                )
+            )
+        rooms[11].encryption_state = "active"  # Older room without a recorded roster.
+        await session.flush()
+        paused = await e2ee_membership.pause_local_e2ee_for_device_change(
+            session, _settings(), user
+        )
+        assert {room.id for room in paused} == {11, 14}
+
+
 @pytest.mark.asyncio
 async def test_policy_updates_use_thread_events_for_encrypted_threads(
     monkeypatch: pytest.MonkeyPatch,

@@ -140,9 +140,13 @@
     unseen = 0;
   }
 
+  function isNearBottom(element: HTMLElement) {
+    return element.scrollHeight - element.scrollTop - element.clientHeight <= 24;
+  }
+
   function viewportScrolled() {
     if (!viewport) return;
-    const nextAtBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 24;
+    const nextAtBottom = isNearBottom(viewport);
     updateBottom(nextAtBottom && !hasLater);
     scheduleRead();
     if (nextAtBottom) unseen = 0;
@@ -197,7 +201,7 @@
     initialized = true;
     userScrolling = false;
     window.cancelAnimationFrame(resizeFrame);
-    updateBottom(false);
+    updateBottom(!hasLater && isNearBottom(viewport));
     scheduleRead();
     return true;
   }
@@ -206,10 +210,13 @@
     if (!viewport) return;
     const currentViewport = viewport;
     const resizeObserver = new ResizeObserver(() => {
-      if (!initialized || !atBottom || !viewport) return;
+      if (!initialized || !viewport || hasLater) return;
+      if (!atBottom && !isNearBottom(viewport)) return;
+      updateBottom(true);
       window.cancelAnimationFrame(resizeFrame);
       resizeFrame = window.requestAnimationFrame(pinViewportToBottom);
     });
+    resizeObserver.observe(currentViewport);
     if (contentElement) resizeObserver.observe(contentElement);
     currentViewport.addEventListener('scroll', viewportScrolled);
     window.addEventListener('focus', scheduleRead);

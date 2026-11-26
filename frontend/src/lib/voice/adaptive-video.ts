@@ -1000,6 +1000,10 @@ export class AdaptiveVideoController {
         typeof participant.videoTrackPublications extends Map<string, infer P> ? P[] : never
       >();
       for (const publication of participant.trackPublications.values()) {
+        if (this.encrypted && !publication.isEncrypted) {
+          publication.setSubscribed(false);
+          continue;
+        }
         if (publication.kind === Track.Kind.Audio) {
           publication.setSubscribed(true);
           continue;

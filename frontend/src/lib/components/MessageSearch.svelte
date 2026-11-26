@@ -586,7 +586,7 @@
   {/if}
 
   {#if open}
-    {#if suggestionsOpen || advancedOpen || response}
+    {#if placement === 'dialog' || suggestionsOpen || advancedOpen || loading || response || error}
       <div
         class:advanced-layer={advancedOpen && placement === 'header'}
         class:dialog-backdrop={placement === 'dialog'}
@@ -934,6 +934,9 @@
 
           {#if channel?.dm_previous_id}<p class="partial">
               {$t('dm_privacy_mixed_search')}
+            </p>{/if}
+          {#if loading && !response}<p class="partial" role="status">
+              {$t('ui_searching_c31723ab')}
             </p>{/if}
           {#if error}<p class="error" role="alert">{error}</p>{/if}
           {#if response && !suggestionsOpen && !advancedOpen}

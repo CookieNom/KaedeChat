@@ -211,10 +211,22 @@ async def test_bot_identity_is_typed_and_application_home_routed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_device_registration_proves_provider_identity() -> None:
+@pytest.mark.parametrize("signing_worker", ["2", "3"])
+async def test_device_registration_proves_provider_identity(
+    signing_worker: str,
+) -> None:
     bot = lifecycle_client()
     provider = LifecycleProvider()
-    signing_input = b"registration challenge"
+    signing_input = "\n".join(
+        [
+            "kaede-bot-e2ee-device-registration-v1",
+            "1@apps.example",
+            signing_worker,
+            b64(provider.identity_key),
+            "RcmZIAanV0FfzNf-sRd3EsnoucOOGRcwkI1JjLwFOZw",
+            b64(b"c" * 32),
+        ]
+    ).encode()
     bot.request = AsyncMock(  # type: ignore[method-assign]
         side_effect=[
             {
@@ -228,6 +240,13 @@ async def test_device_registration_proves_provider_identity() -> None:
             device_payload(),
         ]
     )
+
+    if signing_worker != "2":
+        with pytest.raises(E2EEProtocolError, match="registration challenge"):
+            await bot.register_e2ee_device(provider)
+        assert not provider.signed
+        assert bot.request.await_count == 1
+        return
 
     device = await bot.register_e2ee_device(provider)
 
@@ -482,6 +501,7 @@ async def test_offline_control_sync_applies_welcome_then_commit_and_checkpoints(
 
     assert cursor == "2@chat.example"
     assert context.epoch == 2
+    assert context.mls_epoch == 2
     assert provider.group_epoch(b"group") == 2
     assert save.call_count == 2
     checkpoint = next(iter(bot._e2ee_control_checkpoints.values()))  # noqa: SLF001
@@ -493,6 +513,24 @@ async def test_offline_control_sync_applies_welcome_then_commit_and_checkpoints(
     ]
     assert saved == expected
     assert bot._e2ee_control_checkpoints == expected[-1]
+
+
+def test_rotated_room_welcome_separates_channel_and_mls_epochs() -> None:
+    from kaede_bot import process_e2ee_control
+
+    provider = RecoveryProvider()
+    context = InteractionE2EEContext(
+        provider, EntityRef(5, "chat.example"), b"old", 1, 5
+    )
+    for operation in ("welcome", "commit"):
+        raw = control_payload(1, operation=operation, epoch=6)
+        raw["apply"] = operation == "welcome"
+        raw["encryption_policy_generation"] = "2"
+        assert isinstance(raw["e2ee"], dict)
+        raw["e2ee"]["policy_generation"] = "2"
+        process_e2ee_control(context, BotE2EEControlRecord.from_payload(raw))
+    assert (context.epoch, context.mls_epoch) == (6, 1)
+    context.require_current()
 
 
 @pytest.mark.asyncio

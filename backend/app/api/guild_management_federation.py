@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
-from pydantic import ConfigDict, Field, StrictInt, ValidationError, model_validator
+from pydantic import ConfigDict, Field, StrictBool, StrictInt, ValidationError, model_validator
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +21,7 @@ from app.core.model_validation import UnambiguousInputModel
 from app.core.settings import Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.core.types import EntityRef
-from app.db.models import Guild
+from app.db.models import Guild, Webhook
 from app.federation.guild_management import (
     GuildManagementRequest,
     GuildManagementResult,
@@ -131,8 +131,20 @@ class _WebhookCreate(_CreateOrUpdate):
     channel_ref: str = Field(min_length=1, max_length=320)
 
 
+class _WebhookRead(_StrictModel):
+    recover_tokens: StrictBool = False
+
+
+class _WebhookGet(_WebhookRead):
+    resource_id: StrictInt = Field(ge=0)
+
+
 class _WebhookChannel(_StrictModel):
     channel_ref: str = Field(min_length=1, max_length=320)
+
+
+class _WebhookChannelRead(_WebhookChannel, _WebhookRead):
+    pass
 
 
 class _ChannelUpdate(_StrictModel):
@@ -1165,10 +1177,17 @@ async def _dispatch_webhooks(
         )
         status_code = 201
     elif request.operation == "webhook.list":
-        _Empty.model_validate(request.payload)
-        body = await list_webhooks(guild_ref, auth, session, redis, settings)
+        list_payload = _WebhookRead.model_validate(request.payload)
+        body = await list_webhooks(
+            guild_ref,
+            auth,
+            session,
+            redis,
+            settings,
+            recover_tokens=auth.user.account_type != "bot" or list_payload.recover_tokens,
+        )
     elif request.operation == "webhook.list_channel":
-        channel_payload = _WebhookChannel.model_validate(request.payload)
+        channel_payload = _WebhookChannelRead.model_validate(request.payload)
         body = await list_channel_webhooks(
             guild_ref,
             EntityRef(channel_payload.channel_ref),
@@ -1176,9 +1195,10 @@ async def _dispatch_webhooks(
             session,
             redis,
             settings,
+            recover_tokens=auth.user.account_type != "bot" or channel_payload.recover_tokens,
         )
     elif request.operation == "webhook.get":
-        get_payload = _Resource.model_validate(request.payload)
+        get_payload = _WebhookGet.model_validate(request.payload)
         body = await get_webhook(
             EntityRef(str(get_payload.resource_id)),
             None,
@@ -1186,6 +1206,7 @@ async def _dispatch_webhooks(
             session,
             redis,
             settings,
+            recover_token=auth.user.account_type != "bot" or get_payload.recover_tokens,
         )
     elif request.operation == "webhook.update":
         update_payload = _ResourceMutation.model_validate(request.payload)
@@ -2452,6 +2473,45 @@ def _management_dispatcher(operation: str) -> ManagementDispatcher | None:
     )
 
 
+async def require_management_resource_guild(
+    session: AsyncSession, settings: Settings, guild: Guild, request: GuildManagementRequest
+) -> None:
+    from app.api.guilds import guild_channel
+    from app.api.webhooks import target_follower_webhook
+
+    operation, payload = request.operation, request.payload
+    if operation.startswith("tracker."):
+        raw_channel = payload.get("channel_ref")
+    elif operation == "stage_instance.create":
+        raw_channel = _CreateOrUpdate.model_validate(payload).data.get("channel_id")
+    elif operation.startswith("stage_instance."):
+        raw_channel = payload.get("channel_id")
+    elif operation.startswith("webhook.") and operation not in {
+        "webhook.create",
+        "webhook.list",
+        "webhook.list_channel",
+    }:
+        resource_id = payload.get("resource_id")
+        if type(resource_id) is not int:
+            raise HTTPException(status_code=422, detail={"code": "KAED_FED_BAD_REQUEST"})
+        webhook = await session.get(Webhook, resource_id)
+        if webhook is not None:
+            if (webhook.guild_id, webhook.guild_domain) != (guild.id, guild.origin_domain):
+                raise HTTPException(status_code=404, detail={"code": "WEBHOOK_NOT_FOUND"})
+            return
+        follow = await target_follower_webhook(session, resource_id, settings.domain)
+        if follow is None:
+            raise HTTPException(status_code=404, detail={"code": "WEBHOOK_NOT_FOUND"})
+        raw_channel = f"{follow.target_channel_id}@{follow.target_channel_domain}"
+    else:
+        return
+    try:
+        channel_ref = EntityRef(str(raw_channel))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "KAED_FED_BAD_REQUEST"}) from exc
+    await guild_channel(session, settings, _guild_ref(guild.id), channel_ref)
+
+
 @router.post("/_kaede/v1/guilds/{guild_id}/management")
 async def guild_management_authority(
     guild_id: int,
@@ -2487,6 +2547,7 @@ async def guild_management_authority(
                     status_code=400,
                     detail={"code": "KAED_FED_GUILD_MANAGEMENT_OPERATION_UNSUPPORTED"},
                 )
+            await require_management_resource_guild(session, settings, guild, request)
             result = await dispatcher(request, actor, session, redis, snowflake, settings)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc

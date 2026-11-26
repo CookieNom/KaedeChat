@@ -242,17 +242,31 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const safetyRevision = contentSafety.revision;
   let response = await send(path, init);
   if (response.status === 401 && !PUBLIC_AUTH_PATHS.has(path)) {
-    const refresh = await refreshSession();
-    if (refresh === 'ok') {
-      response = await send(path, init);
-    } else if (refresh === 'invalid') {
-      expireBrowserSession();
-    } else {
-      throw new ApiError(
-        'SESSION_REFRESH_UNAVAILABLE',
-        'The server is temporarily unavailable. Try again shortly; your session was not cleared.',
-        503
-      );
+    const detail = normalizeErrorDetail(
+      await response
+        .clone()
+        .json()
+        .catch(() => ({}))
+    );
+    const code = typeof detail.code === 'string' ? detail.code : '';
+    if (isNativeDesktop()) {
+      // Rust has already handled any session refresh before returning this response.
+      if (NATIVE_SESSION_ENDED_CODES.has(code) || code === 'INVALID_REFRESH_TOKEN') {
+        expireBrowserSession();
+      }
+    } else if (code !== 'INVALID_CREDENTIALS' && code !== 'INVALID_MFA') {
+      const refresh = await refreshSession();
+      if (refresh === 'ok') {
+        response = await send(path, init);
+      } else if (refresh === 'invalid') {
+        expireBrowserSession();
+      } else {
+        throw new ApiError(
+          'SESSION_REFRESH_UNAVAILABLE',
+          'The server is temporarily unavailable. Try again shortly; your session was not cleared.',
+          503
+        );
+      }
     }
   }
   if (!response.ok) {

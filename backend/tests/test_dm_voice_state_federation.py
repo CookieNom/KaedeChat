@@ -21,6 +21,7 @@ from app.api.calls import (
 from app.api.voice import livekit_webhook
 from app.core.settings import Settings
 from app.core.types import EntityRef
+from app.db.models import Channel, DMConversation, User
 from app.federation.security import FederationPrincipal
 from app.voice.background import replicate_room
 from app.voice.schemas import (
@@ -455,13 +456,14 @@ async def test_dm_livekit_join_records_the_remote_authority_session(
     redis.get.return_value = None
     redis.set.return_value = True
     session = AsyncMock()
-    session.get.return_value = SimpleNamespace(
-        id=34,
-        origin_domain="beta.localhost",
-        encryption_mode="plaintext",
-        user_limit=0,
-        account_type="human",
-    )
+    caller = User(id=78, origin_domain="alpha.localhost", is_local=True, account_type="human")
+    actor = User(id=90, origin_domain="beta.localhost", is_local=False, account_type="human")
+    channel = Channel(id=34, origin_domain="beta.localhost", encryption_mode="plaintext", type=1)
+    conversation = DMConversation(id=34, origin_domain="beta.localhost", type="direct")
+    rows = {Channel: channel, User: actor, DMConversation: conversation}
+    session.get.side_effect = lambda model, _key: rows[model]
+    session.scalars.return_value = [caller, actor]
+    session.scalar.return_value = False  # Neither participant blocks the other.
     set_session = AsyncMock()
     publish = AsyncMock()
     enqueue = AsyncMock(return_value=True)
@@ -474,7 +476,7 @@ async def test_dm_livekit_join_records_the_remote_authority_session(
         AsyncMock(
             return_value={
                 **call_record(authority="alpha.localhost"),
-                "participants": ["90@beta.localhost"],
+                "caller": "78@alpha.localhost",
             }
         ),
     )

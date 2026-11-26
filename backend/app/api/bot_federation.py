@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -50,6 +50,7 @@ from app.bots.target_contract import target_policy_allows
 from app.bots.worker_targets import worker_target_allowed
 from app.core.base64url import decode_base64url, encode_base64url
 from app.core.bot_intents import SUPPORTED_BOT_INTENTS
+from app.core.json_limits import MAX_SAFE_JSON_INTEGER
 from app.core.model_validation import UnambiguousInputModel
 from app.core.settings import DOMAIN_RE, Settings, get_settings
 from app.core.snowflake import SnowflakeGenerator
@@ -74,6 +75,7 @@ from app.federation.network import (
     decode_federation_response_json,
     normalize_domain,
 )
+from app.federation.numbers import read_wire_number
 from app.federation.replication import profile_from_user, upsert_remote_user
 from app.federation.schemas import RemoteUserProfile
 from app.federation.security import (
@@ -344,6 +346,43 @@ class ManifestWorker(StrictModel):
         return self
 
 
+def _manifest_options(options: object, *, encode: bool) -> object:
+    """Translate only NUMBER option values; string choices can contain numeric text."""
+    if not isinstance(options, list):
+        return options
+
+    def number(value: object) -> object:
+        if encode:
+            if isinstance(value, float) or (
+                type(value) is int and abs(value) > MAX_SAFE_JSON_INTEGER
+            ):
+                return str(value)
+            return value
+        return read_wire_number(value) if isinstance(value, str) else value
+
+    result: list[object] = []
+    for raw in options:
+        if not isinstance(raw, dict):
+            result.append(raw)
+            continue
+        option = dict(raw)
+        if "options" in option:
+            option["options"] = _manifest_options(option["options"], encode=encode)
+        if option.get("type") == "number":
+            for field in ("min_value", "max_value"):
+                if field in option:
+                    option[field] = number(option[field])
+            if isinstance(option.get("choices"), list):
+                option["choices"] = [
+                    {**choice, "value": number(choice["value"])}
+                    if isinstance(choice, dict) and "value" in choice
+                    else choice
+                    for choice in option["choices"]
+                ]
+        result.append(option)
+    return result
+
+
 class ManifestCommand(CommandDefinition):
     id: str
     contexts: list[Literal["guild", "bot_dm", "private_channel"]] = Field(
@@ -352,6 +391,11 @@ class ManifestCommand(CommandDefinition):
     integration_types: list[Literal["guild_install", "user_install"]] = Field(
         min_length=1, max_length=2
     )
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def read_options(cls, options: object) -> object:
+        return _manifest_options(options, encode=False)
 
     @field_validator("id")
     @classmethod
@@ -431,6 +475,12 @@ class BotManifest(StrictModel):
     # emoji federation. The home instance remains authoritative for the media;
     # mirrors only need this signed metadata to validate bot-authored tokens.
     emojis: list[ManifestApplicationEmoji] = Field(default_factory=list, max_length=2_000)
+
+    def federation_payload(self) -> dict[str, Any]:
+        value = self.model_dump(mode="json")
+        for command in value["commands"]:
+            command["options"] = _manifest_options(command["options"], encode=True)
+        return value
 
     @model_validator(mode="after")
     def valid_command_set(self) -> BotManifest:
@@ -813,7 +863,7 @@ async def federation_bot_manifest(
         settings,
         BOT_MANIFEST_EVENT,
         bot,
-        manifest.model_dump(mode="json"),
+        manifest.federation_payload(),
     )
 
 

@@ -62,6 +62,7 @@ def decode_federation_response_json(
     response: httpx.Response,
     *,
     max_response_bytes: int = MAX_FEDERATION_JSON_RESPONSE_BYTES,
+    allow_floats: bool = False,
 ) -> object:
     """Strictly decode one bounded JSON document returned by a federation peer.
 
@@ -76,7 +77,9 @@ def decode_federation_response_json(
     if len(content) > max_response_bytes:
         raise FederationNetworkError("peer JSON response exceeded the size limit")
     try:
-        return strict_json_loads(content, label="federation peer response")
+        return strict_json_loads(
+            content, label="federation peer response", allow_floats=allow_floats
+        )
     except ValueError as exc:
         raise FederationNetworkError("peer returned invalid federation JSON") from exc
 
@@ -355,6 +358,11 @@ async def peer_http_client(
         trust_env=False,
         transport=transport,
     )
+
+
+async def peer_advertises(session: AsyncSession, domain: str, capability: str) -> bool:
+    instance = await session.get(Instance, domain)
+    return instance is not None and capability in (instance.capabilities or [])
 
 
 async def ensure_peer(

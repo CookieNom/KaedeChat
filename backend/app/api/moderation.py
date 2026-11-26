@@ -1380,6 +1380,8 @@ async def ban_instance(
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("instance_ban.put")
     )
+    if domain == guild.owner_domain:
+        raise HTTPException(status_code=403, detail={"code": "OWNER_IMMUNE"})
     expires_at = future_expiry(payload.expires_at, code="INSTANCE_BAN_EXPIRY")
     reason = normalize_audit_reason(header_reason or payload.reason)
 

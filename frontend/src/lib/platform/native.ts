@@ -71,6 +71,7 @@ export interface NativeVoiceStatus {
   state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'media_error' | 'failed';
   message?: string;
   video_degraded?: boolean;
+  move_session_id?: string | null;
   room?: string;
   can_speak?: boolean;
   can_stream?: boolean;
@@ -79,6 +80,11 @@ export interface NativeVoiceStatus {
   muted?: boolean;
   deafened?: boolean;
   input_level?: number;
+  speech_frames?: number;
+  remote_participants?: Record<
+    string,
+    { name: string; speaking: boolean; microphone: boolean; camera: boolean; screen: boolean }
+  >;
   priority_speakers?: string[];
   listening_volumes?: Record<string, [number, number]>;
 }
@@ -126,6 +132,9 @@ let nativeInitialization: Promise<NativeSessionBootstrap> | null = null;
 const LAST_NATIVE_ROUTE = 'kaede.native.last-route';
 
 interface TauriGlobal {
+  event?: {
+    listen<T>(name: string, listener: (event: { payload: T }) => void): Promise<() => void>;
+  };
   core: {
     invoke<T>(command: string, args?: unknown): Promise<T>;
   };

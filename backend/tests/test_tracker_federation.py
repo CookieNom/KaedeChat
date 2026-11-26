@@ -343,7 +343,7 @@ async def test_tracker_snapshot_rejects_unrelated_peer_before_visibility_lookup(
     monkeypatch.setattr(federation_api, "require_origin_guild_member", unrelated)
     monkeypatch.setattr(
         federation_api,
-        "cached_visible_guild_channels_for_origin",
+        "visible_guild_channels_for_origin",
         visibility,
     )
     with pytest.raises(HTTPException) as exc:

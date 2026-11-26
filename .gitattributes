@@ -2,3 +2,5 @@
 mobile/ios/Podfile text eol=lf
 # Patches are applied to LF-only native source checkouts on every runner.
 *.patch text eol=lf
+# Preserve the original bytes of pnpm dependency patches, including mixed line endings.
+frontend/patches/*.patch -text !eol

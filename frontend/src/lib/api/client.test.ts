@@ -27,7 +27,10 @@ describe('API session recovery', () => {
   const browserWindow = new EventTarget();
   const storage = new MemoryStorage();
 
-  beforeEach(() => {
+  let api: typeof import('./client').api;
+  let ApiError: typeof import('./client').ApiError;
+
+  beforeEach(async () => {
     vi.resetModules();
     vi.stubGlobal('window', browserWindow);
     vi.stubGlobal('sessionStorage', storage);
@@ -36,6 +39,7 @@ describe('API session recovery', () => {
         request: (_name: string, callback: () => Promise<unknown>) => callback()
       }
     });
+    ({ api, ApiError } = await import('./client'));
   });
 
   afterEach(() => {
@@ -51,7 +55,6 @@ describe('API session recovery', () => {
       .mockResolvedValueOnce(jsonResponse({ expires_in: 900 }))
       .mockResolvedValueOnce(jsonResponse({ id: '1' }));
     vi.stubGlobal('fetch', fetchMock);
-    const { api } = await import('./client');
 
     await expect(api<{ id: string }>('/guilds/1')).resolves.toEqual({ id: '1' });
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
@@ -63,9 +66,8 @@ describe('API session recovery', () => {
   });
 
   it('forces same-origin cookie credentials and the web CSRF header', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ ok: true }));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);
-    const { api } = await import('./client');
 
     await api('/users/@me/settings', {
       method: 'PATCH',
@@ -74,6 +76,7 @@ describe('API session recovery', () => {
       body: JSON.stringify({ theme: 'dark' })
     });
 
+    expect(fetchMock).toHaveBeenCalledOnce();
     const [, request] = fetchMock.mock.calls[0];
     const headers = new Headers(request?.headers);
     expect(request?.credentials).toBe('include');
@@ -92,7 +95,6 @@ describe('API session recovery', () => {
       });
     });
     vi.stubGlobal('fetch', fetchMock);
-    const { api } = await import('./client');
 
     const request = api('/users/@me', { signal: controller.signal });
     controller.abort();
@@ -135,7 +137,6 @@ describe('API session recovery', () => {
         return count === 1 ? jsonResponse({}, 401) : jsonResponse({ path: url });
       })
     );
-    const { api } = await import('./client');
     const pending = Promise.all([api('/guilds/1'), api('/guilds/2')]);
     await Promise.all([refreshStarted, originalRequestsStarted]);
     expect(refreshCalls).toBe(1);
@@ -158,7 +159,6 @@ describe('API session recovery', () => {
         .mockResolvedValueOnce(jsonResponse({}, 401))
         .mockResolvedValueOnce(jsonResponse({}, 401))
     );
-    const { api, ApiError } = await import('./client');
 
     await expect(api('/guilds/1')).rejects.toBeInstanceOf(ApiError);
     expect(storage.getItem('kaede.gateway.session')).toBeNull();
@@ -178,7 +178,6 @@ describe('API session recovery', () => {
         .mockResolvedValueOnce(jsonResponse({}, 401))
         .mockResolvedValueOnce(jsonResponse({}, 503))
     );
-    const { api } = await import('./client');
 
     await expect(api('/guilds/1')).rejects.toMatchObject({
       code: 'SESSION_REFRESH_UNAVAILABLE',
@@ -194,7 +193,6 @@ describe('API session recovery', () => {
     [{ detail: 'Forbidden' }, 'REQUEST_FAILED']
   ])('turns permission responses into useful messages: %j', async (body, code) => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(body, 403)));
-    const { api } = await import('./client');
 
     await expect(api('/channels/1/messages')).rejects.toMatchObject({
       code,
@@ -213,7 +211,6 @@ describe('API session recovery', () => {
         })
       )
     );
-    const { api } = await import('./client');
 
     await expect(api('/users/@me')).rejects.toMatchObject({
       code: 'INVALID_SERVER_RESPONSE',
@@ -244,7 +241,6 @@ describe('API session recovery', () => {
         })
       )
     );
-    const { api } = await import('./client');
 
     await expect(api('/channels/1/messages')).resolves.toEqual({
       id: '1',
@@ -270,7 +266,6 @@ describe('API session recovery', () => {
         )
       )
     );
-    const { api } = await import('./client');
 
     await expect(api('/attachments')).rejects.toMatchObject({
       code: 'MEDIA_STORAGE_UNAVAILABLE',
@@ -286,7 +281,6 @@ describe('API session recovery', () => {
     response.headers.set('Retry-After', '4');
     response.headers.set('X-Kaede-Trace-Id', 'ffeeddccbbaa99887766554433221100');
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(response));
-    const { api } = await import('./client');
 
     await expect(api('/guilds/remote')).rejects.toMatchObject({
       retryAfterMs: 4_000,
@@ -313,7 +307,6 @@ describe('API session recovery', () => {
       __TAURI__: { core: { invoke } },
       dispatchEvent: vi.fn()
     });
-    const { api } = await import('./client');
 
     await expect(api('/guilds/1')).rejects.toMatchObject({
       code: 'NATIVE_CREDENTIALS_LOCKED',
@@ -323,35 +316,25 @@ describe('API session recovery', () => {
   });
 
   it.each([
-    ['signs out when the server rejects the refresh token', 'INVALID_REFRESH_TOKEN', 401, true],
-    ['signs out when the desktop discarded the session', 'NOT_AUTHENTICATED', 0, true],
-    ['keeps the session when the server is unreachable', 'NATIVE_TRANSPORT_ERROR', 0, false]
-  ])('desktop refresh %s', async (_case, refreshCode, refreshStatus, signsOut) => {
-    const failures: Record<string, { code: string; status: number }> = {
-      '/guilds/1': { code: 'NOT_AUTHENTICATED', status: 0 },
-      '/users/@me': { code: 'INVALID_REFRESH_TOKEN', status: 401 },
-      '/auth/refresh': { code: refreshCode, status: refreshStatus }
-    };
-    const invoke = vi.fn(async (command: string, args?: { request: { path: string } }) => {
+    ['INVALID_REFRESH_TOKEN', 401, true],
+    ['NOT_AUTHENTICATED', 0, true],
+    ['INVALID_CREDENTIALS', 401, false],
+    ['INVALID_MFA', 401, false],
+    ['NATIVE_TRANSPORT_ERROR', 0, false]
+  ])('handles native %s without repeating the request', async (code, status, signsOut) => {
+    const invoke = vi.fn(async (command: string) => {
       if (command === 'native_restore_session') return { instance: null, authenticated: true };
-      const failure = command === 'native_api_request' && failures[args?.request.path ?? ''];
-      if (failure) throw { ...failure, message: 'Request failed.', detail: null };
-      throw new Error('Unexpected native command');
+      throw { code, status, message: 'Request failed.', detail: null };
     });
     const dispatchEvent = vi.fn();
     vi.stubGlobal('window', { __TAURI__: { core: { invoke } }, dispatchEvent });
-    const { api } = await import('./client');
-
-    const request = api('/guilds/1');
-    if (signsOut) {
-      await expect(request).rejects.toMatchObject({ status: 401 });
-      expect(dispatchEvent).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'kaede:session-expired' })
-      );
-    } else {
-      await expect(request).rejects.toMatchObject({ code: 'SESSION_REFRESH_UNAVAILABLE' });
-      expect(dispatchEvent).not.toHaveBeenCalled();
-    }
+    await expect(api('/guilds/1')).rejects.toMatchObject({ code });
+    expect(invoke.mock.calls.filter(([command]) => command === 'native_api_request')).toHaveLength(
+      1
+    );
+    expect(dispatchEvent.mock.calls.some(([event]) => event.type === 'kaede:session-expired')).toBe(
+      signsOut
+    );
   });
 
   it('forwards desktop audit reasons and raw If-Match through the native allowlist boundary', async () => {
@@ -368,7 +351,6 @@ describe('API session recovery', () => {
       __TAURI__: { core: { invoke } },
       dispatchEvent: vi.fn()
     });
-    const { api } = await import('./client');
 
     await api('/guilds/1', {
       method: 'PATCH',
@@ -406,7 +388,6 @@ describe('API session recovery', () => {
       __TAURI__: { core: { invoke } },
       dispatchEvent: vi.fn()
     });
-    const { api } = await import('./client');
 
     await expect(api('/guilds/1')).rejects.toMatchObject({
       code: 'NATIVE_TRANSPORT_ERROR',
@@ -426,7 +407,6 @@ describe('API session recovery', () => {
         .mockResolvedValueOnce(jsonResponse({}, 401))
         .mockResolvedValueOnce(jsonResponse({}, 429))
     );
-    const { api } = await import('./client');
 
     await expect(api('/guilds/1')).rejects.toMatchObject({
       code: 'SESSION_REFRESH_UNAVAILABLE',

@@ -94,6 +94,7 @@ pub struct CaptureGate {
     use_push_to_talk: AtomicBool,
     vad_threshold_bits: AtomicU32,
     level_bits: AtomicU32,
+    speech_frames: AtomicU32,
     vad_hangover: AtomicU32,
 }
 
@@ -128,12 +129,18 @@ impl CaptureGate {
         f32::from_bits(self.level_bits.load(Ordering::Acquire))
     }
 
+    /// Counts audible outgoing frames so UI polls can detect short syllables.
+    #[must_use]
+    pub fn speech_frames(&self) -> u32 {
+        self.speech_frames.load(Ordering::Relaxed)
+    }
+
     fn permits(&self, level: f32) -> bool {
         self.level_bits.store(level.to_bits(), Ordering::Release);
         if self.muted.load(Ordering::Acquire) {
             return false;
         }
-        if self.use_push_to_talk.load(Ordering::Acquire) {
+        let permitted = if self.use_push_to_talk.load(Ordering::Acquire) {
             self.push_to_talk.load(Ordering::Acquire)
                 || self.priority_push_to_talk.load(Ordering::Acquire)
         } else {
@@ -149,7 +156,11 @@ impl CaptureGate {
                     })
                     .is_ok()
             }
+        };
+        if permitted && level >= 0.015 {
+            self.speech_frames.fetch_add(1, Ordering::Relaxed);
         }
+        permitted
     }
 }
 
@@ -1180,8 +1191,11 @@ mod tests {
             ..CaptureSettings::default()
         });
         assert!(!push_to_talk.permits(0.5));
+        assert_eq!(push_to_talk.speech_frames(), 0);
         push_to_talk.set_push_to_talk(true);
         assert!(push_to_talk.permits(0.5));
+        assert!(push_to_talk.permits(0.0));
+        assert_eq!(push_to_talk.speech_frames(), 1);
         push_to_talk.set_push_to_talk(false);
         push_to_talk.set_priority_push_to_talk(true);
         assert!(push_to_talk.permits(0.1));
@@ -1190,6 +1204,7 @@ mod tests {
         assert!(push_to_talk.permits(0.1));
         push_to_talk.set_muted(true);
         assert!(!push_to_talk.permits(1.0));
+        assert_eq!(push_to_talk.speech_frames(), 3);
     }
 
     #[test]

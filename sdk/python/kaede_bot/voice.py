@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import hashlib
 import re
 from collections.abc import Awaitable, Callable
@@ -419,6 +420,7 @@ class VoiceE2EEContext:
     channel_ref: EntityRef
     group_id: bytes
     epoch: int
+    mls_epoch: int | None = None
     _invalidated: asyncio.Event = field(
         default_factory=asyncio.Event, init=False, repr=False
     )
@@ -436,6 +438,12 @@ class VoiceE2EEContext:
             or not 0 <= self.epoch <= (1 << 64) - 1
         ):
             raise ValueError("bot voice MLS epoch is invalid")
+        if self.mls_epoch is None:
+            object.__setattr__(self, "mls_epoch", self.epoch)
+        elif (
+            type(self.mls_epoch) is not int or not 0 <= self.mls_epoch <= (1 << 64) - 1
+        ):
+            raise ValueError("bot voice MLS group epoch is invalid")
 
     @property
     def invalidated(self) -> bool:
@@ -462,7 +470,7 @@ class VoiceE2EEContext:
             except Exception:
                 self.invalidate("bot MLS provider became unavailable")
                 break
-            if current_epoch != self.epoch:
+            if current_epoch != self.mls_epoch:
                 self.invalidate("bot MLS voice group epoch changed")
                 break
             try:
@@ -495,7 +503,7 @@ class VoiceE2EEContext:
         except Exception as exc:
             self.invalidate("bot MLS provider became unavailable")
             raise RuntimeError("bot MLS provider became unavailable") from exc
-        if provider_epoch != self.epoch:
+        if provider_epoch != self.mls_epoch:
             self.invalidate("bot MLS voice group epoch changed")
             raise ValueError("bot MLS provider state is stale for this voice grant")
 
@@ -514,11 +522,11 @@ class VoiceE2EEContext:
             except Exception as exc:
                 self.invalidate("bot MLS provider became unavailable")
                 raise RuntimeError("bot MLS provider became unavailable") from exc
-            if provider_epoch != self.epoch:
+            if provider_epoch != self.mls_epoch:
                 self.invalidate("bot MLS voice group epoch changed")
             if (
                 len(secret) != MEDIA_KEY_BYTES
-                or provider_epoch != self.epoch
+                or provider_epoch != self.mls_epoch
                 or self.invalidated
             ):
                 raise RuntimeError(
@@ -566,10 +574,49 @@ class _PublishedVideo:
     height: int
 
 
-class LiveKitTransport:
-    """Optional LiveKit transport, imported only when voice is used."""
+def _require_kaede_frame_keys(rtc: Any) -> None:
+    if rtc.__version__ != "1.1.18":
+        raise RuntimeError("Kaede encrypted voice requires livekit==1.1.18")
 
-    def __init__(self) -> None:
+    from livekit.rtc._ffi_client import FfiClient
+
+    # LiveKit shares one native core across rooms. Check the handle it actually
+    # loaded, including when another room initialized it earlier in this process.
+    marker = getattr(FfiClient.instance._ffi_lib, "kaede_livekit_ffi_abi_v1", None)
+    if marker is not None:
+        marker.argtypes = []
+        marker.restype = ctypes.c_uint32
+        if marker() == 256:
+            return
+    raise RuntimeError(
+        "Kaede encrypted voice requires the matching 256-bit LiveKit native library. "
+        "Set LIVEKIT_LIB_PATH to the Kaede library before starting the bot."
+    )
+
+
+def _kaede_publication_supported(rtc: Any, publication: Any) -> bool:
+    if publication.encryption_type != rtc.EncryptionType.GCM:
+        return False
+    if publication.kind == rtc.TrackKind.KIND_AUDIO:
+        return True
+    if publication.kind != rtc.TrackKind.KIND_VIDEO:
+        return False
+    # The publisher's managed VP8 name is available even before MIME negotiation.
+    named_vp8 = publication.name in (
+        "kaede.video.v1:camera:vp8",
+        "kaede.video.v1:screen_share:vp8",
+    )
+    if publication.name.startswith("kaede.video.v1:") and not named_vp8:
+        return False
+    mime = publication.mime_type.partition(";")[0].strip().lower()
+    return mime == "video/vp8" if mime else named_vp8
+
+
+class LiveKitTransport:
+    """Pass kaede_e2ee=True to use the Kaede LiveKit core for encrypted calls."""
+
+    def __init__(self, *, kaede_e2ee: bool = False) -> None:
+        self._kaede_e2ee = kaede_e2ee
         self._room: Any = None
         self._source: Any = None
         self._listener: AudioListener | None = None
@@ -617,6 +664,12 @@ class LiveKitTransport:
             return str(raw if raw is not None else "unknown").lower()
 
     async def connect(self, grant: VoiceGrant, listener: AudioListener) -> None:
+        if grant.e2ee and not self._kaede_e2ee:
+            self.clear_e2ee()
+            raise RuntimeError(
+                "Encrypted voice requires LiveKitTransport(kaede_e2ee=True) "
+                "and LIVEKIT_LIB_PATH set to the Kaede 256-bit native library."
+            )
         try:
             from livekit import rtc  # type: ignore[import-untyped]
         except ImportError as exc:
@@ -639,12 +692,16 @@ class LiveKitTransport:
                 # subscribed or locally-published frame can flow. `encryption`
                 # is the current API; the deprecated `e2ee` alias is avoided.
                 e2ee_options = rtc.E2EEOptions()
+                _require_kaede_frame_keys(rtc)
+                e2ee_options.key_provider_options.key_derivation_function = (
+                    rtc.KeyDerivationFunction.HKDF
+                )
                 e2ee_options.key_provider_options.shared_key = bytes(
                     self._configured_media_key or b""
                 )
                 e2ee_options.key_provider_options.ratchet_salt = MEDIA_RATCHET_SALT
             room_options = rtc.RoomOptions(
-                auto_subscribe=grant.can_listen,
+                auto_subscribe=grant.can_listen and not grant.e2ee,
                 encryption=e2ee_options,
             )
             room = rtc.Room()
@@ -654,7 +711,9 @@ class LiveKitTransport:
             def on_track_subscribed(
                 track: Any, publication: Any, participant: Any
             ) -> None:
-                if not grant.can_listen:
+                if not grant.can_listen or (
+                    grant.e2ee and not _kaede_publication_supported(rtc, publication)
+                ):
                     return
                 kind = getattr(track, "kind", None)
                 if kind == rtc.TrackKind.KIND_AUDIO:
@@ -703,6 +762,16 @@ class LiveKitTransport:
                 manager = room.e2ee_manager
                 if not manager.enabled or manager.key_provider is None:
                     raise RuntimeError("LiveKit did not enable its E2EE key provider")
+            if grant.e2ee and grant.can_listen:
+
+                @room.on("track_published")
+                def subscribe(publication: Any, _participant: Any) -> None:
+                    if _kaede_publication_supported(rtc, publication):
+                        publication.set_subscribed(True)
+
+                for participant in room.remote_participants.values():
+                    for publication in participant.track_publications.values():
+                        subscribe(publication, participant)
         except BaseException:
             self._room = None
             if room is not None:
@@ -730,8 +799,8 @@ class LiveKitTransport:
             track = rtc.LocalAudioTrack.create_audio_track("kaede-bot", self._source)
             options = rtc.TrackPublishOptions()
             options.source = rtc.TrackSource.SOURCE_MICROPHONE
-            options.audio_encoding = rtc.AudioEncoding(
-                max_bitrate=self._grant.bitrate if self._grant is not None else 64_000
+            options.audio_encoding.max_bitrate = (
+                self._grant.bitrate if self._grant is not None else 64_000
             )
             await self._room.local_participant.publish_track(track, options)
         raw = rtc.AudioFrame(
@@ -783,8 +852,12 @@ class LiveKitTransport:
                     frame.height,
                     is_screencast=frame.source == "screen_share",
                 )
-                track = rtc.LocalVideoTrack.create_video_track(frame.source, source)
                 options = rtc.TrackPublishOptions()
+                name = frame.source
+                if self._grant is not None and self._grant.e2ee:
+                    options.video_codec = rtc.VideoCodec.VP8
+                    name = f"kaede.video.v1:{frame.source}:vp8"
+                track = rtc.LocalVideoTrack.create_video_track(name, source)
                 options.source = (
                     rtc.TrackSource.SOURCE_CAMERA
                     if frame.source == "camera"

@@ -14,6 +14,7 @@ from app.core.settings import Settings
 from app.db.bot_models import BotInstallation
 from app.db.models import (
     Attachment,
+    AttachmentFederationRecipient,
     Channel,
     FederationEvent,
     Guild,
@@ -77,6 +78,66 @@ async def test_remote_tombstone_wins_when_message_create_arrives_later() -> None
 
     assert rendered == []
     assert added == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "disclosed, upload_channel, allowed", [(False, 3, False), (True, 4, False), (True, 3, True)]
+)
+async def test_replication_binds_only_a_disclosed_local_upload_for_its_channel(
+    monkeypatch, disclosed, upload_channel, allowed
+) -> None:
+    row = Attachment(
+        id=1,
+        origin_domain=LOCAL_DOMAIN,
+        uploader_id=2,
+        uploader_domain=LOCAL_DOMAIN,
+        filename="pic.png",
+        content_type="image/png",
+        size=5,
+        purpose="attachment",
+        encryption_mode="plaintext",
+        finalized_at=datetime.now(UTC),
+        upload_channel_id=upload_channel,
+        upload_channel_domain=REMOTE_DOMAIN,
+    )
+    msg = Message(id=5, origin_domain=REMOTE_DOMAIN, channel_id=3, channel_domain=REMOTE_DOMAIN)
+    author = SimpleNamespace(id=2, origin_domain=LOCAL_DOMAIN)
+
+    async def lookup(model, key, **kwargs):
+        if model is Attachment:
+            assert kwargs["with_for_update"]
+            return row
+        if model is AttachmentFederationRecipient and disclosed:
+            assert key == (1, LOCAL_DOMAIN, REMOTE_DOMAIN)
+            return object()
+        return None
+
+    monkeypatch.setattr(
+        "app.federation.replication.retained_media_delete_events", AsyncMock(return_value=[])
+    )
+    call = replicate_message_attachments(
+        cast(Any, SimpleNamespace(get=lookup)),
+        settings(),
+        msg,
+        cast(Any, author),
+        [
+            {
+                "id": "1",
+                "origin_domain": LOCAL_DOMAIN,
+                "filename": "pic.png",
+                "content_type": "image/png",
+                "size": 5,
+            }
+        ],
+    )
+    if allowed:
+        assert await call == [row]
+        assert (row.message_id, row.message_domain) == (5, REMOTE_DOMAIN)
+    else:
+        with pytest.raises(ValueError, match="not disclosed"):
+            await call
+        assert row.message_id is None
 
 
 @pytest.mark.asyncio

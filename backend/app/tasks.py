@@ -56,6 +56,12 @@ from app.chat.payloads import (
 from app.chat.permissions import get_permissions
 from app.chat.postcommit import publish_committed_dispatches
 from app.chat.presence import decode_presence_state, publish_cached_presence
+from app.chat.presence_control import (
+    PRESENCE_TRANSITIONS_SEEDED_KEY,
+    notifications_suppressed_by_presence,
+    process_due_presence_transitions,
+    seed_presence_transitions,
+)
 from app.core.cache_warmup import warm_identify_cache
 from app.core.logging import configure_logging
 from app.core.metrics import observed_job
@@ -195,12 +201,13 @@ from app.push.relay import (
     wake_mac,
 )
 from app.push.service import (
+    active_push_session,
     decrypt_device_token,
     fcm_client,
     relay_apns_client,
     relay_fcm_client,
 )
-from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync
+from app.push.sync import PushSyncEvent, discard_push_sync, issue_push_sync, load_push_sync
 from app.scheduled_events.service import advance_scheduled_event_lifecycle
 from app.search.meili import (
     SearchUnavailable,
@@ -214,6 +221,7 @@ from app.voice.background import replicate_room
 from app.voice.cleanup import cleanup_orphaned_dm_rooms
 from app.voice.rooms import parse_room_name
 from app.voice.stage_lifecycle import advance_stage_instance_lifecycle
+from app.voice.state import call_recipient_is_ringing
 
 configure_logging(os.environ.get("KAEDE_LOG_LEVEL", "INFO"))
 log = structlog.get_logger()
@@ -299,6 +307,23 @@ HISTORY_ENQUEUED_RETRY_MS = 5 * 60 * 1_000
 
 def history_status_key(user_domain: str, user_id: int) -> str:
     return f"{HISTORY_STATUS_KEY_PREFIX}:{user_domain}:{user_id}"
+
+
+@broker.task(task_name="presence.schedule_sweep", schedule=[{"cron": "* * * * *"}])
+@observed_job("presence.schedule_sweep")
+async def presence_schedule_sweep() -> int:
+    """Advance due timed statuses and recurring presence schedules."""
+
+    settings = get_settings()
+    engine, sessionmaker = create_engine_and_sessionmaker(settings.database_url.get_secret_value())
+    redis = Redis.from_url(settings.dragonfly_url.get_secret_value(), decode_responses=True)
+    try:
+        if not await redis.exists(PRESENCE_TRANSITIONS_SEEDED_KEY):
+            await seed_presence_transitions(redis, sessionmaker)
+        return await process_due_presence_transitions(redis, sessionmaker)
+    finally:
+        await redis.aclose()
+        await engine.dispose()
 
 
 @broker.task(task_name="voice.call_room_gc", schedule=[{"cron": "*/5 * * * *"}])
@@ -645,6 +670,7 @@ async def mobile_push_message(
                         User.origin_domain == settings.domain,
                         User.id > after_user_id,
                         PushDevice.enabled.is_(True),
+                        active_push_session(),
                     )
                 )
                 if message.author_domain == settings.domain:
@@ -672,6 +698,7 @@ async def mobile_push_message(
                         User.origin_domain == settings.domain,
                         User.id > after_user_id,
                         PushDevice.enabled.is_(True),
+                        active_push_session(),
                     )
                 )
                 if message.author_domain == settings.domain:
@@ -720,6 +747,7 @@ async def mobile_push_message(
                     PushDevice.user_id.in_(candidate_ids),
                     PushDevice.user_domain == settings.domain,
                     PushDevice.enabled.is_(True),
+                    active_push_session(),
                 )
             ):
                 devices_by_user.setdefault(device.user_id, []).append(device)
@@ -758,7 +786,7 @@ async def mobile_push_message(
                 notification_settings = (
                     user_settings.notification_settings if user_settings is not None else {}
                 )
-                if notification_settings.get("presence_preference") == "dnd":
+                if notifications_suppressed_by_presence(notification_settings):
                     continue
 
                 is_mention = user_id in mentioned
@@ -830,6 +858,7 @@ async def mobile_push_message(
                 event_token = await issue_push_sync(
                     redis,
                     PushSyncEvent(
+                        session_id=cast(str, device.session_id),
                         device_id=device.id,
                         user_id=user_id,
                         user_domain=settings.domain,
@@ -888,6 +917,7 @@ async def mobile_push_message(
                 event_token = await issue_push_sync(
                     redis,
                     PushSyncEvent(
+                        session_id=cast(str, device.session_id),
                         device_id=device.id,
                         user_id=user_id,
                         user_domain=settings.domain,
@@ -966,18 +996,23 @@ async def mobile_push_activity(
     invalid_device_ids: list[str] = []
     try:
         async with sessionmaker() as session:
-            if kind == "relationship":
-                user_settings = await session.get(UserSettings, (user_id, user_domain))
-                if user_settings and not relationship_alerts_enabled(
-                    user_settings.notification_settings
-                ):
-                    return 0
+            user_settings = await session.get(UserSettings, (user_id, user_domain))
+            preferences = user_settings.notification_settings if user_settings else {}
+            if notifications_suppressed_by_presence(preferences) or (
+                kind == "relationship" and not relationship_alerts_enabled(preferences)
+            ):
+                return 0
+            if kind == "call" and not await call_recipient_is_ringing(
+                redis, event_id, event_domain, channel_ref, f"{user_id}@{user_domain}"
+            ):
+                return 0
             devices = list(
                 await session.scalars(
                     select(PushDevice).where(
                         PushDevice.user_id == user_id,
                         PushDevice.user_domain == user_domain,
                         PushDevice.enabled.is_(True),
+                        active_push_session(),
                     )
                 )
             )
@@ -991,6 +1026,7 @@ async def mobile_push_activity(
                 token = await issue_push_sync(
                     redis,
                     PushSyncEvent(
+                        session_id=cast(str, device.session_id),
                         device_id=device.id,
                         user_id=user_id,
                         user_domain=user_domain,
@@ -1052,6 +1088,7 @@ async def mobile_push_activity(
                 token = await issue_push_sync(
                     redis,
                     PushSyncEvent(
+                        session_id=cast(str, device.session_id),
                         device_id=device.id,
                         user_id=user_id,
                         user_domain=user_domain,
@@ -1118,8 +1155,37 @@ async def push_relay_outbox_sweep() -> int:
             )
             claimed: list[dict[str, Any]] = []
             for row in rows:
-                device = await session.get(PushDevice, row.device_id)
-                if row.expires_at <= now or device is None or not device.enabled:
+                sync = await load_push_sync(redis, row.event_token) if row.event_token else None
+                device = (
+                    await session.scalar(
+                        select(PushDevice).where(
+                            PushDevice.id == row.device_id,
+                            PushDevice.session_id == sync[1].session_id,
+                            PushDevice.enabled.is_(True),
+                            active_push_session(),
+                        )
+                    )
+                    if sync is not None
+                    else None
+                )
+                suppressed = False
+                if sync is not None and device is not None and row.expires_at > now:
+                    event = sync[1]
+                    preferences_row = await session.get(
+                        UserSettings, (event.user_id, event.user_domain)
+                    )
+                    suppressed = notifications_suppressed_by_presence(
+                        preferences_row.notification_settings if preferences_row else {}
+                    )
+                    if event.kind == "call" and not suppressed:
+                        suppressed = not await call_recipient_is_ringing(
+                            redis,
+                            event.message_id,
+                            event.message_domain,
+                            event.channel_ref,
+                            f"{event.user_id}@{event.user_domain}",
+                        )
+                if row.expires_at <= now or device is None or suppressed:
                     if row.event_token is not None:
                         await discard_push_sync(redis, row.event_token)
                     await session.delete(row)

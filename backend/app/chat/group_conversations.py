@@ -27,6 +27,12 @@ from app.federation.dm_storage import (
 from app.federation.replication import profile_from_user
 
 
+def unsupported_group_invite_proof(domain: str) -> HTTPException:
+    return HTTPException(
+        status_code=409, detail={"code": "GROUP_DM_INVITER_PROOF_UNSUPPORTED", "domain": domain}
+    )
+
+
 def group_conversation_content(
     conversation: DMConversation,
     channel: Channel,

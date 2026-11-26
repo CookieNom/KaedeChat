@@ -15,7 +15,15 @@ from pathlib import Path
 
 from dev import K3S_IMAGE, api_address, import_images, instances
 from manage import apply, job, kubectl, run, wait_workload
-from stack import ROOT, config_volume, read_env_file, render, resource, workload
+from stack import (
+    ROOT,
+    config_volume,
+    data_access_policy,
+    read_env_file,
+    render,
+    resource,
+    workload,
+)
 
 COMMANDS = json.loads((Path(__file__).parent / "checks.json").read_text())
 
@@ -139,6 +147,15 @@ def run_check(action: str) -> None:
                     "--image",
                     K3S_IMAGE,
                     "--no-lb",
+                    *(
+                        [
+                            "--volume",
+                            f"{ROOT}/deploy/kubernetes/federation-iptables.sh:"
+                            "/bin/k3d-entrypoint-z-federation.sh:ro@server:0",
+                        ]
+                        if action.startswith("federation")
+                        else []
+                    ),
                     "--kubeconfig-update-default=false",
                     "--kubeconfig-switch-context=false",
                     "--volume",
@@ -293,6 +310,49 @@ def run_check(action: str) -> None:
                         )
                     } | extra
                     test_env["KAEDE_SERVICE_ROLE"] = "full"
+                validation_services = {
+                    "postgres": (
+                        5432,
+                        {
+                            "backend-test",
+                            "migration",
+                            "migration-check",
+                            "identity-check",
+                            "chat-check",
+                            "media-check",
+                            "voice-check",
+                            "release-check",
+                        },
+                    ),
+                    "dragonfly": (
+                        6379,
+                        {
+                            "backend-test",
+                            "migration-check",
+                            "identity-check",
+                            "chat-check",
+                            "media-check",
+                            "voice-check",
+                            "release-check",
+                        },
+                    ),
+                    "garage": (3900, {"chat-check", "media-check"}),
+                    "clamav": (3310, {"media-check"}),
+                }
+                apply(
+                    cfg,
+                    [
+                        data_access_policy(
+                            cfg["namespace"],
+                            target,
+                            port,
+                            [item],
+                            name=f"{target}-{item}",
+                        )
+                        for target, (port, checks) in validation_services.items()
+                        if item in checks
+                    ],
+                )
                 job(
                     cfg,
                     test_job(
@@ -492,11 +552,23 @@ def federation(cfg: dict, backend: str, tls: bool, temporary: Path) -> None:
         "BETA_DRAGONFLY_URL": "redis://:schema-validation-dragonfly-secret@dragonfly.kaede-beta.svc.cluster.local:6379/0",
         "BETA_BOT_GATEWAY_URL": "ws://api.kaede-beta.svc.cluster.local:8000/api/v1/bots/gateway",
     }
-    # The federation gate intentionally reads both databases. Allow only its
-    # namespace in this disposable cluster; production retains private data policy.
+    # Only this disposable test job may query both instances' databases.
+    runner_namespace = cfg["namespace"]
     for namespace in sets:
-        cfg["namespace"] = namespace
-        kubectl(cfg, "delete", "networkpolicy", "private-data")
+        apply(
+            dict(cfg, namespace=namespace),
+            [
+                data_access_policy(
+                    namespace,
+                    target,
+                    port,
+                    ["federation-check"],
+                    source_namespace=runner_namespace,
+                    name=f"{target}-federation-check",
+                )
+                for target, port in (("postgres", 5432), ("dragonfly", 6379))
+            ],
+        )
     if tls:
         extra["TLS_CA_FILE"] = "/tls/ca.crt"
     job(

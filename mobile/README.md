@@ -3,19 +3,35 @@
 Kaede's Android and iOS apps use Flutter, with native integrations for secure
 credentials, biometrics, notifications, capture, and LiveKit calls.
 
-The client connects only to the account's home instance. That instance brokers federation, remote media authorization, presence, history import, direct messages, and voice grants. A mobile client must never call peer federation endpoints directly.
+The app talks only to the account's home instance, which handles federation,
+remote media authorization, presence, history import, direct messages, and
+voice grants. A mobile client must never call peer federation endpoints
+directly.
 
 ## Included functionality
 
-- registration, email verification, password recovery, MFA, rotating sessions, optional biometric/PIN device lock;
-- home-instance discovery, guilds, federated guilds, direct messages, friends and blocks;
-- paginated chat history with replies, pins, reactions, mentions, and custom emoji; attachments, image viewing, video playback, and GIFs; typing, read state, and offline snapshots;
-- core and advanced guild administration: overview, channels/categories, synchronized permission overwrites, roles and hierarchy, members, moderation, bans, instance bans, invites, emoji, webhooks, integrations, audit records, scheduled events, ownership transfer, leave, and deletion;
-- LiveKit guild voice and DM calls with native WebRTC echo cancellation, noise suppression, automatic gain control, push-to-talk, voice activity, mute/deafen, camera, screen-share controls subject to the platform notes below, and route selection;
-- authenticated, content-free push wakes for messages, calls, moderation, and relationship events, using Android notification channels and equivalent iOS notification categories;
-- adaptive network behavior: cached navigation and recent messages, small first pages, retryable writes, and deferred full-resolution media.
+- Accounts and security: Registration, email verification, password recovery,
+  MFA, rotating sessions, and an optional biometric/PIN device lock.
+- Chat: Home-instance discovery, local and federated guilds, DMs, friends, and
+  blocks. Paginated history with replies, pins, reactions, mentions, and custom
+  emoji. Attachments, image viewing, video playback, GIFs, typing indicators,
+  read state, and offline snapshots.
+- Guild administration: Overview, channels and categories, synchronized
+  permission overwrites, roles and hierarchy, and members. Moderation, bans, and
+  instance bans. Invites, emoji, webhooks, integrations, audit records, and
+  scheduled events. Ownership transfer, leaving, and deletion.
+- Voice and video: LiveKit guild voice and DM calls with native WebRTC echo
+  cancellation, noise suppression, and automatic gain control. Push to talk,
+  voice activity, mute/deafen, camera, screen sharing (see [platform
+  notes](#platform-notes)), and audio route selection.
+- Notifications and network: Authenticated, content-free push wakes for
+  messages, calls, moderation, and relationship events, using Android
+  notification channels and matching iOS categories. Cached navigation and
+  recent messages, small first pages, retryable writes, and deferred
+  full-resolution media.
 
-All snowflakes and permission masks remain decimal strings on the wire. Entity caches are keyed by the composite `id@origin-domain` identity.
+Snowflakes and permission masks stay decimal strings on the wire. Entity caches
+are keyed by the composite `id@origin-domain` identity.
 
 ## Development
 
@@ -30,23 +46,25 @@ flutter analyze
 flutter test
 ```
 
-Before `flutter run` or `flutter build`, install this revision's patched WebRTC
-artifacts in `native/webrtc`. Download the native artifact from CI, or build it
-with `python3 tool/build_webrtc.py android --work-dir /tmp/kaede-webrtc-android`
-on Linux (`ios` on macOS). See [the native codec build notes](../docs/av1-e2ee/README.md#mobile-native-artifacts)
-for extraction instructions and prerequisites. The stock native library cannot
-process Kaede's encrypted AV1 format. CI and release builds use the same artifacts.
+Before `flutter run` or `flutter build`, put this revision's patched WebRTC
+artifacts in `native/webrtc`. The stock native library can't handle Kaede's
+encrypted AV1 format. Download the artifact from CI, or build it with
+`python3 tool/build_webrtc.py android --work-dir /tmp/kaede-webrtc-android` on
+Linux (`ios` on macOS). CI and release builds use the same artifacts. See the
+[native codec build notes](../docs/av1-e2ee/README.md#mobile-native-artifacts)
+for extraction and prerequisites.
 
-Android builds require JDK 21 to read the patched WebRTC library's Java classes.
-Point `JAVA_HOME` to your JDK 21 installation, then select it for Flutter and
-build an unsigned/debug Android artifact:
+Android builds need JDK 21 to read the patched WebRTC library's Java classes.
+Point `JAVA_HOME` at your JDK 21, select it for Flutter, and build an
+unsigned debug APK:
 
 ```sh
 flutter config --jdk-dir="$JAVA_HOME"
 flutter build apk --debug
 ```
 
-iOS builds require macOS, the matching Xcode release, an Apple developer team, and a provisioning profile:
+iOS builds need macOS, the matching Xcode release, an Apple developer team,
+and a provisioning profile:
 
 ```sh
 flutter build ios --release
@@ -54,7 +72,10 @@ flutter build ios --release
 
 ## Android release signing
 
-Generate or provision an upload key outside the repository. Copy `android/key.properties.example` to `android/key.properties`, fill in the four values, and keep both files private. Release builds never fall back to the shared debug signing key.
+Create or obtain an upload key outside the repository. Copy
+`android/key.properties.example` to `android/key.properties`, fill in the four
+values, and keep both files private. Release builds never fall back to the
+shared debug signing key.
 
 ```sh
 flutter build appbundle --release
@@ -62,23 +83,20 @@ flutter build appbundle --release
 
 The application ID and iOS bundle ID are both `chat.kaede.mobile`.
 
-Tag-triggered GitHub Releases build a signed APK and Play AAB when Android or
-shared mobile files changed. Configure the four Android signing secrets and the official
-Firebase client-configuration secret listed in
-[`desktop/docs/releasing.md`](../desktop/docs/releasing.md) before pushing a
-release tag. The workflow fails instead of publishing an unsigned
-artifact, omitting push support, or generating a throwaway key that would break
-application updates.
+Tagged releases build a signed APK and Play AAB when Android or shared mobile
+files change. Before pushing a tag, configure the four Android signing secrets
+and the official Firebase client-configuration secret listed in
+[`desktop/docs/releasing.md`](../desktop/docs/releasing.md). Without them the
+workflow fails rather than publishing an unsigned build, dropping push support,
+or generating a throwaway key that would break updates.
 
 ## Background notification builds
 
-Official releases use the Kaede relay at `push.kaede.chat`. The official
-Firebase client configuration is injected by protected release CI. Federated
-home operators receive neither it nor the provider service account. The app
-pins the relay and registers its provider token directly there.
-
-Community builds use a distinct application/bundle ID, signing identity,
-Firebase/APNs project, and update lineage. Configure these Dart definitions:
+Official releases use the Kaede relay at `push.kaede.chat`, with the Firebase
+client configuration injected by protected release CI. Community builds need
+their own app identity and Firebase/APNs project (see
+[delivery choices](../docs/mobile-push.md#delivery-choices)) and these Dart
+definitions:
 
 ```sh
 flutter build apk \
@@ -88,23 +106,18 @@ flutter build apk \
   --dart-define=KAEDE_PUSH_APP_ID=org.example.kaede
 ```
 
-For a single-home custom build, `KAEDE_PUSH_TRANSPORT=direct_fcm` retains the
-legacy authenticated token registration. That home sets
-`KAEDE_PUSH_ENABLED=true` and supplies its service account. Direct mode cannot
-notify `chat.kaede.mobile` unless it owns the matching official Firebase
-project, which third-party operators do not.
+For a single-home custom build, `KAEDE_PUSH_TRANSPORT=direct_fcm` keeps the
+legacy authenticated token registration, and that home sets
+`KAEDE_PUSH_ENABLED=true` with its own service account. Direct mode can't
+notify `chat.kaede.mobile`.
 
-Android still requires `android/app/google-services.json` for the selected app
-ID. iOS requires `GoogleService-Info.plist`, the Push Notifications/Background
+Android still needs `android/app/google-services.json` for the chosen app ID.
+iOS needs `GoogleService-Info.plist`, the Push Notifications and Background
 Modes entitlements, APNs credentials in Firebase, and valid Apple signing. The
-provider service-account JSON is private server material and must never be
-placed under `mobile/`, bundled, logged, or committed.
+provider service-account JSON is private server material. Never put it under
+`mobile/`, bundle it, log it, or commit it.
 
-Relay wakes are content-free and authenticated by a device/home secret that the
-relay does not possess. The app verifies that MAC before redemption or fallback.
-Notification details are fetched from the signed-in home, which rechecks access
-and preferences. Encrypted messages use a generic notification unless the
-device can decrypt locally. Full protocol and privacy details are in
+Server setup, the wake protocol, and the privacy model are in
 [`docs/mobile-push.md`](../docs/mobile-push.md).
 
 ## Security boundaries
@@ -118,22 +131,31 @@ device can decrypt locally. Full protocol and privacy details are in
 
 ## Platform notes
 
-- Android camera capture is foreground-only. Screen sharing requests a user-approved MediaProjection session and promotes the active voice service to the media-projection foreground type before capture.
-- iOS screen sharing uses the bundled ReplayKit Broadcast Upload extension. Runner and the extension require the `group.chat.kaede.mobile` App Group in their signed provisioning profiles.
-- The shared preset behavior, privacy boundaries, and physical-device release checklist are documented in [`docs/screen-sharing-quality.md`](../docs/screen-sharing-quality.md).
-- Android background voice uses a microphone/media-playback foreground service. iOS uses a dedicated APNs VoIP relay subscription, PushKit, and CallKit so terminated-app calls reach the native incoming-call screen.
-- Flutter's LiveKit client uses native WebRTC audio processing. A future neural isolation model belongs after echo cancellation and before the publication gate; it must not replace acoustic echo cancellation.
+- Android camera capture works only in the foreground.
+- Screen sharing uses MediaProjection on Android and the bundled ReplayKit
+  Broadcast Upload extension on iOS. Runner and the extension need the
+  `group.chat.kaede.mobile` App Group in their signed provisioning profiles.
+  Presets, capture details, and the device checklist are in
+  [`docs/screen-sharing-quality.md`](../docs/screen-sharing-quality.md).
+- Android background voice uses a microphone/media-playback foreground service.
+  iOS uses a dedicated APNs VoIP relay subscription, PushKit, and CallKit, so
+  calls to a closed app reach the native incoming-call screen.
+- Flutter's LiveKit client uses native WebRTC audio processing. Any future
+  neural voice isolation goes after echo cancellation and before the
+  publication gate. It must not replace acoustic echo cancellation.
 
 ## Generated protocol
 
-`lib/src/protocol/generated.dart` is generated from the authoritative Python registries by `backend/scripts/generate_protocol.py`. CI regenerates it and rejects drift alongside the TypeScript and Rust protocol modules.
+`backend/scripts/generate_protocol.py` generates `lib/src/protocol/generated.dart`
+from the Python registries. CI regenerates it, along with the TypeScript and
+Rust protocol modules, and fails on any drift.
 
 ## Cross-client release checks
 
-Use the same account in mobile and web to compare results. Check the minimum
-supported OS, a current physical Android phone, a signed physical iPhone,
-a 320–390 logical-pixel screen with large text, and a tablet/foldable in both
-orientations. Native media and background behavior need hardware tests.
+Sign in to the same account on mobile and web and compare. Test the minimum
+supported OS, a current physical Android phone, a signed physical iPhone, a
+320–390 logical-pixel screen with large text, and a tablet or foldable in both
+orientations. Native media and background behavior need real hardware.
 
 - Create/edit/reorder channels and roles; both clients should update without
   reopening the screen. Test owner, moderator, ordinary, and remote members.
@@ -158,9 +180,11 @@ orientations. Native media and background behavior need hardware tests.
   iOS needs signed ReplayKit/App Group validation. See
   [media quality](../docs/screen-sharing-quality.md#release-validation).
 
-Mobile uses sheets and OS controls in place of desktop hover menus, tray,
+Mobile uses sheets and OS controls instead of desktop hover menus, tray,
 autostart, and updater settings. Developer Portal and Instance Administration
-have native screens; owner grants remain CLI-only. Interface text is available in
-English and Japanese. Locale settings also affect dates and localized command labels.
-Record actual device results with each release; automated tests alone do not
-establish that background calls, capture, or push work on hardware.
+have native screens, but owner grants are CLI-only. The interface is available
+in English and Japanese, and the locale also affects dates and localized command
+labels.
+
+Record real device results with each release. Automated tests alone don't show
+that background calls, capture, or push work on hardware.

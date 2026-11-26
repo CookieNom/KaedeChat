@@ -1598,10 +1598,15 @@ async def get_webhook(
         webhook_id,
         guild_ref,
         "webhook.get",
-        {},
+        {"recover_tokens": True} if auth.user.account_type == "bot" and recover_token else {},
     )
     if proxied is not None:
-        return cast(dict[str, object], proxied.body)
+        body = cast(dict[str, object], proxied.body)
+        if not recover_token:
+            for item in [body]:
+                item.pop("token", None)
+                item.pop("execution_url", None)
+        return body
     try:
         webhook = await authorized_webhook(
             session,
@@ -1639,10 +1644,15 @@ async def list_webhooks(
         guild_id,
         auth.user,
         "webhook.list",
-        {},
+        {"recover_tokens": True} if auth.user.account_type == "bot" and recover_tokens else {},
     )
     if proxied is not None:
-        return cast(list[dict[str, object]], proxied.body)
+        body = cast(list[dict[str, object]], proxied.body)
+        if not recover_tokens:
+            for item in body:
+                item.pop("token", None)
+                item.pop("execution_url", None)
+        return body
     guild = await local_guild(session, settings, guild_id)
     await require_permissions(
         session, redis, guild, auth.user, required_permissions("guild.webhook.list")
@@ -1723,10 +1733,22 @@ async def list_channel_webhooks(
         guild_id,
         auth.user,
         "webhook.list_channel",
-        {"channel_ref": str(channel_id)},
+        {
+            "channel_ref": str(channel_id),
+            **(
+                {"recover_tokens": True}
+                if auth.user.account_type == "bot" and recover_tokens
+                else {}
+            ),
+        },
     )
     if proxied is not None:
-        return cast(list[dict[str, object]], proxied.body)
+        body = cast(list[dict[str, object]], proxied.body)
+        if not recover_tokens:
+            for item in body:
+                item.pop("token", None)
+                item.pop("execution_url", None)
+        return body
     guild = await local_guild(session, settings, guild_id)
     channel = await guild_channel(session, settings, guild_id, channel_id)
     await require_permissions(

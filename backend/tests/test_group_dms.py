@@ -33,7 +33,7 @@ from app.core.dm import (
 from app.core.settings import Settings
 from app.db.models import Channel, DMConversation, User
 from app.federation.replication import profile_from_user, replicate_group_notice
-from app.federation.schemas import DMGroupMutationRequest
+from app.federation.schemas import DMGroupMutationRequest, RemoteUserProfile
 from app.federation.security import FederationPrincipal
 from app.voice.schemas import CallResponse
 
@@ -651,6 +651,10 @@ async def test_initial_group_snapshot_accepts_add_notice_for_its_local_invitee(
             expected_actor=(author.id, author.origin_domain),
         )
 
+    # The signed state records the label used when the notice was minted.
+    # A later profile change at the invitee home must not reject that state.
+    wire_invitee = RemoteUserProfile.model_validate(profile_from_user(invitee))
+    invitee.display_name = "Updated name"
     message = await replicate_group_notice(
         cast(Any, session),
         cast(Settings, SimpleNamespace(domain="beta.localhost")),
@@ -662,6 +666,7 @@ async def test_initial_group_snapshot_accepts_add_notice_for_its_local_invitee(
         previous_owner=(None, None),
         expected_actor=(author.id, author.origin_domain),
         initial_snapshot=True,
+        participant_profiles=(wire_invitee,),
     )
 
     assert message is not None
@@ -940,7 +945,12 @@ async def test_group_authority_confirms_a_third_domain_invitee_at_their_home(
         DMConversation,
         SimpleNamespace(id=100, origin_domain="alpha.localhost"),
     )
-    session = cast(Any, SimpleNamespace())
+    session = cast(
+        Any,
+        SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(capabilities=["dm-group-inviter-proof/1"]))
+        ),
+    )
     request = AsyncMock(return_value=SimpleNamespace(status_code=204))
     monkeypatch.setattr(federation_api, "signed_request", request)
 
@@ -950,6 +960,7 @@ async def test_group_authority_confirms_a_third_domain_invitee_at_their_home(
         conversation,
         inviter,
         invitee,
+        {"actor_proof": "relay"},
     )
 
     assert request.await_args.args[:5] == (
@@ -959,9 +970,11 @@ async def test_group_authority_confirms_a_third_domain_invitee_at_their_home(
         "gamma.localhost",
         "/_kaede/v1/dm/groups/authorize",
     )
+    assert request.await_args.kwargs["required_capability"] == "dm-group-inviter-proof/1"
     assert request.await_args.kwargs["payload"] == {
         "conversation_id": "100",
         "conversation_domain": "alpha.localhost",
         "inviter": federation_api.profile_from_user(inviter),
         "invitee": federation_api.profile_from_user(invitee),
+        "inviter_intent": {"actor_proof": "relay"},
     }

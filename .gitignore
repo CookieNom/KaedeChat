@@ -68,3 +68,6 @@ vendor/photodna-sdk/
 
 # Generated patched desktop codec sources, headers, and custom WebRTC artifacts.
 desktop/native/
+
+# Operator-supplied Kaede extensions are distributed separately.
+/vendor/extensions/

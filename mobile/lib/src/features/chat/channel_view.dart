@@ -41,6 +41,7 @@ import 'package:kaede_mobile/src/features/chat/composer_pickers.dart';
 import 'package:kaede_mobile/src/features/chat/dm_encryption_consent.dart';
 import 'package:kaede_mobile/src/features/chat/invite_card.dart';
 import 'package:kaede_mobile/src/features/chat/link_privacy.dart';
+import 'package:kaede_mobile/src/features/chat/shopping_links.dart';
 import 'package:kaede_mobile/src/features/chat/spotify_preview.dart';
 import 'package:kaede_mobile/src/features/chat/swipe_to_reply.dart';
 import 'package:kaede_mobile/src/features/chat/voice_message_recorder.dart';
@@ -989,7 +990,8 @@ final class KaedeMessageMarkdown extends StatelessWidget {
       onTapLink: (_, href, __) async {
         final uri = Uri.tryParse(href ?? '');
         if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          await launchUrl(shoppingLinks.destination(uri, state.user?.ref),
+              mode: LaunchMode.externalApplication);
         }
       },
     );
@@ -8697,7 +8699,8 @@ final class _RichEmbedCard extends StatelessWidget {
   Future<void> _open(String? value) async {
     final uri = Uri.tryParse(value ?? '');
     if (uri != null && const {'http', 'https'}.contains(uri.scheme)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      await launchUrl(shoppingLinks.destination(uri, state.user?.ref),
+          mode: LaunchMode.externalApplication);
     }
   }
 
@@ -9666,7 +9669,9 @@ final class _RichMessageComponentsState extends State<_RichMessageComponents> {
                                             if (uri != null &&
                                                 const {'http', 'https'}
                                                     .contains(uri.scheme)) {
-                                              await launchUrl(uri,
+                                              await launchUrl(
+                                                  shoppingLinks.destination(uri,
+                                                      widget.state.user?.ref),
                                                   mode: LaunchMode
                                                       .externalApplication);
                                             }
@@ -9846,9 +9851,7 @@ final class _RichV2Layout extends StatelessWidget {
                     )
                   : _RichV2Media(
                       media: _richObject(accessory['media']),
-                      description:
-                          accessory[L10n.of(context).ui_description_346f3b69]
-                              as String?,
+                      description: accessory['description'] as String?,
                       spoiler: accessory['spoiler'] == true,
                       attachments: attachments,
                       allowExternalMedia: allowExternalMedia,
@@ -9867,8 +9870,7 @@ final class _RichV2Layout extends StatelessWidget {
                 width: items.length == 1 ? 320 : 156,
                 child: _RichV2Media(
                   media: _richObject(item['media']),
-                  description:
-                      item[L10n.of(context).ui_description_346f3b69] as String?,
+                  description: item['description'] as String?,
                   spoiler: item['spoiler'] == true,
                   attachments: attachments,
                   allowExternalMedia: allowExternalMedia,
@@ -10397,7 +10399,12 @@ final class _LinkPreviewCardState extends ConsumerState<_LinkPreviewCard> {
   Future<void> _open(Object? raw) async {
     final uri = Uri.tryParse('${raw ?? widget.url}');
     if (uri != null && const {'https', 'http'}.contains(uri.scheme)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      await launchUrl(
+          uri.toString() != widget.url
+              ? uri
+              : shoppingLinks.destination(
+                  uri, ref.read(mobileControllerProvider).user?.ref),
+          mode: LaunchMode.externalApplication);
     }
   }
 

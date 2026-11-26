@@ -6,7 +6,7 @@ import {
   PROTOCOL_VERSION,
   type EventName
 } from '$lib/generated/ops';
-import { isNativeDesktop, nativeInvoke } from '$lib/platform/native';
+import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
 import { stripNetworkClientState } from '$lib/api/network-boundary';
 
 export interface Dispatch<T = unknown> {
@@ -81,25 +81,54 @@ export class GatewayClient extends EventTarget {
   }
 
   async #pollNative(generation: number): Promise<void> {
+    let attach = true;
     while (!this.#manualClose && generation === this.#nativeGeneration) {
       try {
-        const envelope = await nativeInvoke<GatewayEnvelope | null>('native_gateway_next');
+        const envelope = await nativeInvoke<
+          | GatewayEnvelope
+          | { native_status: { state: string; retry_after_ms?: number; session_limit?: boolean } }
+          | null
+        >('native_gateway_next', {
+          attach
+        });
+        attach = false;
         if (envelope && !this.#manualClose && generation === this.#nativeGeneration) {
-          this.#nativeFailures = 0;
+          if ('native_status' in envelope) {
+            const status = envelope.native_status;
+            if (status.state === 'connected') continue;
+            this.#gatewayReady = false;
+            this.#reportStatus({
+              state: status.state === 'disconnected' ? 'offline' : 'reconnecting',
+              message: status.session_limit
+                ? 'This account has too many active live-update sessions. Close Kaede on another device.'
+                : 'Live updates were interrupted. Reconnecting automatically…',
+              retryInMs: status.retry_after_ms
+            });
+            continue;
+          }
           this.#receive(JSON.stringify(envelope));
+          this.#nativeFailures = 0;
         }
-      } catch {
+      } catch (error) {
         if (!this.#manualClose && generation === this.#nativeGeneration) {
+          if (nativeError(error).code === 'NOT_AUTHENTICATED') {
+            this.close();
+            expireBrowserSession();
+            return;
+          }
+          attach = true;
+          this.#gatewayReady = false;
           this.#nativeFailures += 1;
+          const delay = Math.min(1_000 * 2 ** (this.#nativeFailures - 1), 30_000);
           this.#reportStatus({
             state: this.#nativeFailures >= 5 ? 'offline' : 'reconnecting',
             message:
               this.#nativeFailures >= 5
                 ? 'Live updates are unavailable. Messages may be out of date; Kaede is still retrying.'
                 : 'Live updates were interrupted. Reconnecting automatically…',
-            retryInMs: 1_000
+            retryInMs: delay
           });
-          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
@@ -164,6 +193,8 @@ export class GatewayClient extends EventTarget {
     this.#nativeFailures = 0;
     if (this.#commandRetryTimer) clearTimeout(this.#commandRetryTimer);
     this.#commandRetryTimer = null;
+    this.#preferredPresence = null;
+    this.#presencePending = false;
     this.#pendingCommands.clear();
     this.#memberSubscription = null;
     this.#nativeCommandsInFlight.clear();
@@ -273,6 +304,7 @@ export class GatewayClient extends EventTarget {
   rememberPresence(status: 'online' | 'idle' | 'dnd' | 'invisible'): void {
     this.#preferredPresence = status;
     this.#presencePending = false;
+    this.#pendingCommands.delete('presence');
   }
 
   async setSelfVoiceState(selfMute: boolean, selfDeaf: boolean): Promise<void> {
@@ -388,6 +420,7 @@ export class GatewayClient extends EventTarget {
       }
       if (
         (envelope.t === 'READY' || envelope.t === 'RESUMED') &&
+        (envelope.d as { presence_initialized?: boolean }).presence_initialized !== true &&
         this.#preferredPresence !== null
       ) {
         this.setPresence(this.#preferredPresence);

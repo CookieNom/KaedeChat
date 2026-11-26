@@ -90,6 +90,7 @@ from app.chat.forwarding import (
     FORWARDABLE_MESSAGE_TYPES,
     build_forward_source_authorization_content,
     can_forward_between_age_contexts,
+    federation_forward_snapshot,
     forward_snapshot_custom_emoji_tokens,
     forward_snapshot_matches_attachments,
     forward_snapshot_sticker_items,
@@ -237,6 +238,7 @@ from app.federation.dm_history import (
     dm_history_page_is_complete,
     merge_dm_history_messages,
     validate_dm_history_page,
+    verified_group_history_profiles,
 )
 from app.federation.dm_storage import (
     FederatedDMQuotaExceeded,
@@ -2768,6 +2770,11 @@ async def prepare_federated_edit_attachments(
         refs.append((attachment.id, attachment.origin_domain))
 
     if new_attachments:
+        for item in new_attachments:
+            item.upload_channel_id, item.upload_channel_domain = (
+                access.channel.id,
+                access.channel.origin_domain,
+            )
         room_ref = (
             ("guild", access.guild.id, access.guild.origin_domain)
             if access.guild is not None
@@ -3418,7 +3425,7 @@ async def channel_message(
         Message.channel_domain == channel.origin_domain,
     )
     if for_update:
-        statement = statement.with_for_update()
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     message = await session.scalar(statement)
     if message is None or (require_active and message.deleted_at is not None):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
@@ -3511,8 +3518,10 @@ async def prepare_forward_message(
         settings,
         source_access.channel,
         message_id,
+        for_update=True,
         require_active=True,
     )
+    ensure_message_mutable(source)
     if (
         await session.get(Poll, (source.id, source.origin_domain)) is not None
         or source.message_type not in FORWARDABLE_MESSAGE_TYPES
@@ -3964,6 +3973,7 @@ async def list_messages(
         remote_limit = limit
         trusted_profiles = {
             (participant.id, participant.origin_domain): profile_from_user(participant)
+            | {"profile_resolved": participant.profile_resolved}
             for participant in access.participants
         }
         participant_refs = set(trusted_profiles)
@@ -3980,6 +3990,9 @@ async def list_messages(
                     "requester_id": str(auth.user.id),
                     "requester_domain": auth.user.origin_domain,
                 }
+                history_nonce = secrets.token_urlsafe(24) if conversation.type == "group" else None
+                if history_nonce is not None:
+                    remote_query["history_nonce"] = history_nonce
                 if cursor is not None:
                     remote_query.update(
                         {
@@ -4044,6 +4057,8 @@ async def list_messages(
                             detail={"code": "CHANNEL_NOT_FOUND"},
                         )
                     conversation = live_conversation
+                if conversation.type == "group" and response.status_code == 403:
+                    raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
                 if response.status_code != 200:
                     try:
                         retry_seconds = max(
@@ -4063,12 +4078,26 @@ async def list_messages(
                     response,
                     max_response_bytes=MAX_DM_HISTORY_RESPONSE_BYTES,
                 )
+                verified_group_history = (
+                    history_nonce is not None
+                    and await verified_group_history_profiles(
+                        session,
+                        settings,
+                        body,
+                        authority=conversation.authority_domain,
+                        nonce=history_nonce,
+                        requester=(auth.user.id, auth.user.origin_domain),
+                        limit=remote_limit,
+                        trusted_profiles=trusted_profiles,
+                    )
+                )
                 remote_page = validate_dm_history_page(
                     body,
                     settings=settings,
                     conversation_ref=(conversation.id, conversation.origin_domain),
                     authority_domain=conversation.authority_domain,
                     participant_refs=participant_refs,
+                    verified_group_history=verified_group_history,
                     trusted_profiles=trusted_profiles,
                     before=cursor,
                     limit=remote_limit,
@@ -4123,6 +4152,8 @@ async def list_messages(
                 if len(unique_refs) >= limit:
                     break
         except HTTPException as exc:
+            if exc.status_code == 404:
+                raise
             if payloads:
                 payloads[-1]["history_page_error_code"] = "FEDERATED_DM_HISTORY_UNAVAILABLE"
                 detail: dict[str, object] = (
@@ -4900,7 +4931,11 @@ def federated_message_create_payload(
         "expression_authorizations": projection.expression_authorizations,
         "forwarded_message_id": qualified_pair(projection.forwarded_ref),
         "forwarded_channel_id": qualified_pair(projection.forwarded_channel_ref),
-        "forward_snapshot": projection.forward_snapshot,
+        "forward_snapshot": (
+            federation_forward_snapshot(projection.forward_snapshot)
+            if projection.forward_snapshot is not None
+            else None
+        ),
         "forward_source_nsfw": projection.forward_source_nsfw,
         "forward_source_proof": projection.forward_source_proof,
         "application_id": qualified_pair(projection.application_ref),
@@ -4969,6 +5004,8 @@ async def proxy_remote_guild_message_create(
         projection,
     )
     if message_attachments:
+        for item in message_attachments:
+            item.upload_channel_id, item.upload_channel_domain = channel.id, channel.origin_domain
         # The remote guild home can commit this proposal and fan its
         # attachment metadata out before our HTTP response is observed.
         # Durably remember that authority before making the request so a
@@ -5049,7 +5086,12 @@ async def proxy_remote_guild_message_create(
         context = event.get("context")
         content = event.get("content")
         event_message = content.get("message") if isinstance(content, dict) else None
-        expected_attachment_payloads = [attachment_payload(item) for item in message_attachments]
+        expected_attachment_payloads = [
+            federation_attachment_payload(item, include_lifecycle=False)
+            if projection.forward_snapshot is not None
+            else attachment_payload(item)
+            for item in message_attachments
+        ]
         expected_remote_attachment_payloads = []
         for expected_attachment in expected_attachment_payloads:
             projected_attachment = dict(expected_attachment)
@@ -7879,6 +7921,8 @@ async def lock_message_delete_access(
     session: AsyncSession,
     settings: Settings,
     access: ChannelAccess,
+    *,
+    include_unavailable: bool = False,
 ) -> ChannelAccess:
     """Acquire the canonical terminal-room and guild/channel mutation fences."""
 
@@ -7891,7 +7935,9 @@ async def lock_message_delete_access(
             access.guild.id,
             access.guild.origin_domain,
         )
-    return await lock_local_channel_mutation(session, settings, access)
+    return await lock_local_channel_mutation(
+        session, settings, access, include_unavailable=include_unavailable
+    )
 
 
 async def lock_message_delete_target(
@@ -13364,6 +13410,7 @@ async def crosspost_message(
     source = await channel_message(
         session, settings, access.channel, message_id, for_update=True, require_active=True
     )
+    ensure_message_mutable(source)
     if (source.author_id, source.author_domain) != (
         auth.user.id,
         auth.user.origin_domain,

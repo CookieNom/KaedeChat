@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '$lib/ui/locale';
 
+  import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { api, userErrorMessage } from '$lib/api/client';
   import {
@@ -63,7 +64,7 @@
       if (generation !== loadGeneration) return;
       chatEntities.ingestGuilds([hydrated]);
       const channel = invitedChannel(hydrated, preview.channel_id);
-      window.location.assign(channel ? guildChannelPath(hydrated, channel) : resolve('home'));
+      await goto(channel ? guildChannelPath(hydrated, channel) : resolve('home'));
     } catch (caught) {
       if (generation !== loadGeneration) return;
       error = userErrorMessage(

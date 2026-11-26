@@ -851,6 +851,7 @@ async def test_only_administration_can_change_age_assurance_with_audit_metadata(
     principal = SimpleNamespace(
         user=SimpleNamespace(id=1, origin_domain="chat.example"),
         require=Mock(),
+        roles={"owner"},
     )
 
     rendered = await patch_user_state(
@@ -860,6 +861,7 @@ async def test_only_administration_can_change_age_assurance_with_audit_metadata(
         cast(Any, session),
         cast(Any, SimpleNamespace(mint=AsyncMock(return_value=90))),
         cast(Any, SimpleNamespace(domain="chat.example")),
+        cast(Any, None),
     )
 
     principal.require.assert_called_once_with("users.manage")

@@ -332,6 +332,13 @@ void main() {
   group('native security boundaries', () {
     test('bearer credentials are restricted to the home Kaede API', () {
       final instance = Domain('chat.example');
+      for (final host in ['chat.example', 'objects.example']) {
+        expect(
+            shouldAttachKaedeAuthorization(
+                Uri.parse('https://$host/media/remote.example/42/original'),
+                instance),
+            host == instance.value);
+      }
       expect(
         shouldAttachKaedeAuthorization(
           Uri.parse('https://chat.example/api/v1/channels'),

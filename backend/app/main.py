@@ -80,6 +80,7 @@ from app.api.threads import router as threads_router
 from app.api.tracker import bot_router as bot_tracker_router
 from app.api.tracker import router as tracker_router
 from app.api.users import router as users_router
+from app.api.vendor import router as vendor_router
 from app.api.voice import router as voice_router
 from app.api.webhook_e2ee import router as webhook_e2ee_router
 from app.api.webhooks import router as webhooks_router
@@ -90,7 +91,7 @@ from app.core.errors import (
     http_exception_response,
     validation_exception_response,
 )
-from app.core.json_limits import strict_json_loads
+from app.core.json_limits import federation_request_allows_floats, strict_json_loads
 from app.core.logging import configure_logging
 from app.core.metrics import render_metrics
 from app.core.settings import get_settings
@@ -173,6 +174,7 @@ app.include_router(auth_router)
 app.include_router(support_router)
 app.include_router(automod_router)
 app.include_router(admin_router)
+app.include_router(vendor_router)
 app.include_router(admin_portal_router)
 app.include_router(safety_router)
 app.include_router(safety_client_router)
@@ -313,10 +315,7 @@ async def trace_request(
                 if is_federation and body:
                     request.state.federation_json = strict_json_loads(
                         body,
-                        allow_floats=(
-                            request.url.path.startswith("/_kaede/v1/channels/")
-                            and request.url.path.endswith("/interactions")
-                        ),
+                        allow_floats=federation_request_allows_floats(request.url.path),
                     )
             except ValueError:
                 response = error_response(

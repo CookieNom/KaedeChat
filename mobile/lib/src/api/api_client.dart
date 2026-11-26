@@ -94,6 +94,13 @@ final class KaedeApiClient {
 
   Future<String> installationId() => _vault.installationId();
 
+  RelayPushState? _expiredRelay;
+  RelayPushState? takeExpiredRelay() {
+    final relay = _expiredRelay;
+    _expiredRelay = null;
+    return relay;
+  }
+
   Future<RelayPushState?> relayPushState() => _vault.readRelayPushState();
 
   Future<void> saveRelayPushState(RelayPushState state) =>
@@ -130,6 +137,7 @@ final class KaedeApiClient {
         _tokens?.refreshToken != tokens.refreshToken) {
       _sessionGeneration += 1;
     }
+    _expiredRelay = null;
     _tokens = tokens;
     _selectedInstance = tokens.instance;
     _dio.options.baseUrl = 'https://${tokens.instance.value}';
@@ -248,12 +256,40 @@ final class KaedeApiClient {
   }
 
   Future<List<int>> getBytes(String path) async {
+    var uri = Uri.parse(_dio.options.baseUrl).resolve(path);
+    final generation = _sessionGeneration;
     try {
-      final response = await _dio.get<List<int>>(
-        path,
-        options: Options(responseType: ResponseType.bytes),
-      );
-      return response.data ?? const <int>[];
+      for (var redirects = 0;; redirects++) {
+        final response = await _dio.get<List<int>>(
+          uri.toString(),
+          options: Options(
+            responseType: ResponseType.bytes,
+            followRedirects: false,
+            validateStatus: (status) =>
+                status != null &&
+                (status >= 200 && status < 300 ||
+                    _redirectStatuses.contains(status)),
+          ),
+        );
+        if (generation != _sessionGeneration) {
+          throw const KaedeException(
+              code: 'SESSION_CHANGED',
+              message: 'The active session changed.',
+              status: 409);
+        }
+        if (!_redirectStatuses.contains(response.statusCode)) {
+          return response.data ?? const <int>[];
+        }
+        final location = response.headers.value(HttpHeaders.locationHeader);
+        if (location == null || redirects == 5) {
+          throw const KaedeException(
+              code: 'MEDIA_DOWNLOAD_FAILED',
+              message: 'The attachment could not be downloaded.',
+              status: 502);
+        }
+        uri = _safeExternalUri(uri.resolve(location).toString(),
+            purpose: 'download');
+      }
     } on DioException catch (error) {
       throw KaedeException.fromDio(error);
     }
@@ -378,6 +414,7 @@ final class KaedeApiClient {
     bool Function()? isCancelled,
   }) async {
     final session = _tokens;
+    var retried = false;
     final generation = _sessionGeneration;
     if (session == null) {
       throw const KaedeException(
@@ -404,17 +441,33 @@ final class KaedeApiClient {
             status: 409,
           );
         }
+        final accessToken = _tokens!.accessToken;
+        final authorized =
+            shouldAttachKaedeAuthorization(uri, session.instance);
         final request = await client.getUrl(uri);
         request.followRedirects = false;
         request.headers.set(HttpHeaders.acceptHeader, '*/*');
-        if (_origin(uri) == 'https://${session.instance.value}') {
+        if (authorized) {
           request.headers.set(
             HttpHeaders.authorizationHeader,
-            'Bearer ${session.accessToken}',
+            'Bearer $accessToken',
           );
         }
         final response =
             await request.close().timeout(const Duration(seconds: 30));
+        if (response.statusCode == 401 &&
+            authorized &&
+            allowSessionRefresh &&
+            !retried &&
+            generation == _sessionGeneration) {
+          retried = true;
+          await response.drain<void>();
+          if (_tokens?.accessToken == accessToken) {
+            await _refreshSingleFlight(generation);
+          }
+          redirects--;
+          continue;
+        }
         if (_redirectStatuses.contains(response.statusCode)) {
           final location = response.headers.value(HttpHeaders.locationHeader);
           await response.drain<void>();
@@ -606,7 +659,7 @@ final class KaedeApiClient {
         current == null ||
         requestGeneration != _sessionGeneration ||
         requestOrigin != 'https://${current.instance.value}' ||
-        !isKaedeApiPath(request.uri.path)) {
+        !shouldAttachKaedeAuthorization(request.uri, current.instance)) {
       handler.next(error);
       return;
     }
@@ -724,6 +777,16 @@ final class KaedeApiClient {
         );
       }
       if (response.statusCode == 401) {
+        RelayPushState? retired;
+        try {
+          retired = await _vault.readRelayPushState();
+        } on Object {
+          // A damaged notification credential must not delay sign-out.
+        }
+        if (_sessionGeneration == generation &&
+            retired?.home == current.instance) {
+          _expiredRelay = retired;
+        }
         await clearTokens(expectedGeneration: generation);
         if (_tokens == null && _sessionGeneration == generation + 1) {
           _sessionExpired.add(null);
@@ -769,7 +832,10 @@ bool isKaedeApiPath(String path) =>
     path == '/api/v1' || path.startsWith('/api/v1/');
 
 bool shouldAttachKaedeAuthorization(Uri uri, Domain instance) =>
-    _origin(uri) == 'https://${instance.value}' && isKaedeApiPath(uri.path);
+    _origin(uri) == 'https://${instance.value}' &&
+    (isKaedeApiPath(uri.path) ||
+        RegExp(r'^/media/[a-zA-Z0-9.-]+/[0-9]+/(original|thumbnail_128|thumbnail_512|thumbnail_1024|poster)$')
+            .hasMatch(uri.path));
 
 Map<String, Object?> _jsonObject(Object? value) {
   final sanitized = stripNetworkClientState(value);

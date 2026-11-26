@@ -17,6 +17,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  encrypted-voice:
+    if: startsWith(github.ref, 'refs/tags/sdk-v') && github.event_name == 'push'
+    uses: ./.github/workflows/bot-voice-interop.yml
+
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -74,4 +78,43 @@ jobs:
             uv publish --trusted-publishing never dist/*
           else
             uv publish --trusted-publishing always dist/*
+          fi
+
+  publish-voice-library:
+    needs: [publish, encrypted-voice]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kaede-bot-voice-linux-x86_64
+          path: dist
+      - name: Attach the verified voice library to the SDK release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        working-directory: dist
+        run: |
+          bundle=kaede-bot-voice-linux-x86_64.tar.gz
+          sha256sum --check "$bundle.sha256"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" "$bundle" "$bundle.sha256" \
+              --verify-tag --latest=false --title "Python SDK ${GITHUB_REF_NAME#sdk-v}" \
+              --notes "Optional Linux x86_64 native library for encrypted Python bot voice."
+          else
+            assets=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')
+            missing=()
+            for file in "$bundle" "$bundle.sha256"; do
+              if grep -Fxq "$file" <<< "$assets"; then
+                gh release download "$GITHUB_REF_NAME" --pattern "$file" --dir "$RUNNER_TEMP/existing"
+                cmp "$file" "$RUNNER_TEMP/existing/$file"
+              else
+                missing+=("$file")
+              fi
+            done
+            if ((${#missing[@]})); then
+              gh release upload "$GITHUB_REF_NAME" "${missing[@]}"
+            fi
           fi

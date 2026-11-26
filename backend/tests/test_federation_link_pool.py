@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.federation.link as link
 from app.core.settings import Settings
 from app.federation.client import OUTBOUND_FEDERATION_LIMITER
+from app.federation.network import FederationNetworkError
 
 
 class FakeSocket:
@@ -63,10 +66,37 @@ def batch(number: int) -> list[dict[str, object]]:
 async def send(destination: str, number: int) -> dict[str, object]:
     return await link.send_link_batch(
         cast(AsyncSession, object()),
-        cast(Settings, object()),
+        cast(Settings, SimpleNamespace(federation_mode="open")),
         destination,
         batch(number),
     )
+
+
+@pytest.mark.asyncio
+async def test_cached_link_rechecks_the_allowlist_before_sending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket = FakeSocket()
+    opener = AsyncMock(return_value=pooled(socket))
+    monkeypatch.setattr(link, "_open_link", opener)
+    session = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=[
+                SimpleNamespace(is_self=False, federation_mode="allowlist"),
+                None,
+            ]
+        )
+    )
+    settings = SimpleNamespace(federation_mode="allowlist")
+    try:
+        await link.send_link_batch(session, settings, "peer.example", batch(1))
+        sent = socket.last_request_id
+        with pytest.raises(FederationNetworkError, match="not allowlisted"):
+            await link.send_link_batch(session, settings, "peer.example", batch(2))
+        opener.assert_awaited_once()
+        assert socket.last_request_id == sent
+    finally:
+        await link.close_federation_links()
 
 
 @pytest.mark.asyncio

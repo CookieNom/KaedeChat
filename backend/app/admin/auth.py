@@ -19,6 +19,7 @@ ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
             "admin.read",
             "operators.manage",
             "rtc.manage",
+            "extensions.manage",
             "users.manage",
             "instances.manage",
             "bots.manage",
@@ -57,6 +58,35 @@ class AdminPrincipal:
                 status_code=403,
                 detail={"code": "ADMIN_CAPABILITY_REQUIRED", "capability": capability},
             )
+
+
+async def require_manageable_account(
+    session: AsyncSession, principal: AdminPrincipal, target: User
+) -> None:
+    if not target.is_local:
+        return
+    if target.account_type == "bot":
+        principal.require("bots.manage")
+        return
+    if "owner" in principal.roles:
+        return
+    protected = {"owner"} if "administrator" in principal.roles else {"owner", "administrator"}
+    now = datetime.now(UTC)
+    if (
+        await session.scalar(
+            select(InstanceAdminGrant.id)
+            .where(
+                InstanceAdminGrant.user_id == target.id,
+                InstanceAdminGrant.user_domain == target.origin_domain,
+                InstanceAdminGrant.role.in_(protected),
+                InstanceAdminGrant.revoked_at.is_(None),
+                InstanceAdminGrant.expires_at.is_(None) | (InstanceAdminGrant.expires_at > now),
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise HTTPException(status_code=403, detail={"code": "ADMIN_TARGET_PROTECTED"})
 
 
 async def require_admin(

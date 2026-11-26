@@ -4817,6 +4817,11 @@ final class MobileE2EEClient {
         );
       }
       signingInput = _decode('${challenge['signing_input']}', 2048);
+      final prefix = utf8.encode('kaede-device-registration-v1\u0000');
+      if (signingInput.length <= prefix.length ||
+          !_listEquals(signingInput.sublist(0, prefix.length), prefix)) {
+        throw const FormatException('Invalid device registration challenge.');
+      }
       signature = _mls.sign(signingInput);
       final registered = await repository.registerE2eeDevice(
         challengeId: challengeId,
@@ -6826,6 +6831,11 @@ final class MobileE2EEClient {
     final groupId = _decode(channel.encryptionGroupId!, 32);
     final contextBytes = Uint8List.fromList(utf8.encode(context));
     try {
+      // The logical channel epoch advances across fresh groups. The Welcome
+      // for this exact group installs its single Add commit at MLS epoch one.
+      if (_mls.groupEpoch(groupId) != '1') {
+        throw StateError('This device has not received the current call key.');
+      }
       return _mls.exportEpochSecret(
         groupId,
         'kaede livekit v1',

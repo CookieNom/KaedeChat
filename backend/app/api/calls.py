@@ -6,10 +6,10 @@ import secrets
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,9 +69,11 @@ from app.voice.schemas import (
 from app.voice.service import (
     federated_voice_grant_matches,
     require_e2ee_voice_device,
+    require_media_key_support,
     require_voice_enabled,
     update_authoritative_occupant_self_state,
     voice_e2ee_context,
+    voice_metadata_matches_policy,
 )
 from app.voice.state import (
     BOT_CAPABILITY_BINDINGS_FIELD,
@@ -245,6 +247,8 @@ async def notify_call(
     event: str,
     record: dict[str, Any],
     settings: Settings,
+    *,
+    actor: str | None = None,
 ) -> None:
     from app.tasks import mobile_push_activity
 
@@ -283,6 +287,8 @@ async def notify_call(
                 if identity in remote_capability_identities and binding is not None:
                     capability = current_by_grant[str(binding["grant_id"])]
                     rendered = bot_call_response(record, capability).model_dump(mode="json")
+                if actor is not None and event in {"CALL_ACCEPT", "CALL_DECLINE"}:
+                    rendered["acted_by_me"] = identity == actor
                 await publish_dispatch(redis, user_topic(domain, user_id), event, rendered)
                 if event == "CALL_RING" and domain == settings.domain:
                     caller_id, caller_domain = parse_participant_identity(str(record["caller"]))
@@ -366,33 +372,47 @@ async def clear_terminal_call_voice_projection(
     await cast(Any, redis.srem(voice_room_registry_key(authority), room))
 
 
-async def propagate_terminal_call(
+async def propagate_call_state(
     session: AsyncSession,
     settings: Settings,
     record: dict[str, Any],
+    *,
+    accepted_by: str | None = None,
 ) -> None:
     response = call_response(record)
-    if response.authority_domain != settings.domain or response.state != "ended":
+    if response.authority_domain != settings.domain:
         return
+    payload: dict[str, object] = {"call": response.model_dump(mode="json")}
+    if accepted_by is not None:
+        payload["accepted_by"] = accepted_by
     destinations = {
         domain
         for identity in response.participants
         if (domain := parse_participant_identity(identity)[1]) != settings.domain
     }
+    if accepted_by:
+        # The accepting home applies the authoritative response to its own request.
+        destinations.discard(parse_participant_identity(accepted_by)[1])
     for destination in sorted(destinations):
         try:
-            acknowledgement = await signed_request(
-                session,
-                settings,
-                "POST",
-                destination,
-                "/_kaede/v1/calls/state",
-                payload={"call": response.model_dump(mode="json")},
-                request_timeout=5,
-                max_response_bytes=16 * 1024,
-            )
+            # A group create travels through the durable event queue. A fast
+            # acceptance can arrive while the third home is still applying it.
+            for attempt in range(3):
+                acknowledgement = await signed_request(
+                    session,
+                    settings,
+                    "POST",
+                    destination,
+                    "/_kaede/v1/calls/state",
+                    payload=payload,
+                    request_timeout=5,
+                    max_response_bytes=16 * 1024,
+                )
+                if accepted_by is None or acknowledgement.status_code != 404 or attempt == 2:
+                    break
+                await asyncio.sleep(0.25 * (attempt + 1))
             if acknowledgement.status_code != 200:
-                raise ValueError("call terminal projection was not acknowledged")
+                raise ValueError("call projection was not acknowledged")
             exact_call_projection(
                 response.model_dump(mode="json"),
                 decode_federation_response_json(acknowledgement),
@@ -404,7 +424,7 @@ async def propagate_terminal_call(
         except Exception:
             # Federation propagation is also an ephemeral projection. Retrying
             # the terminal action will make another idempotent delivery attempt.
-            log.exception("call_terminal_propagation_failed", destination=destination)
+            log.exception("call_state_propagation_failed", destination=destination)
 
 
 async def propagate_call_create(
@@ -414,6 +434,7 @@ async def propagate_call_create(
     *,
     actor: User,
     state_version: int | None,
+    ring: bool = True,
     exclude_domains: set[str] | None = None,
 ) -> None:
     """Project an authoritative call after its group membership fence is committed."""
@@ -423,7 +444,9 @@ async def propagate_call_create(
         parse_participant_identity(identity)[1]
         for identity in cast(list[str], record["participants"])
     } - excluded
-    if state_version is not None:
+    # Legacy group events always ring. A silent call uses the existing signed
+    # create RPC, which also enforces the group membership version.
+    if state_version is not None and ring:
         envelope = await build_envelope(
             session,
             settings,
@@ -462,6 +485,7 @@ async def propagate_call_create(
                         "actor_id": str(actor.id),
                         "actor_domain": actor.origin_domain,
                         "action": "create",
+                        "ring": ring,
                         "created_at": int(record["created_at"]),
                         "state_version": (
                             str(state_version) if state_version is not None else None
@@ -502,6 +526,7 @@ async def project_call_transition(
     event: str,
     *,
     changed: bool,
+    actor: str | None = None,
 ) -> None:
     if changed or record.get("state") == "ended":
         try:
@@ -512,9 +537,17 @@ async def project_call_transition(
                 event,
                 record,
                 settings,
+                actor=actor,
             )
         except Exception:
             log.exception("call_transition_dispatch_failed", call_event=event)
+    if (
+        event == "CALL_ACCEPT"
+        and record.get("state") == "active"
+        and actor is not None
+        and record.get("authority_domain") == settings.domain
+    ):
+        await propagate_call_state(session, settings, record, accepted_by=actor)
     if record.get("state") == "ended":
         await clear_terminal_call_voice_projection(redis, settings, record)
     if record.get("state") == "ended" and record.get("authority_domain") == settings.domain:
@@ -525,7 +558,7 @@ async def project_call_transition(
         except Exception:
             log.exception("call_terminal_cleanup_failed", call_id=record.get("id"))
         try:
-            await propagate_terminal_call(session, settings, record)
+            await propagate_call_state(session, settings, record)
         except Exception:
             log.exception("call_terminal_projection_failed", call_id=record.get("id"))
 
@@ -595,6 +628,32 @@ async def require_call_policy(
         # Accepting/joining rechecks the local recipient's current policy.
         await require_can_direct_message(session, caller, actor)
     return participants
+
+
+async def active_dm_voice_participant(
+    session: AsyncSession,
+    settings: Settings,
+    call: dict[str, Any],
+    user_ref: tuple[int, str],
+    room: str,
+    metadata: dict[str, object],
+) -> User | None:
+    channel = await session.get(Channel, (int(call["channel_id"]), str(call["channel_domain"])))
+    if (
+        channel is None
+        or channel.unavailable
+        or channel.dm_successor_id is not None
+        or not voice_metadata_matches_policy(channel, room, metadata)
+    ):
+        return None
+    actor = await session.get(User, user_ref)
+    if actor is None or actor.disabled_at is not None or actor.deleted_at is not None:
+        return None
+    try:
+        await require_call_policy(session, settings, call, actor)
+    except HTTPException:
+        return None
+    return actor
 
 
 @router.post("/api/v1/channels/{channel_ref}/calls", response_model=CallResponse)
@@ -733,6 +792,7 @@ async def start_call(
         record,
         actor=auth.user,
         state_version=state_version,
+        ring=payload.ring,
     )
     return call_response(record)
 
@@ -846,6 +906,7 @@ async def act_on_call(
         updated,
         event,
         changed=changed,
+        actor=identity,
     )
     return call_response(updated)
 
@@ -859,6 +920,7 @@ async def mint_dm_call_token(
     *,
     sender_device_id: str | None,
     remote_device_attested: bool = False,
+    supports_aes256: bool = True,
     connection_id: str,
     takeover: bool = False,
     client_kind: str = "web",
@@ -889,6 +951,7 @@ async def mint_dm_call_token(
     )
     if channel is None:
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    require_media_key_support(channel, supports_aes256)
     await require_e2ee_voice_device(
         session,
         settings,
@@ -954,6 +1017,7 @@ async def mint_dm_call_token(
         "can_listen": allow_listen,
         "can_use_vad": True,
     }
+    metadata["video_control_data"] = user.account_type == "human"
     if bot_lineage is not None:
         metadata.update(bot_lineage)
     if move_session_id is not None:
@@ -970,7 +1034,7 @@ async def mint_dm_call_token(
             can_speak=allow_speak,
             can_stream=allow_stream,
             can_subscribe=allow_listen,
-            can_publish_data=False,
+            can_publish_data=user.account_type == "human",
         )
     except LiveKitError as exc:
         await release_voice_connection(
@@ -1023,6 +1087,7 @@ async def call_voice_token(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
     payload: VoiceTokenRequest | None = None,
+    media_key_bits: Annotated[str | None, Header(alias="X-Kaede-Media-Key-Bits")] = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     call_id, authority = call_ref.resolve(settings.domain)
@@ -1044,6 +1109,7 @@ async def call_voice_token(
             settings,
             record,
             auth.user,
+            supports_aes256=media_key_bits == "256",
             sender_device_id=payload.sender_device_id if payload is not None else None,
             connection_id=connection_id,
             takeover=takeover,
@@ -1061,6 +1127,7 @@ async def call_voice_token(
     )
     if channel is None:
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
+    require_media_key_support(channel, media_key_bits == "256")
     await require_e2ee_voice_device(
         session,
         settings,
@@ -1092,6 +1159,7 @@ async def call_voice_token(
             "POST",
             authority,
             "/_kaede/v1/voice/dm-token",
+            query={"media_key_bits": "256"} if media_key_bits == "256" else None,
             payload={
                 "call_id": str(call_id),
                 "actor_id": str(auth.user.id),
@@ -1112,10 +1180,13 @@ async def call_voice_token(
             if response.status_code == 409:
                 try:
                     body = decode_federation_response_json(response)
-                    detail = body.get("detail", {}) if isinstance(body, dict) else {}
+                    detail = body.get("detail", body) if isinstance(body, dict) else {}
                 except (FederationNetworkError, ValueError, json.JSONDecodeError):
                     detail = {}
-                if isinstance(detail, dict) and detail.get("code") == "VOICE_ACTIVE_ELSEWHERE":
+                if isinstance(detail, dict) and detail.get("code") in (
+                    "VOICE_ACTIVE_ELSEWHERE",
+                    "VOICE_CLIENT_UPDATE_REQUIRED",
+                ):
                     raise HTTPException(status_code=409, detail=detail)
             raise HTTPException(status_code=response.status_code, detail={"code": "VOICE_DENIED"})
         try:
@@ -1161,6 +1232,7 @@ async def federation_dm_voice_token(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    media_key_bits: str | None = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     await enforce_federation_route_rate_limit(
@@ -1182,6 +1254,7 @@ async def federation_dm_voice_token(
         user,
         sender_device_id=payload.sender_device_id,
         remote_device_attested=True,
+        supports_aes256=media_key_bits == "256",
         connection_id=payload.connection_id,
         takeover=payload.takeover,
         client_kind=payload.client_kind,
@@ -1481,9 +1554,10 @@ async def federation_call_signal(
     authority_proposal = False
     if payload.action == "create":
         if conversation.type == "group":
-            if (
-                payload.authority_domain != conversation.authority_domain
-                or principal.origin not in {payload.actor_domain, conversation.authority_domain}
+            if payload.authority_domain != conversation.authority_domain or principal.origin != (
+                payload.actor_domain
+                if settings.domain == conversation.authority_domain
+                else conversation.authority_domain
             ):
                 raise HTTPException(
                     status_code=403,
@@ -1505,17 +1579,22 @@ async def federation_call_signal(
             if (
                 payload.actor_domain != principal.origin
                 or payload.authority_domain != conversation.authority_domain
-                or settings.domain != conversation.authority_domain
+                or (
+                    settings.domain != conversation.authority_domain
+                    and principal.origin != conversation.authority_domain
+                )
                 or payload.state_version is not None
             ):
                 raise HTTPException(
                     status_code=403,
                     detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"},
                 )
-            authority_proposal = True
+            authority_proposal = settings.domain == conversation.authority_domain
     participants = await local_dm_participants(session, channel.id, channel.origin_domain)
     identities = {participant_identity(item.id, item.origin_domain) for item in participants}
     identity = participant_identity(actor.id, actor.origin_domain)
+    if not any(item.origin_domain == settings.domain for item in participants):
+        raise HTTPException(status_code=403, detail={"code": "CALL_FORBIDDEN"})
     if identity not in identities or (
         existing_call is not None and identity not in existing_call.get("participants", [])
     ):
@@ -1576,6 +1655,7 @@ async def federation_call_signal(
                 state_version=(
                     conversation.state_version if conversation.type == "group" else None
                 ),
+                ring=payload.ring,
                 exclude_domains={principal.origin},
             )
         return call_response(record)
@@ -1599,6 +1679,7 @@ async def federation_call_signal(
         updated,
         event,
         changed=changed,
+        actor=identity,
     )
     return call_response(updated)
 
@@ -1623,23 +1704,27 @@ async def federation_call_state(
         raise HTTPException(status_code=404, detail={"code": "CALL_NOT_FOUND"})
     if not same_call_identity(existing, incoming):
         raise HTTPException(status_code=409, detail={"code": "CALL_CONTEXT_MISMATCH"})
-    accepted, _changed, result = await apply_authoritative_call(
+    accepted, changed, result = await apply_authoritative_call(
         redis,
         incoming,
         settings,
-        action="sync",
+        action="accept" if payload.accepted_by else "sync",
+        identity=payload.accepted_by,
     )
     if not accepted:
         code = "CALL_NOT_FOUND" if result == "missing" else "CALL_INVALID_TRANSITION"
         raise HTTPException(status_code=404 if result == "missing" else 409, detail={"code": code})
     updated = cast(dict[str, Any], result)
-    await clear_terminal_call_voice_projection(redis, settings, updated)
-    await notify_call(
-        session,
-        redis,
-        cast(list[str], updated["participants"]),
-        "CALL_END",
-        updated,
-        settings,
-    )
+    if updated["state"] == "ended":
+        await clear_terminal_call_voice_projection(redis, settings, updated)
+    if changed or updated["state"] == "ended":
+        await notify_call(
+            session,
+            redis,
+            cast(list[str], updated["participants"]),
+            "CALL_ACCEPT" if payload.accepted_by else "CALL_END",
+            updated,
+            settings,
+            actor=payload.accepted_by,
+        )
     return call_response(updated)

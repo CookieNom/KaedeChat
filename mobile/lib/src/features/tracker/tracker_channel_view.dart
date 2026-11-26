@@ -431,7 +431,12 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
         tasks: board.tasks,
       ),
     );
-    if (target == null ||
+    if (target != null) await _applyTaskMove(task, target);
+  }
+
+  Future<void> _applyTaskMove(
+      TrackerTask task, TrackerTaskMoveDraft target) async {
+    if (task.channelRef != widget.channel.ref ||
         (target.lane == task.laneRef && target.position == task.position)) {
       return;
     }
@@ -771,6 +776,10 @@ final class _TrackerChannelViewState extends ConsumerState<TrackerChannelView> {
                           viewTask: _viewTask,
                           editTask: _editTask,
                           moveTask: _moveTask,
+                          dropTask: (task) => _applyTaskMove(
+                              task,
+                              TrackerTaskMoveDraft(
+                                  lane: lane.ref, position: tasks.length)),
                           toggleTask: _toggleCompleted,
                           deleteTask: _deleteTask,
                         );
@@ -915,6 +924,7 @@ final class _TrackerLaneSection extends StatelessWidget {
     required this.viewTask,
     required this.editTask,
     required this.moveTask,
+    required this.dropTask,
     required this.toggleTask,
     required this.deleteTask,
   });
@@ -937,13 +947,14 @@ final class _TrackerLaneSection extends StatelessWidget {
   final ValueChanged<TrackerTask> viewTask;
   final ValueChanged<TrackerTask> editTask;
   final ValueChanged<TrackerTask> moveTask;
+  final ValueChanged<TrackerTask> dropTask;
   final ValueChanged<TrackerTask> toggleTask;
   final ValueChanged<TrackerTask> deleteTask;
 
   @override
   Widget build(BuildContext context) {
     final color = Color(0xFF000000 | lane.color);
-    return Semantics(
+    final content = Semantics(
       container: true,
       label: L10n.of(context).ui_value0_value1_tasks_value2_d427bbcd(
           (lane.name).toString(),
@@ -1077,6 +1088,7 @@ final class _TrackerLaneSection extends StatelessWidget {
                     canEdit: trackerTaskCanEdit(board, task, actor),
                     canAssign: trackerTaskCanAssign(board, task, actor),
                     busy: busy,
+                    multipleLanes: board.lanes.length > 1,
                     open: () => viewTask(task),
                     edit: () => editTask(task),
                     move: () => moveTask(task),
@@ -1099,6 +1111,31 @@ final class _TrackerLaneSection extends StatelessWidget {
         ),
       ),
     );
+    bool accepts(TrackerTask task) =>
+        !busy &&
+        task.channelRef == board.channelRef &&
+        task.laneRef != lane.ref &&
+        trackerTaskCanEdit(board, task, actor);
+    return DragTarget<TrackerTask>(
+      onWillAcceptWithDetails: (details) => accepts(details.data),
+      onAcceptWithDetails: (details) {
+        if (accepts(details.data)) dropTask(details.data);
+      },
+      builder: (context, candidates, rejected) => AnimatedContainer(
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : const Duration(milliseconds: 140),
+        decoration: BoxDecoration(
+          color: candidates.isEmpty
+              ? Colors.transparent
+              : color.withValues(alpha: .12),
+          borderRadius: BorderRadius.circular(KaedeRadius.medium),
+          border: Border.all(
+              color: candidates.isEmpty ? Colors.transparent : color),
+        ),
+        child: content,
+      ),
+    );
   }
 }
 
@@ -1109,6 +1146,7 @@ final class _TrackerTaskRow extends StatelessWidget {
     required this.canEdit,
     required this.canAssign,
     required this.busy,
+    required this.multipleLanes,
     required this.open,
     required this.edit,
     required this.move,
@@ -1121,6 +1159,7 @@ final class _TrackerTaskRow extends StatelessWidget {
   final bool canEdit;
   final bool canAssign;
   final bool busy;
+  final bool multipleLanes;
   final VoidCallback open;
   final VoidCallback edit;
   final VoidCallback move;
@@ -1137,7 +1176,7 @@ final class _TrackerTaskRow extends StatelessWidget {
         ? 'no due date'
         : 'due ${DateFormat.yMMMd().add_jm().format(due.toLocal())}'
             '${overdue ? ', overdue' : ''}';
-    return Semantics(
+    final row = Semantics(
       button: true,
       label: L10n.of(context)
           .ui_value0_value1_value2_status_value3_value4_val_08a02dfb(
@@ -1283,6 +1322,68 @@ final class _TrackerTaskRow extends StatelessWidget {
           ),
         ),
       ),
+    );
+    if (!multipleLanes || !canEdit || busy) return row;
+    return _DraggableTask(key: ValueKey(task.ref), task: task, child: row);
+  }
+}
+
+final class _DraggableTask extends StatefulWidget {
+  const _DraggableTask({super.key, required this.task, required this.child});
+  final TrackerTask task;
+  final Widget child;
+
+  @override
+  State<_DraggableTask> createState() => _DraggableTaskState();
+}
+
+final class _DraggableTaskState extends State<_DraggableTask>
+    with AutomaticKeepAliveClientMixin {
+  EdgeDraggingAutoScroller? _scroller;
+
+  @override
+  bool get wantKeepAlive => _scroller != null;
+
+  @override
+  void dispose() {
+    _scroller?.stopAutoScroll();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return LongPressDraggable<TrackerTask>(
+      data: widget.task,
+      maxSimultaneousDrags: 1,
+      dragAnchorStrategy: pointerDragAnchorStrategy,
+      onDragStarted: () {
+        _scroller = EdgeDraggingAutoScroller(Scrollable.of(context),
+            velocityScalar: 10);
+        updateKeepAlive();
+      },
+      onDragUpdate: (details) => _scroller?.startAutoScrollIfNecessary(
+        Rect.fromCenter(center: details.globalPosition, width: 1, height: 72),
+      ),
+      onDragEnd: (_) {
+        _scroller?.stopAutoScroll();
+        _scroller = null;
+        updateKeepAlive();
+      },
+      childWhenDragging: Opacity(opacity: .4, child: widget.child),
+      feedback: Material(
+        elevation: 5,
+        color: context.kaede.panel,
+        borderRadius: BorderRadius.circular(KaedeRadius.small),
+        child: Container(
+          constraints:
+              BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * .72),
+          padding: EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          child: Text(widget.task.title,
+              maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+      ),
+      child: widget.child,
     );
   }
 }

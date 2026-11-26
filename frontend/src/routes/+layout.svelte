@@ -33,6 +33,11 @@
       applyTheme(storedTheme(), false);
       return stopDesktopThemes;
     }
+    const opened = window.__TAURI__?.event
+      ?.listen<string>('kaede-notification-open', ({ payload }) => {
+        if (/^\/(?:home\/[^/?#]+|g\/[^/?#]+\/[^/?#]+)$/.test(payload)) void goto(payload);
+      })
+      .catch(() => undefined);
     // Begin restoring a native session before any protected child route can
     // issue work. API calls also await the same single-flight promise.
     void initializeNativeInstance()
@@ -90,6 +95,7 @@
     colorScheme.addEventListener('change', colorSchemeChanged);
     return () => {
       stopDesktopThemes();
+      void opened?.then((unlisten) => unlisten?.());
       window.removeEventListener('languagechange', refreshLanguage);
       window.removeEventListener('focus', refreshLanguage);
       window.removeEventListener('kaede:session-expired', sessionExpired);

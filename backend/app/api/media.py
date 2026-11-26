@@ -895,6 +895,7 @@ async def commit_role_icon(
         "guild.role.update",
         {"role": rendered},
         snapshot_required=True,
+        pause_e2ee=False,
     )
     await session.commit()
     await wake_queued_guild_federation(guild)
@@ -952,6 +953,7 @@ async def delete_role_icon(
         "guild.role.update",
         {"role": rendered},
         snapshot_required=True,
+        pause_e2ee=False,
     )
     await session.commit()
     await wake_queued_guild_federation(guild)

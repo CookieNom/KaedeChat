@@ -54,6 +54,22 @@ def management_request(operation: str, payload: dict[str, object]) -> GuildManag
     )
 
 
+@pytest.mark.asyncio
+async def test_management_webhook_targets_the_signed_guild() -> None:
+    request = management_request("webhook.get", {"resource_id": 70})
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(guild_id=11, guild_domain="home.example"))
+    )
+    with pytest.raises(HTTPException) as caught:
+        await management_api.require_management_resource_guild(
+            cast(Any, session),
+            cast(Any, SimpleNamespace(domain="home.example")),
+            Guild(id=10, origin_domain="home.example"),
+            request,
+        )
+    assert caught.value.detail == {"code": "WEBHOOK_NOT_FOUND"}
+
+
 def management_result(
     status_code: int,
     body: object = None,
@@ -66,6 +82,43 @@ def management_result(
         guild={"id": "10", "domain": "home.example"},
         status_code=status_code,
         body=body,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supported", [True, False])
+async def test_remote_webhook_token_recovery_requires_advertised_support(
+    monkeypatch: pytest.MonkeyPatch,
+    supported: bool,
+) -> None:
+    monkeypatch.setattr(
+        guild_management_rpc,
+        "remote_management_guild",
+        AsyncMock(return_value=Guild(id=10, origin_domain="home.example")),
+    )
+    monkeypatch.setattr(guild_management_rpc, "peer_advertises", AsyncMock(return_value=supported))
+    response = management_result(
+        200,
+        [{"id": "8", "token": "test", "execution_url": "/webhooks/8/test"}],
+        operation="webhook.list",
+    )
+    request = AsyncMock(return_value=response)
+    monkeypatch.setattr(guild_management_rpc, "request_guild_management", request)
+    handled, body = await proxy_remote_guild_management_body(
+        cast(Any, object()),
+        cast(Any, SimpleNamespace(domain="remote.example")),
+        EntityRef("10@home.example"),
+        User(id=8, origin_domain="remote.example", account_type="bot"),
+        "webhook.list",
+        {"recover_tokens": True},
+    )
+    assert handled
+    payload = request.await_args.args[-1].payload
+    assert payload == ({"recover_tokens": True} if supported else {})
+    assert body == (
+        [{"id": "8", "token": "test", "execution_url": "/webhooks/8/test"}]
+        if supported
+        else [{"id": "8"}]
     )
 
 

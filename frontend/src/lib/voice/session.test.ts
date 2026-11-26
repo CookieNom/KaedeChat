@@ -1,5 +1,12 @@
+import * as callSounds from './call-sounds';
 import { webCameraDefaults } from './quality';
-import { Track, type Room } from 'livekit-client';
+import {
+  ExternalE2EEKeyProvider,
+  RoomEvent,
+  Track,
+  type Participant,
+  type Room
+} from 'livekit-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Channel } from '$lib/chat/types';
 
@@ -69,6 +76,56 @@ const plaintextChannel = {
   encryption_policy_generation: '0',
   encryption_epoch: null
 } satisfies VoiceChannelPolicy;
+
+it('updates the desktop DM roster and speech indicator as native room status changes', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-07-19T12:00:00Z'));
+  const cue = vi.spyOn(callSounds, 'playCallSound');
+  const peer = { name: 'Alice', speaking: false, microphone: false, camera: false, screen: false };
+  const status = {
+    state: 'connected',
+    can_speak: true,
+    speech_frames: 0,
+    input_level: 0,
+    remote_participants: { '2@chat.example': peer } as Record<string, typeof peer>
+  };
+  const invoke = vi.fn(async (command: string, _args?: Record<string, unknown>) => {
+    if (command === 'native_voice_status') return { ...status };
+    if (command === 'native_voice_next_video') return new Uint8Array();
+  });
+  vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+  const voice = new VoiceSession(() => new FakeVoiceRoom() as unknown as Room);
+  const handle = '3bd81f31-6ab3-4569-bdae-a9258a5b4a5e';
+  await voice.connectNative('2', true, grant({ token: handle }), plaintextChannel);
+  try {
+    expect(invoke).toHaveBeenCalledWith(
+      'native_voice_join',
+      expect.objectContaining({ grantHandle: handle, connectionId: grant().connection_id })
+    );
+    expect(voice.participants()[0].speaking).toBe(false);
+    expect(voice.participants()).toHaveLength(2);
+    expect(voice.participants()[1]).toEqual({
+      ...peer,
+      identity: '2@chat.example',
+      key: '2@chat.example',
+      local: false
+    });
+    status.remote_participants = {};
+    status.speech_frames++;
+    await vi.advanceTimersByTimeAsync(75);
+    expect(voice.participants()).toHaveLength(1);
+    expect(voice.participants()[0].speaking).toBe(true);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(voice.participants()[0].speaking).toBe(false);
+    status.remote_participants = { '3@chat.example': peer };
+    await vi.advanceTimersByTimeAsync(150);
+    expect(cue.mock.calls).toEqual([['join'], ['leave'], ['join']]);
+  } finally {
+    await voice.disconnect();
+    expect(cue).toHaveBeenLastCalledWith('leave');
+    cue.mockRestore();
+  }
+});
 
 describe('voice connection generation fence', () => {
   it('makes an in-flight move stale when the user leaves', () => {
@@ -542,6 +599,70 @@ describe('voice media key rotation', () => {
     media_session_id: 'a'.repeat(43),
     media_epoch: '7'
   });
+
+  it.each([true, false])(
+    'waits for worker confirmation before publishing (enabled %s)',
+    async (enabled) => {
+      vi.stubGlobal(
+        'RTCRtpSender',
+        class {
+          get transform() {
+            return null;
+          }
+        }
+      );
+      const terminate = vi.fn();
+      vi.stubGlobal(
+        'Worker',
+        class {
+          terminate = terminate;
+        }
+      );
+      const keyInstall = vi.spyOn(ExternalE2EEKeyProvider.prototype, 'setKey').mockResolvedValue();
+      const candidate = new FakeVoiceRoom();
+      const room = candidate as unknown as Room;
+      let ack!: (enabled: boolean, participant: Participant) => void;
+      room.on = vi.fn((event, listener) => {
+        if (event === RoomEvent.ParticipantEncryptionStatusChanged) ack = listener;
+        return room;
+      }) as Room['on'];
+      const enable = vi.fn(async () => undefined);
+      room.setE2EEEnabled = enable;
+      const idle = new FakeVoiceRoom() as unknown as Room;
+      const voice = new VoiceSession((options) => {
+        if (!options?.e2ee || !('keyProvider' in options.e2ee)) return idle;
+        expect(options.e2ee.keyProvider.getOptions().keySize).toBe(256);
+        return room;
+      });
+      try {
+        const attempt = voice.connect(
+          { ...encrypted, expires_at: '2099-07-19T12:15:00Z' },
+          channel,
+          new ArrayBuffer(32)
+        );
+        await vi.waitFor(() => expect(enable).toHaveBeenCalledWith(true));
+        expect(candidate.connect).not.toHaveBeenCalled();
+        expect(candidate.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+        room.isE2EEEnabled = enabled;
+        Object.assign(room.localParticipant, { isE2EEEnabled: enabled });
+        ack(true, room.localParticipant);
+        if (enabled) {
+          await attempt;
+          expect(voice.encrypted).toBe(true);
+          expect(candidate.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true);
+        } else {
+          await expect(attempt).rejects.toThrow(/enabl.*encrypted/i);
+          expect(voice.encrypted).toBeNull();
+          expect(candidate.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+          expect(candidate.disconnect).toHaveBeenCalled();
+        }
+        await voice.disconnect();
+        expect(terminate).toHaveBeenCalled();
+      } finally {
+        keyInstall.mockRestore();
+      }
+    }
+  );
 
   it('rejects the old grant after epoch rotation and accepts the replacement', () => {
     expect(voiceGrantMatchesChannelPolicy(encrypted, channel)).toBe(true);

@@ -29,6 +29,7 @@ from app.voice.service import parse_minted_metadata
 from app.voice.state import (
     FederatedVoiceSession,
     Occupant,
+    bump_generation,
     call_bot_capability_bindings,
     current_generation,
     federation_occupant_state,
@@ -41,6 +42,7 @@ from app.voice.state import (
     room_state_key,
     set_federated_voice_authority_session,
     set_occupant,
+    transition_call,
     voice_connection_matches,
     voice_grant_transition_active,
     voice_room_registry_key,
@@ -332,6 +334,26 @@ async def _reconcile_room(
         and call_record.get("state") != "ended"
         else set()
     )
+    if kind == "d" and call_participants:
+        if len(participants) == 1 and participants[0].identity in call_participants:
+            _, changed, terminal = await transition_call(
+                redis,
+                settings.domain,
+                leaf_id,
+                participants[0].identity,
+                "check_alone",
+                settings,
+                solo_session_id=participants[0].sid,
+            )
+            if changed and isinstance(terminal, dict):
+                from app.api.calls import project_call_transition
+
+                await project_call_transition(
+                    redis, session, settings, terminal, "CALL_END", changed=True
+                )
+                return
+        else:
+            await redis.delete(room_state_key("alone", settings.domain, room))
     for participant in participants:
         identity = str(participant.identity)
         try:
@@ -352,6 +374,19 @@ async def _reconcile_room(
             with suppress(LiveKitError):
                 await LiveKitControl(settings).remove_participant(room, identity)
             continue
+        if kind == "d" and call_record is not None:
+            from app.api.calls import active_dm_voice_participant
+
+            if (
+                await active_dm_voice_participant(
+                    session, settings, call_record, (user_id, user_domain), room, metadata
+                )
+                is None
+            ):
+                await bump_generation(redis, settings.domain, room, identity)
+                with suppress(LiveKitError):
+                    await LiveKitControl(settings).remove_participant(room, identity)
+                continue
         move_session_id = metadata.get("move_session_id")
         bot_grant = None
         if metadata.get("client_kind") == "bot":

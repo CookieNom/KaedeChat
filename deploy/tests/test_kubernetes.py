@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kubernetes"))
+import check
 import dev
 import manage
 import update_notices
@@ -26,6 +27,26 @@ class KubernetesTests(unittest.TestCase):
         key = self.values["KAEDE_SAFETY_EVIDENCE_KEY"]
         self.assertEqual(len(key), 64)
         self.assertEqual(len(bytes.fromhex(key)), 32)
+
+    def test_federation_checks_mount_the_firewall_hook_after_k3d_dns(self):
+        for action in ("federation-check", "federation-tls-check", "chat-check"):
+            with (
+                self.subTest(action=action),
+                patch("check.api_address", return_value="127.0.0.1:1234"),
+                patch("check.run", side_effect=["", RuntimeError("cluster create")]) as run,
+                self.assertRaisesRegex(RuntimeError, "cluster create"),
+            ):
+                check.run_check(action)
+            args = run.call_args.args[0]
+            self.assertEqual(args[:3], ["k3d", "cluster", "create"])
+            mounts = [args[i + 1] for i, arg in enumerate(args) if arg == "--volume"]
+            hook = ROOT / "deploy/kubernetes/federation-iptables.sh"
+            self.assertTrue(hook.stat().st_mode & 0o111)
+            self.assertEqual(
+                f"{hook}:/bin/k3d-entrypoint-z-federation.sh:ro@server:0" in mounts,
+                action.startswith("federation"),
+            )
+            self.assertFalse(any("IPTABLES_MODE=" in arg for arg in args))
 
     def test_image_import_verifies_every_image_in_the_node(self):
         with patch("dev.run") as run:
@@ -227,11 +248,19 @@ class KubernetesTests(unittest.TestCase):
             self.assertEqual(source.read_text(), "# baseline\n")
 
     def test_role_credentials_and_rollout_contract(self):
-        items = render(self.values, "kaede-test")["items"]
+        items = render(
+            self.values
+            | {
+                "KAEDE_PHOTODNA_ENABLED": "true",
+                "PHOTODNA_EDGEHASHGENERATOR": "/opt/vendor-sdk",
+                "KAEDE_VENDOR_DIR": "/srv/extensions",
+            },
+            "kaede-test",
+        )["items"]
         index = {(o["kind"], o["metadata"]["name"]): o for o in items}
 
-        def env(role):
-            obj = index[("Deployment", role)]
+        def env(role, kind="Deployment"):
+            obj = index[(kind, role)]
             ref = obj["spec"]["template"]["spec"]["containers"][0]["envFrom"][0][
                 "secretRef"
             ]["name"]
@@ -240,6 +269,43 @@ class KubernetesTests(unittest.TestCase):
                 for k, v in index[("Secret", ref)]["data"].items()
             }
 
+        api_pod = index[("Deployment", "api")]["spec"]["template"]["spec"]
+        self.assertEqual(env("api")["KAEDE_VENDOR_DIR"], "/opt/kaede/extensions")
+        self.assertIn({"name": "extensions", "hostPath": {"path": "/srv/extensions", "type": "Directory"}}, api_pod["volumes"])
+        self.assertIn({"name": "extensions", "mountPath": "/opt/kaede/extensions", "readOnly": True}, api_pod["containers"][0]["volumeMounts"])
+        storage_env = env("storage-init", "Job")
+        self.assertIn("KAEDE_MEDIA_S3_SECRET_KEY", storage_env)
+        self.assertTrue(
+            all(
+                k == "KAEDE_ENVIRONMENT" or k.startswith("KAEDE_MEDIA_")
+                for k in storage_env
+            )
+        )
+        storage_pod = index[("Job", "storage-init")]["spec"]["template"]["spec"]
+        self.assertFalse(any("hostPath" in v for v in storage_pod["volumes"]))
+        self.assertEqual(
+            index[("NetworkPolicy", "private-data")]["spec"]["ingress"], []
+        )
+        allowed = {}
+        for (kind, _), obj in index.items():
+            if kind == "NetworkPolicy":
+                spec = obj["spec"]
+                for rule in spec["ingress"]:
+                    target = spec["podSelector"]["matchLabels"]["app"]
+                    ports = [entry["port"] for entry in rule["ports"]]
+                    for peer in rule["from"]:
+                        for role in peer["podSelector"]["matchExpressions"][0][
+                            "values"
+                        ]:
+                            allowed.setdefault(role, set()).update(
+                                (target, port) for port in ports
+                            )
+        self.assertEqual(allowed["storage-init"], {("garage", 3900)})
+        self.assertEqual(allowed["caddy"], {("garage", 3900)})
+        self.assertEqual(allowed["scheduler"], {("dragonfly", 6379)})
+        self.assertEqual(allowed["migrate"], {("postgres", 5432)})
+        self.assertNotIn("frontend", allowed)
+        self.assertEqual(allowed["garage"], {("garage", 3901)})
         self.assertNotIn("KAEDE_DATABASE_URL", env("scheduler"))
         self.assertNotIn("KAEDE_ADMIN_TOKEN", env("gateway"))
         self.assertNotIn("KAEDE_MEDIA_S3_SECRET_KEY", env("gateway"))

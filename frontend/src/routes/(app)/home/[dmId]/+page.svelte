@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { presenceControl } from '$lib/stores/presence.svelte';
   import PresenceIndicator from '$lib/components/PresenceIndicator.svelte';
   let saveNotice = $state('');
   import Toast from '$lib/components/Toast.svelte';
@@ -246,6 +247,18 @@
   let fileInput = $state<HTMLInputElement | null>(null);
   let activeCall = $state<CallState | null>(null);
   let callJoined = $state(false);
+  let accountJoined = $state(false);
+  let conversationHeight = $state(0);
+  let callFraction = $state(0.46);
+  const minCallHeight = $derived(Math.min(220, Math.floor(conversationHeight * 0.6)));
+  const maxCallHeight = $derived(
+    Math.max(minCallHeight, Math.floor(conversationHeight * 0.85) - 24)
+  );
+  const callHeight = $derived(
+    Math.max(minCallHeight, Math.min(maxCallHeight, Math.round(conversationHeight * callFraction)))
+  );
+  let grabOffset = 0;
+
   let composerInput = $state<HTMLTextAreaElement | null>(null);
   let autocomplete = $state<{ handleKeydown(event: KeyboardEvent): boolean } | null>(null);
   let editingMessage = $state<Message | null>(null);
@@ -388,6 +401,7 @@
     created_at: number;
     ended_at: number | null;
     caller: string;
+    acted_by_me?: boolean;
     participants: string[];
   }
 
@@ -404,7 +418,10 @@
     directMessages.find((item) => matchesEntityRef(dmId, item, localDomain)) ?? null
   );
   const systemConversation = $derived(channel?.recipients?.some(isSystemUser) ?? false);
-  const canCreatePoll = $derived(Boolean(channelReady && channel));
+  const encryptionPaused = $derived(
+    channel?.encryption_mode === 'e2ee' && channel.encryption_state !== 'active'
+  );
+  const canCreatePoll = $derived(Boolean(channelReady && channel && !encryptionPaused));
   const canPinMessages = $derived(
     Boolean(!systemConversation && channel && channelSupportsMessagePins(channel))
   );
@@ -564,6 +581,33 @@
     );
   }
 
+  function ownsCall(call: CallState): boolean {
+    const localCall = authenticatedGateway.joinedDmCall;
+    return (
+      !!currentUser &&
+      localCall?.owner === entityRef(currentUser) &&
+      localCall.id === call.id &&
+      localCall.authority === call.authority_domain
+    );
+  }
+
+  function joinHere(call: CallState) {
+    if (!currentUser || call.state === 'ended') return;
+    authenticatedGateway.joinedDmCall = {
+      owner: entityRef(currentUser),
+      id: call.id,
+      authority: call.authority_domain
+    };
+    accountJoined = true;
+    callJoined = true;
+  }
+
+  function keepCallElsewhere(reference: string) {
+    if (!activeCall || reference !== activeCallRef || !ownsCall(activeCall)) return;
+    authenticatedGateway.joinedDmCall = null;
+    callJoined = false;
+  }
+
   function callWasStartedByMe(call: CallState): boolean {
     return currentUser !== null && call.caller === entityRef(currentUser);
   }
@@ -580,14 +624,7 @@
   }
 
   function myPresencePreference(): 'online' | 'idle' | 'dnd' | 'invisible' {
-    try {
-      const preferred = localStorage.getItem('kaede.presence');
-      if (preferred === 'idle' || preferred === 'dnd' || preferred === 'invisible')
-        return preferred;
-    } catch {
-      // Use online when browser storage is unavailable.
-    }
-    return 'online';
+    return presenceControl.state?.effective_status ?? 'online';
   }
 
   function openMessageProfile(message: Message, event: MouseEvent) {
@@ -886,25 +923,30 @@
       const call = dispatch.d as CallState;
       if (isCurrentChannel(call.channel_id, call.channel_domain)) {
         callRevision += 1;
+        accountJoined = callWasStartedByMe(call) || (isCurrentCall(call) && accountJoined);
         activeCall = call;
-        callJoined = callWasStartedByMe(call);
+        callJoined = ownsCall(call);
       }
     } else if (dispatch.t === 'CALL_ACCEPT') {
       const call = dispatch.d as CallState;
       if (
+        call.acted_by_me === true &&
         isCurrentChannel(call.channel_id, call.channel_domain) &&
         (!activeCall ||
           (activeCall.id === call.id && activeCall.authority_domain === call.authority_domain))
       ) {
         callRevision += 1;
         activeCall = call;
-        callJoined = true;
+        accountJoined = true;
+        callJoined = ownsCall(call);
       }
     } else if (dispatch.t === 'CALL_DECLINE' || dispatch.t === 'CALL_END') {
       const call = dispatch.d as CallState;
-      if (isCurrentCall(call)) {
+      if (isCurrentCall(call) && (call.state === 'ended' || call.acted_by_me !== false)) {
         callRevision += 1;
+        if (ownsCall(call)) authenticatedGateway.joinedDmCall = null;
         activeCall = null;
+        accountJoined = false;
         callJoined = false;
       }
     } else if (dispatch.t === 'PRESENCE_UPDATE') {
@@ -1074,6 +1116,7 @@
       timelineAtBottom = false;
       callRevision += 1;
       activeCall = null;
+      accountJoined = false;
       callJoined = false;
       profile = null;
       callBusy = false;
@@ -1224,10 +1267,11 @@
           activeCall?.id !== nextCall?.id ||
           activeCall?.authority_domain !== nextCall?.authority_domain ||
           activeCall?.state !== nextCall?.state ||
-          callJoined !== (nextCall ? loadedCall.joined : false);
+          accountJoined !== Boolean(nextCall && loadedCall.joined);
         if (callChanged) callRevision += 1;
         activeCall = nextCall;
-        callJoined = nextCall ? loadedCall.joined : false;
+        accountJoined = Boolean(nextCall && loadedCall.joined);
+        callJoined = Boolean(accountJoined && nextCall && ownsCall(nextCall));
       }
       const loadedChannel =
         loadedDms.find((item) => matchesEntityRef(targetRef, item, localDomain)) ?? null;
@@ -1298,14 +1342,6 @@
         e2eeClient = client;
         orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
         if (!isCurrent()) return;
-        if (isGroupDm(loadedChannel)) {
-          void client
-            .safetyNumber(loadedChannel)
-            .catch(() => '')
-            .then((number) => {
-              if (isCurrent()) e2eeSafetyNumber = number;
-            });
-        }
       } else {
         e2eeClient = null;
         e2eeSafetyNumber = '';
@@ -1576,7 +1612,7 @@
   }
 
   async function send(retry?: PendingMessageSend) {
-    if (systemConversation || busy || !channelReady || !channel) return;
+    if (systemConversation || encryptionPaused || busy || !channelReady || !channel) return;
     const text = content.trim();
     if (editingMessage && !retry) {
       if (!text) return;
@@ -1988,12 +2024,12 @@
       if (
         generation !== loadGeneration ||
         routeRef !== dmId ||
-        revision !== callRevision ||
+        (revision !== callRevision && !isCurrentCall(created)) ||
         !isCurrentChannel(created.channel_id, created.channel_domain)
       )
         return;
       activeCall = created;
-      callJoined = true;
+      joinHere(created);
       callRevision += 1;
     } catch (caught) {
       if (
@@ -2006,6 +2042,44 @@
     } finally {
       if (generation === loadGeneration && routeRef === dmId) callBusy = false;
     }
+  }
+
+  function resizeCall(height: number) {
+    if (conversationHeight)
+      callFraction = Math.max(minCallHeight, Math.min(maxCallHeight, height)) / conversationHeight;
+  }
+
+  function grabCallDivider(event: PointerEvent) {
+    if (!event.isPrimary || event.button !== 0) return;
+    const divider = event.currentTarget as HTMLElement;
+    grabOffset = event.clientY - divider.getBoundingClientRect().top;
+    divider.setPointerCapture(event.pointerId);
+  }
+
+  function dragCallDivider(event: PointerEvent) {
+    const divider = event.currentTarget as HTMLElement;
+    if (!divider.hasPointerCapture(event.pointerId)) return;
+    resizeCall(callHeight + event.clientY - divider.getBoundingClientRect().top - grabOffset);
+  }
+
+  function keyCallDivider(event: KeyboardEvent) {
+    switch (event.key) {
+      case 'ArrowUp':
+        resizeCall(callHeight - 24);
+        break;
+      case 'ArrowDown':
+        resizeCall(callHeight + 24);
+        break;
+      case 'Home':
+        resizeCall(minCallHeight);
+        break;
+      case 'End':
+        resizeCall(maxCallHeight);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
   }
 
   async function callAction(action: 'accept' | 'decline' | 'end') {
@@ -2025,16 +2099,17 @@
       if (
         generation !== loadGeneration ||
         routeRef !== dmId ||
-        revision !== callRevision ||
         activeCall?.id !== selected.id ||
         activeCall.authority_domain !== selected.authority_domain
       )
         return;
       if (action === 'accept') {
         activeCall = updated;
-        callJoined = true;
+        joinHere(updated);
       } else {
+        if (ownsCall(selected)) authenticatedGateway.joinedDmCall = null;
         activeCall = null;
+        accountJoined = false;
         callJoined = false;
       }
       callRevision += 1;
@@ -2052,6 +2127,7 @@
     groupInviteHandle = '';
     groupError = '';
     groupDialog?.showModal();
+    if (channel?.encryption_mode === 'e2ee') void refreshSafetyNumber();
   }
 
   async function updateGroupName() {
@@ -2249,15 +2325,27 @@
   }
 
   async function rekeyEncryption() {
-    if (!channel || !currentUser || groupBusy || channel.encryption_state !== 'rekeying') return;
+    if (
+      !channel ||
+      !currentUser ||
+      systemConversation ||
+      (groupConversation && !groupOwner) ||
+      groupBusy ||
+      channel.encryption_state !== 'rekeying'
+    )
+      return;
+    const target = entityRef(channel);
+    const generation = loadGeneration;
     groupBusy = true;
     groupError = '';
     try {
       const client = e2eeClient ?? (await initializeE2EE(currentUser));
-      const updated = await client.rekeyRoom(entityRef(channel));
+      const updated = await client.rekeyRoom(target);
+      if (generation !== loadGeneration) return;
       e2eeClient = client;
       entities.channels.upsert(updated);
-      e2eeSafetyNumber = await client.safetyNumber(updated);
+      const number = await client.safetyNumber(updated).catch(() => '');
+      if (generation === loadGeneration) e2eeSafetyNumber = number;
     } catch (caught) {
       groupError = userErrorMessage(
         caught,
@@ -2271,6 +2359,11 @@
   async function showEncryptionInfo() {
     if (!channel || channel.encryption_mode !== 'e2ee') return;
     privacySettings.showModal();
+    await refreshSafetyNumber();
+  }
+
+  async function refreshSafetyNumber() {
+    if (!channel) return;
     const target = entityRef(channel);
     if (currentUser) {
       try {
@@ -3031,7 +3124,9 @@
             type="button"
             disabled={groupBusy || (channel.encryption_mode === 'plaintext' && consentPending)}
             aria-label={channel.encryption_mode === 'e2ee'
-              ? $t('ui_end_to_end_encryption_is_on_3e72f343')
+              ? channel.encryption_state === 'rekeying'
+                ? $t('ui_rekey_needed_74d26182')
+                : $t('ui_encryption_82f4e719')
               : consentPending
                 ? 'Encryption request sent'
                 : 'Request end-to-end encryption'}
@@ -3047,7 +3142,9 @@
               <span
                 >{channel.encryption_state === 'active'
                   ? $t('ui_encrypted_f45aef6e')
-                  : $t('ui_rekey_needed_74d26182')}</span
+                  : channel.encryption_state === 'rekeying'
+                    ? $t('ui_rekey_needed_74d26182')
+                    : $t('ui_encryption_82f4e719')}</span
               >
             {/if}
           </button>
@@ -3184,27 +3281,37 @@
     <div
       class:has-active-call={Boolean(activeCall && callJoined)}
       class:has-ringing-call={Boolean(activeCall && !callJoined)}
+      bind:clientHeight={conversationHeight}
+      style:--call-height={conversationHeight ? callHeight + 'px' : '46%'}
       class="dm-conversation-layout"
     >
       {#if activeCall && !callJoined}
         <div class="call-ringing dm-call-region" role="status">
-          <strong
-            >{groupConversation
-              ? $t('ui_group_call_incoming_0c883124')
-              : `${conversationTitle} is calling`}</strong
-          >
-          <button disabled={callBusy} onclick={() => callAction('accept')}
-            >{$t('ui_accept_89713b9c')}</button
-          >
-          <button disabled={callBusy} class="decline" onclick={() => callAction('decline')}
-            >{$t('ui_decline_a2d285b3')}</button
-          >
+          {#if accountJoined}
+            <strong>{$t('call_active_elsewhere')}</strong>
+            <button disabled={callBusy} onclick={() => activeCall && joinHere(activeCall)}
+              >{$t('call_join_here')}</button
+            >
+          {:else}
+            <strong
+              >{groupConversation
+                ? $t('ui_group_call_incoming_0c883124')
+                : `${conversationTitle} is calling`}</strong
+            >
+            <button disabled={callBusy} onclick={() => callAction('accept')}
+              >{$t('ui_accept_89713b9c')}</button
+            >
+            <button disabled={callBusy} class="decline" onclick={() => callAction('decline')}
+              >{$t('ui_decline_a2d285b3')}</button
+            >
+          {/if}
         </div>
       {:else if activeCall && callJoined}
-        <div class="dm-call-stage dm-call-region dm-call-active">
+        <div id="dm-call-stage" class="dm-call-stage dm-call-region dm-call-active">
           {#key activeCallRef}
             <VoiceDock
               callRef={activeCallRef}
+              onKeepCallElsewhere={keepCallElsewhere}
               channelRef={channel ? entityRef(channel) : undefined}
             >
               {#snippet headerActions()}
@@ -3215,6 +3322,22 @@
             </VoiceDock>
           {/key}
         </div>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions (A focusable separator is the ARIA window splitter control.) -->
+        <div
+          class="dm-call-divider"
+          role="separator"
+          tabindex="0"
+          aria-controls="dm-call-stage"
+          aria-label={$t('dm.call_height')}
+          aria-orientation="horizontal"
+          aria-valuemin={minCallHeight}
+          aria-valuemax={maxCallHeight}
+          aria-valuenow={callHeight}
+          title={$t('dm.resize_call')}
+          onpointerdown={grabCallDivider}
+          onpointermove={dragCallDivider}
+          onkeydown={keyCallDivider}
+        ></div>
       {/if}
       <div
         class="message-list"
@@ -3326,6 +3449,7 @@
                     ? entities.presenceFor(item.message.author)
                     : 'offline'}
                   canEdit={channelReady &&
+                    !encryptionPaused &&
                     item.message.author_id === currentUser?.id &&
                     item.message.author_domain === currentUser?.origin_domain}
                   canDelete={item.message.author_id === currentUser?.id &&
@@ -3334,7 +3458,9 @@
                   onDelete={deleteMessage}
                   onRetry={retryMessage}
                   onViewProfile={openMessageProfile}
-                  onReply={channelReady && !systemConversation ? startReply : undefined}
+                  onReply={channelReady && !encryptionPaused && !systemConversation
+                    ? startReply
+                    : undefined}
                   onForward={!systemConversation &&
                   forwardDestinations.length &&
                   forwardUnavailableReason(item.message) === null
@@ -3367,6 +3493,15 @@
     {#if systemConversation}
       <footer class="composer-wrap system-notice-footer">
         <p role="status">Official notices from this instance. Replies are disabled.</p>
+      </footer>
+    {:else if encryptionPaused}
+      <footer class="composer-wrap">
+        <div class="composer composer-disabled" role="note">
+          <Icon name="lock" size={18} />
+          {channel?.encryption_state === 'rekeying'
+            ? $t('ui_paused_the_member_list_changed_and_requires_f_53f1fd53')
+            : $t('ui_end_to_end_encryption_must_finish_activating__e8b41782')}
+        </div>
       </footer>
     {:else}
       <footer class="composer-wrap">
@@ -3640,7 +3775,17 @@
 <dialog class="action-dialog" bind:this={privacySettings}>
   <form method="dialog">
     <h2>{$t('dm_privacy_title')}</h2>
-    <p>{$t('ui_on_participant_identities_remain_unverified_u_04ef8c30')}</p>
+    <p>
+      {channel?.encryption_state === 'rekeying'
+        ? $t('ui_paused_the_member_list_changed_and_requires_f_53f1fd53')
+        : $t('ui_on_participant_identities_remain_unverified_u_04ef8c30')}
+    </p>
+    {#if channel?.encryption_state === 'rekeying' && (!isGroupDm(channel) || groupOwner) && !systemConversation}
+      <button class="secondary-button" type="button" disabled={groupBusy} onclick={rekeyEncryption}>
+        {$t('ui_secure_changes_41e8dec7')}
+      </button>
+      {#if groupError}<p role="alert">{groupError}</p>{/if}
+    {/if}
     <p>{$t('ui_compare_this_safety_number_with_members_throu_0247a03c')}</p>
     <p>{e2eeSafetyNumber || $t('ui_safety_number_unavailable_on_this_device_52363a69')}</p>
     <footer>

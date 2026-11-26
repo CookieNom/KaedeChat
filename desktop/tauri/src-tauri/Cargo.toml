@@ -46,6 +46,9 @@ tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
 
+[target.'cfg(not(windows))'.dependencies]
+notify-rust.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7.3"
 winreg = "0.55.0"

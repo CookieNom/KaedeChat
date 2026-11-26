@@ -95,7 +95,8 @@ async def test_native_challenge_is_origin_hosted_and_not_cached() -> None:
     body = bytes(response.body).decode()
     assert "0x4AAAAAAExampleSiteKey" in body
     assert "desktop-request-1" in body
-    assert "window.ipc.postMessage" in body
+    assert "window.ipc || window.KaedeChallenge" in body
+    assert "bridge.postMessage" in body
     assert response.headers["cache-control"] == "no-store"
     directives = {
         parts[0]: set(parts[1:])

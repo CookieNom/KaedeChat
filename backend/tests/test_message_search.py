@@ -590,6 +590,9 @@ def test_federated_search_response_is_minimal_and_bounded() -> None:
         }
     )
     assert response.results[0].message_ref == "10@alpha.localhost"
+    wire = response.model_dump(mode="json", context={"federation": True})
+    assert wire["results"][0]["ranking_score"] == "0.75"
+    assert FederatedMessageSearchResponse.model_validate(wire) == response
     baseline = response.model_dump(mode="json")
     for mutation in ({"snippet": "x" * 281}, {"attachment_url": "https://evil.example/file"}):
         changed = {**baseline, "results": [{**baseline["results"][0], **mutation}]}

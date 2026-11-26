@@ -261,7 +261,12 @@ class SoundboardSound:
         )
         async with (
             httpx.AsyncClient(
-                timeout=15, follow_redirects=False, trust_env=False
+                timeout=15,
+                follow_redirects=False,
+                trust_env=False,
+                transport=self.client._media_transport(
+                    voice.target, str(raw["media_origin"])
+                ),
             ) as media_client,
             media_client.stream("GET", location) as response,
         ):

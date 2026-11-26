@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import secrets
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -42,6 +43,7 @@ from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.bot_models import BotApplication
 from app.db.models import (
     Attachment,
+    AttachmentFederationRecipient,
     Channel,
     DMConversation,
     DMParticipant,
@@ -81,6 +83,7 @@ from app.federation.message_content import (
 )
 from app.federation.network import ensure_remote_instance_record, normalize_domain
 from app.federation.schemas import MAX_DATABASE_SNOWFLAKE, RemoteUserProfile
+from app.media.payloads import federation_attachment_duration
 from app.media.processing import normalize_declared_type, sanitize_filename
 from app.media.schemas import validate_voice_attachment_metadata
 
@@ -454,6 +457,7 @@ async def resolve_delegated_profile(
     profile: RemoteUserProfile,
     *,
     authority_origin: str,
+    participant_reference: bool = False,
 ) -> User:
     """Resolve a profile carried by an authority other than the user's home.
 
@@ -468,6 +472,17 @@ async def resolve_delegated_profile(
     """
 
     authority = normalize_domain(authority_origin)
+    if (
+        participant_reference
+        and profile.origin_domain == settings.domain
+        and authority != settings.domain
+    ):
+        local = await session.get(
+            User, (database_snowflake(profile.id, "user id"), settings.domain)
+        )
+        if local is None or not local.is_local or local.account_type == "system":
+            raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND"})
+        return local
     if profile.origin_domain in {authority, settings.domain}:
         return await upsert_remote_user(session, settings, profile)
 
@@ -494,7 +509,7 @@ async def resolve_delegated_profile(
         raise RuntimeError("unresolved third-party identity insert did not converge")
     if user.is_local:
         raise ValueError("third-party profile does not match its authoritative identity")
-    if user.profile_resolved and user.username != profile.username:
+    if not participant_reference and user.profile_resolved and user.username != profile.username:
         raise ValueError("third-party profile does not match its authoritative identity")
     return user
 
@@ -688,18 +703,10 @@ async def replicate_message_attachments(
             raise ValueError("attachment size is invalid")
         width, height = remote_media_dimensions(raw)
         blurhash = sanitized_remote_blurhash(raw.get("blurhash"))
-        duration_secs_raw = raw.get("duration_secs")
-        duration_secs = (
-            float(duration_secs_raw)
-            if isinstance(duration_secs_raw, (int, float))
-            and not isinstance(duration_secs_raw, bool)
-            else None
-        )
+        duration_secs = federation_attachment_duration(raw)
         waveform = raw.get("waveform")
         if waveform is not None and not isinstance(waveform, str):
             raise ValueError("attachment waveform is invalid")
-        if duration_secs_raw is not None and duration_secs is None:
-            raise ValueError("attachment duration is invalid")
         validate_voice_attachment_metadata(
             content_type=content_type,
             encryption_mode=encryption_mode,
@@ -710,7 +717,12 @@ async def replicate_message_attachments(
             raw.get("variants", {}),
             max_bytes=settings.media_max_attachment_bytes,
         )
-        existing = await session.get(Attachment, ref)
+        if origin == settings.domain:
+            existing = await session.get(
+                Attachment, ref, with_for_update=True, populate_existing=True
+            )
+        else:
+            existing = await session.get(Attachment, ref)
         tombstone = await session.get(RemoteMediaTombstone, (origin, attachment_id))
         durable_tombstone = await session.get(
             MediaTombstoneSource,
@@ -727,6 +739,40 @@ async def replicate_message_attachments(
             if existing is not None and existing.deleted_at is None:
                 existing.deleted_at = datetime.now(UTC)
             continue
+        if origin == settings.domain:
+            if existing is None:
+                raise ValueError("local attachment was never uploaded")
+            if existing.deleted_at is not None:
+                continue
+            if existing.message_id is None:
+                upload_ref = (existing.upload_channel_id, existing.upload_channel_domain)
+                allowed_channels = {(message.channel_id, message.channel_domain)}
+                if message.id == message.channel_id:
+                    thread = await session.get(
+                        Channel, (message.channel_id, message.channel_domain)
+                    )
+                    if (
+                        thread is not None
+                        and thread.type in {10, 11, 12}
+                        and thread.parent_id is not None
+                        and thread.parent_domain is not None
+                    ):
+                        allowed_channels.add((thread.parent_id, thread.parent_domain))
+                if (
+                    existing.purpose != "attachment"
+                    or existing.finalized_at is None
+                    or existing.asset_binding is not None
+                    or existing.report_id is not None
+                    or existing.interaction_id is not None
+                    or existing.interaction_response_id is not None
+                    or upload_ref not in allowed_channels
+                    or await session.get(
+                        AttachmentFederationRecipient,
+                        (attachment_id, origin, message.channel_domain),
+                    )
+                    is None
+                ):
+                    raise ValueError("local attachment was not disclosed for this channel")
         if existing is None:
             existing = Attachment(
                 id=attachment_id,
@@ -754,6 +800,17 @@ async def replicate_message_attachments(
             )
             session.add(existing)
         else:
+            # Earlier peers returned rounded seconds and omitted the digest on
+            # some message events. Keep the authoritative local upload details.
+            if origin == settings.domain:
+                if content_sha256 is None:
+                    content_sha256 = existing.content_sha256
+                if (
+                    "duration_secs_exact" not in raw
+                    and existing.duration_secs is not None
+                    and duration_secs == math.ceil(existing.duration_secs)
+                ):
+                    duration_secs = existing.duration_secs
             if (
                 existing.uploader_id,
                 existing.uploader_domain,
@@ -829,7 +886,14 @@ async def replicate_conversation(
             raise RuntimeError("self instance is not bootstrapped")
         await ensure_remote_instance_record(session, settings, origin)
     participants = [
-        await upsert_remote_user(session, settings, profile) for profile in participant_profiles
+        await resolve_delegated_profile(
+            session,
+            settings,
+            profile,
+            authority_origin=authority_domain,
+            participant_reference=conversation_type == "group",
+        )
+        for profile in participant_profiles
     ]
     participant_refs = {(participant.id, participant.origin_domain) for participant in participants}
     if len(participant_refs) != len(participants):
@@ -1009,6 +1073,7 @@ async def replicate_group_notice(
     *,
     previous_owner: tuple[int | None, str | None],
     expected_actor: tuple[int, str],
+    participant_profiles: tuple[RemoteUserProfile, ...] = (),
     initial_snapshot: bool = False,
     event_timestamp_ms: int | None = None,
 ) -> Message | None:
@@ -1019,10 +1084,13 @@ async def replicate_group_notice(
     raw_message = raw_notice.get("message")
     if not isinstance(raw_message, dict):
         raise ValueError("group DM notice message is malformed")
-    author = await upsert_remote_user(
+    author_profile = RemoteUserProfile.model_validate(raw_notice.get("author"))
+    author = await resolve_delegated_profile(
         session,
         settings,
-        RemoteUserProfile.model_validate(raw_notice.get("author")),
+        author_profile,
+        authority_origin=conversation.authority_domain,
+        participant_reference=True,
     )
     author_ref = (author.id, author.origin_domain)
     if author_ref != expected_actor:
@@ -1131,11 +1199,26 @@ async def replicate_group_notice(
         new_owner = users.get((conversation.owner_id, conversation.owner_domain))
         if new_owner is None:
             raise ValueError("group DM ownership transfer target is missing")
+    # Notice text is an immutable statement by the conversation authority.
+    # Verify its template using the labels carried with this membership state.
+    # Local opaque handles and subsequently updated profiles are not wire labels.
+    notice_labels = {
+        (int(profile.id), profile.origin_domain): profile.display_name or profile.username
+        for profile in (*participant_profiles, author_profile)
+    }
+    target_name = notice_labels.get(target_ref, target.display_name or target.username)
+    owner_name = (
+        notice_labels.get(
+            (new_owner.id, new_owner.origin_domain), new_owner.display_name or new_owner.username
+        )
+        if new_owner is not None
+        else None
+    )
     expected_content = group_dm_notice_text(
         message_type,
-        author.display_name or author.username,
-        target.display_name or target.username,
-        (new_owner.display_name or new_owner.username) if new_owner is not None else None,
+        author_profile.display_name or author_profile.username,
+        target_name,
+        owner_name,
     )
     if raw_message.get("content") != expected_content:
         raise ValueError("group DM notice text does not match the membership transition")
@@ -1229,8 +1312,11 @@ async def replicate_dm_message(
     event_timestamp_ms: int,
     event_origin: str,
 ) -> Message | None:
-    author = await upsert_remote_user(
-        session, settings, RemoteUserProfile.model_validate(content["author"])
+    author = await resolve_delegated_profile(
+        session,
+        settings,
+        RemoteUserProfile.model_validate(content["author"]),
+        authority_origin=event_origin,
     )
     raw = safety_projection(content["message"])
     message_id = database_snowflake(raw.get("id"), "message id")

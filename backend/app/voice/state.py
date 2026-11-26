@@ -12,6 +12,7 @@ from app.core.settings import Settings
 from app.federation.network import FederationNetworkError, normalize_domain
 from app.voice.rooms import parse_room_name
 
+DM_CALL_ALONE_SECONDS = 5 * 60
 BOT_CAPABILITY_BINDINGS_FIELD = "bot_capability_bindings"
 
 
@@ -47,6 +48,23 @@ if call['state'] == 'ended' then
     return {2, raw}
   end
   return {0, 'ended'}
+end
+if action == 'check_alone' then
+  if redis.call('HLEN', KEYS[6]) ~= 1 or redis.call('HEXISTS', KEYS[6], actor) == 0 then
+    redis.call('DEL', KEYS[7])
+    return {0, 'occupancy_changed'}
+  end
+  local sid = ARGV[6]
+  local now = tonumber(ARGV[3])
+  if redis.call('HGET', KEYS[7], 'sid') ~= sid then
+    redis.call('HSET', KEYS[7], 'sid', sid, 'since', now)
+  end
+  redis.call('EXPIRE', KEYS[7], tonumber(ARGV[7]) * 2)
+  if now - tonumber(redis.call('HGET', KEYS[7], 'since')) < tonumber(ARGV[7]) then
+    return {0, 'waiting'}
+  end
+  redis.call('DEL', KEYS[7])
+  action = 'end'
 end
 if action == 'accept' then
   if redis.call('SISMEMBER', KEYS[3], actor) == 1 then
@@ -128,18 +146,23 @@ end
 if current['state'] == 'active' and incoming['state'] == 'ringing' then
   return {0, 'transition'}
 end
-if action == 'accept' then redis.call('SADD', KEYS[3], actor) end
+if action == 'accept' and redis.call('SADD', KEYS[3], actor) == 0
+    and current['state'] == 'active' then return {2, raw} end
 if action == 'decline' then redis.call('SADD', KEYS[4], actor) end
 local ttl = redis.call('TTL', KEYS[1])
 if ttl < 1 then ttl = tonumber(ARGV[4]) end
-redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
+-- An authority sends a public projection. Keep replica-private bot grant bindings.
+current['state'] = incoming['state']
+current['ended_at'] = incoming['ended_at']
+local projected = cjson.encode(current)
+redis.call('SET', KEYS[1], projected, 'EX', ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('EXPIRE', KEYS[3], ttl)
 redis.call('EXPIRE', KEYS[4], ttl)
 if incoming['state'] == 'ended' and redis.call('GET', KEYS[5]) == ARGV[5] then
   redis.call('DEL', KEYS[5])
 end
-return {1, ARGV[1]}
+return {1, projected}
 """
 CREATE_CALL_LUA = """
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
@@ -183,6 +206,7 @@ if not existing and not bypass and limit > 0 and redis.call('HLEN', KEYS[1]) >= 
   return 0
 end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+if KEYS[5] then redis.call('DEL', KEYS[5]) end
 redis.call('SADD', KEYS[2], ARGV[3])
 redis.call('SET', KEYS[3], ARGV[3], 'EX', 86400)
 redis.call('SET', KEYS[4], ARGV[4], 'EX', 300)
@@ -1498,16 +1522,22 @@ async def admit_occupant(
     if not 0 <= user_limit <= 10_000:
         raise ValueError("voice channel user limit must be between 0 and 10000")
     encoded = json.dumps(asdict(occupant), separators=(",", ":"), sort_keys=True)
+    solo_keys = (
+        [room_state_key("alone", authority_domain, occupant.room)]
+        if occupant.guild_id is None
+        else []
+    )
     admitted = bool(
         await cast(
             Awaitable[object],
             redis.eval(
                 ADMIT_OCCUPANT_LUA,
-                4,
+                4 + len(solo_keys),
                 room_state_key("occupancy", authority_domain, occupant.room),
                 voice_room_registry_key(authority_domain),
                 _occupant_user_room_key(authority_domain, occupant),
                 room_state_key("heartbeat", authority_domain, occupant.room),
+                *solo_keys,
                 occupant.identity,
                 encoded,
                 occupant.room,
@@ -1880,6 +1910,33 @@ async def get_active_call(
     return record
 
 
+async def call_recipient_is_ringing(
+    redis: Redis,
+    call_id: int,
+    authority: str,
+    channel_ref: str | None,
+    identity: str,
+) -> bool:
+    key = call_key(authority, call_id)
+    async with redis.pipeline(transaction=True) as pipe:
+        pipe.get(key)
+        pipe.sismember(accepted_call_key(authority, call_id), identity)
+        pipe.sismember(f"{key}:declined", identity)
+        raw, accepted, declined = await pipe.execute()
+    if not raw or accepted or declined:
+        return False
+    record = json.loads(raw)
+    return (
+        record.get("state") in {"ringing", "active"}
+        and record.get("caller") != identity
+        and identity in record.get("participants", ())
+        and record.get("id") == str(call_id)
+        and record.get("authority_domain") == authority
+        and f"{record.get('channel_id')}@{record.get('channel_domain')}" == channel_ref
+        and int(record["created_at"]) + 60 > time.time()
+    )
+
+
 async def is_call_accepted(
     redis: Redis, authority_domain: str, call_id: int, identity: str
 ) -> bool:
@@ -1899,6 +1956,7 @@ async def transition_call(
     settings: Settings,
     *,
     now: int | None = None,
+    solo_session_id: str | None = None,
 ) -> tuple[bool, bool, str | dict[str, Any]]:
     key = call_key(authority_domain, call_id)
     existing = await get_call(redis, authority_domain, call_id)
@@ -1907,21 +1965,36 @@ async def transition_call(
         if existing is not None
         else f"voice:channel-call:missing:{_authority(authority_domain)}:{call_id}"
     )
+    solo_keys: list[str] = []
+    if action == "check_alone":
+        if (
+            existing is None
+            or not solo_session_id
+            or existing.get("authority_domain") != settings.domain
+        ):
+            return False, False, "missing"
+        room = str(existing["room"])
+        solo_keys = [
+            room_state_key(kind, authority_domain, room) for kind in ("occupancy", "alone")
+        ]
     result = await cast(
         Awaitable[object],
         redis.eval(
             CALL_TRANSITION_LUA,
-            5,
+            5 + len(solo_keys),
             key,
             f"{key}:participants",
             f"{key}:accepted",
             f"{key}:declined",
             active_key,
+            *solo_keys,
             action,
             identity,
             str(int(time.time()) if now is None else now),
             str(settings.voice_call_ttl_seconds),
             call_ref(authority_domain, call_id),
+            solo_session_id or "",
+            str(DM_CALL_ALONE_SECONDS),
         ),
     )
     if not isinstance(result, (list, tuple)) or len(result) != 2:

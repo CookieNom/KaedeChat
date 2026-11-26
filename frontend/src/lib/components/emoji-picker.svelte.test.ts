@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { expect, it, vi } from 'vitest';
 import { flushSync, mount, tick, unmount } from 'svelte';
+import { loadUnicodeEmojis } from '$lib/chat/emojis';
 import EmojiPicker from './EmojiPicker.svelte';
 
 it('keeps the full catalog in sections and jumps from search without losing selection', async () => {
@@ -37,7 +38,9 @@ it('keeps the full catalog in sections and jumps from search without losing sele
   });
   try {
     flushSync();
-    await vi.waitFor(() => expect(document.querySelector('[data-section="flags"]')).not.toBeNull());
+    await loadUnicodeEmojis();
+    await tick();
+    expect(document.querySelector('[data-section="flags"]')).not.toBeNull();
     expect(
       document.querySelectorAll('[data-section="people"] .emoji-grid button').length
     ).toBeGreaterThan(240);

@@ -2,7 +2,7 @@
   import Toast from '$lib/components/Toast.svelte';
   import { t } from '$lib/ui/locale';
 
-  import { api, userErrorMessage } from '$lib/api/client';
+  import { api, ApiError, userErrorMessage } from '$lib/api/client';
   import { assetUrl } from '$lib/media/assets';
   import ApplicationCommandEditor from '$lib/components/ApplicationCommandEditor.svelte';
   import { commandDraftError, readCommandDraft } from '$lib/chat/command-editor';
@@ -211,7 +211,7 @@
   let directoryPreview = $state<DirectoryPreviewResponse | null>(null);
   let previewLoading = $state(false);
   let previewError = $state('');
-  let credentials = $state<Credential[]>([]);
+  let credentials = $state<Credential[] | null>(null);
   let workers = $state<Worker[]>([]);
   let templates = $state<Template[]>([]);
   let installations = $state<Installation[]>([]);
@@ -277,6 +277,7 @@
   const currentPanel = $derived(panels.find((panel) => panel.id === activePanel)!);
 
   function selectPanel(panel: (typeof panels)[number]['id']) {
+    if (panel !== 'deployment') credentialToken = '';
     activePanel = panel;
     window.scrollTo(0, 0);
   }
@@ -382,6 +383,9 @@
         ),
         api<Credential[]>(`/applications/${encodeURIComponent(applicationRef)}/credentials`, {
           signal: controller.signal
+        }).catch((caught: unknown) => {
+          if (caught instanceof ApiError && caught.status === 403) return null;
+          throw caught;
         }),
         api<Worker[]>(`/applications/${encodeURIComponent(applicationRef)}/workers`, {
           signal: controller.signal
@@ -418,6 +422,7 @@
         commandsLoaded = true;
       }
       credentials = credentialList;
+      if (credentials === null) credentialToken = '';
       workers = workerList;
       templates = templateList;
       installations = installationList;
@@ -677,7 +682,7 @@
     }
   }
   async function createCredential() {
-    if (busy || !routeOwnsApplication(ref, application)) return;
+    if (busy || credentials === null || !routeOwnsApplication(ref, application)) return;
     const applicationRef = ref;
     const currentApplication = application;
     const label = credentialLabel;
@@ -697,7 +702,7 @@
         }
       );
       if (!mutationIsCurrent(applicationRef, generation, currentApplication)) return;
-      credentialToken = created.token;
+      if (activePanel === 'deployment') credentialToken = created.token;
       notice = $t('ui_control_credential_created_copy_it_now_it_wil_d3e4ba34');
       await load(applicationRef);
     } catch (caught) {
@@ -709,7 +714,7 @@
     }
   }
   async function revokeCredential(id: string) {
-    if (!routeOwnsApplication(ref, application)) return;
+    if (credentials === null || !routeOwnsApplication(ref, application)) return;
     const applicationRef = ref;
     const currentApplication = application;
     if (!confirm($t('ui_revoke_this_control_credential_d9571ed2'))) return;
@@ -847,7 +852,7 @@
     saveState = 'idle';
     saveError = '';
     accessSearch = '';
-    credentials = [];
+    credentials = null;
     workers = [];
     templates = [];
     installations = [];
@@ -1034,7 +1039,9 @@
         <div class="panel-heading">
           <span class="panel-eyebrow">{currentPanel.title}</span>
           <h2>{currentPanel.heading}</h2>
-          <p>{currentPanel.description}</p>
+          {#if currentPanel.id !== 'deployment' || credentials !== null}
+            <p>{currentPanel.description}</p>
+          {/if}
         </div>
         <div id="general-panel" class="panel-sections" hidden={activePanel !== 'general'}>
           <section id="general">
@@ -1480,46 +1487,48 @@
           </section>
         </div>
         <div id="deployment-panel" class="panel-sections" hidden={activePanel !== 'deployment'}>
-          <section id="credentials">
-            <h2>{$t('ui_control_credentials_e4590f5d')}</h2>
-            <p>{$t('ui_deployment_tools_use_these_scoped_secrets_onl_d092f56b')}</p>
-            <div class="inline">
-              <input
-                bind:value={credentialLabel}
-                maxlength="100"
-                placeholder={$t('ui_deployment_870a8ffd')}
-              /><button onclick={createCredential} disabled={busy || !credentialLabel.trim()}
-                >{$t('ui_create_credential_4d8f1172')}</button
-              >
-            </div>
-            {#if credentialToken}
-              <div class="secret" role="status">
-                <strong>{$t('ui_copy_this_token_now_d7db5a6e')}</strong><code
-                  >{credentialToken}</code
-                ><button onclick={() => copy(credentialToken, 'Credential')}
-                  >{$t('ui_copy_e21f935f')}</button
+          {#if credentials !== null}
+            <section id="credentials">
+              <h2>{$t('ui_control_credentials_e4590f5d')}</h2>
+              <p>{$t('ui_deployment_tools_use_these_scoped_secrets_onl_d092f56b')}</p>
+              <div class="inline">
+                <input
+                  bind:value={credentialLabel}
+                  maxlength="100"
+                  placeholder={$t('ui_deployment_870a8ffd')}
+                /><button onclick={createCredential} disabled={busy || !credentialLabel.trim()}
+                  >{$t('ui_create_credential_4d8f1172')}</button
                 >
               </div>
-            {/if}
-            <div class="rows">
-              {#each credentials as credential (credential.id)}<article>
-                  <div>
-                    <strong>{credential.label}</strong><small
-                      >{credential.token_hint} · {credential.scopes.join(', ')}</small
-                    >
-                  </div>
-                  <span class:revoked={credential.revoked_at}
-                    >{credential.revoked_at
-                      ? $t('ui_revoked_f6f738d0')
-                      : $t('ui_active_92340695')}</span
-                  >{#if !credential.revoked_at}<button
-                      class="danger"
-                      onclick={() => revokeCredential(credential.id)}
-                      >{$t('ui_revoke_87e6d00b')}</button
-                    >{/if}
-                </article>{/each}
-            </div>
-          </section>
+              {#if credentialToken}
+                <div class="secret" role="status">
+                  <strong>{$t('ui_copy_this_token_now_d7db5a6e')}</strong><code
+                    >{credentialToken}</code
+                  ><button onclick={() => copy(credentialToken, 'Credential')}
+                    >{$t('ui_copy_e21f935f')}</button
+                  >
+                </div>
+              {/if}
+              <div class="rows">
+                {#each credentials as credential (credential.id)}<article>
+                    <div>
+                      <strong>{credential.label}</strong><small
+                        >{credential.token_hint} · {credential.scopes.join(', ')}</small
+                      >
+                    </div>
+                    <span class:revoked={credential.revoked_at}
+                      >{credential.revoked_at
+                        ? $t('ui_revoked_f6f738d0')
+                        : $t('ui_active_92340695')}</span
+                    >{#if !credential.revoked_at}<button
+                        class="danger"
+                        onclick={() => revokeCredential(credential.id)}
+                        >{$t('ui_revoke_87e6d00b')}</button
+                      >{/if}
+                  </article>{/each}
+              </div>
+            </section>
+          {/if}
           <section id="workers">
             <h2>{$t('ui_worker_keys_32de92f0')}</h2>
             <p>{$t('ui_a_worker_signs_short_lived_token_assertions_a_730723a3')}</p>

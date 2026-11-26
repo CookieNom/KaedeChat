@@ -32,8 +32,10 @@ def jwt(room, identity):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    page = ROOT / 'interop.html'
+
     def do_GET(self):
-        file = {'/': ROOT / 'interop.html', '/sdk.mjs': SDK / 'livekit-client.esm.mjs',
+        file = {'/': self.page, '/sdk.mjs': SDK / 'livekit-client.esm.mjs',
                 '/worker.mjs': SDK / 'livekit-client.e2ee.worker.mjs'}.get(self.path)
         if file is None:
             self.send_error(404)

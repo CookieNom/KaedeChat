@@ -52,6 +52,11 @@ from app.chat.presence import (
 from app.chat.presence import (
     set_presence_state as set_presence_state,
 )
+from app.chat.presence_control import (
+    process_due_presence_transitions,
+    resolve_effective_presence,
+    sync_presence_transition_index,
+)
 from app.core.cache_warmup import cache_is_ready, maintain_cache_readiness, warm_identify_cache
 from app.core.close_codes import GatewayCloseCode
 from app.core.gateway_ops import PROTOCOL_VERSION, GatewayOp
@@ -67,6 +72,7 @@ from app.db.models import (
     DMParticipant,
     Guild,
     GuildMember,
+    GuildScheduledEvent,
     MemberRole,
     ReadState,
     Relationship,
@@ -149,6 +155,15 @@ async def visible_presence_status(redis: Redis, user: User) -> str | None:
 async def current_presence_preference(
     sessionmaker: async_sessionmaker[AsyncSession], redis: Redis, user: User
 ) -> str:
+    async with sessionmaker() as session:
+        notification_settings = await session.scalar(
+            select(UserSettings.notification_settings).where(
+                UserSettings.user_id == user.id,
+                UserSettings.user_domain == user.origin_domain,
+            )
+        )
+    if isinstance(notification_settings, dict) and "presence_control" in notification_settings:
+        return resolve_effective_presence(notification_settings).effective_status
     raw = await redis.get(f"presence:{user.origin_domain}:{user.id}")
     if raw:
         try:
@@ -158,18 +173,59 @@ async def current_presence_preference(
         status = state.get("status") if isinstance(state, dict) else None
         if status in {"online", "idle", "dnd", "invisible"}:
             return str(status)
-    async with sessionmaker() as session:
-        notification_settings = await session.scalar(
-            select(UserSettings.notification_settings).where(
-                UserSettings.user_id == user.id,
-                UserSettings.user_domain == user.origin_domain,
-            )
-        )
     if isinstance(notification_settings, dict):
-        preference = notification_settings.get("presence_preference")
-        if preference in {"online", "idle", "dnd", "invisible"}:
-            return str(preference)
+        return resolve_effective_presence(notification_settings).effective_status
     return "online"
+
+
+async def current_presence_state(
+    sessionmaker: async_sessionmaker[AsyncSession], user: User
+) -> dict[str, object] | None:
+    try:
+        async with sessionmaker() as session:
+            notification_settings = await session.scalar(
+                select(UserSettings.notification_settings).where(
+                    UserSettings.user_id == user.id,
+                    UserSettings.user_domain == user.origin_domain,
+                )
+            )
+    except Exception:
+        return None
+    if (
+        not isinstance(notification_settings, dict)
+        or "presence_control" not in notification_settings
+    ):
+        return None
+    return resolve_effective_presence(notification_settings).to_payload()
+
+
+async def publish_gateway_presence(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    redis: Redis,
+    user: User,
+    topics: list[str],
+    requested_status: str | None = None,
+) -> None:
+    async with sessionmaker() as session:
+        preferences = await session.scalar(
+            select(UserSettings.notification_settings)
+            .where(UserSettings.user_id == user.id, UserSettings.user_domain == user.origin_domain)
+            .with_for_update(read=True)
+        )
+        managed = isinstance(preferences, dict) and "presence_control" in preferences
+        effective = resolve_effective_presence(preferences)
+        status: str = effective.effective_status
+        if managed:
+            await sync_presence_transition_index(redis, user.origin_domain, user.id, preferences)
+        else:
+            previous = decode_presence_state(
+                await redis.get(f"presence:{user.origin_domain}:{user.id}")
+            )
+            status = requested_status or (previous[0] if previous else status)
+        visible, generation = await broadcast_presence_preference(
+            redis, user, status, topics, presence_state=effective.to_payload() if managed else None
+        )
+    schedule_presence_fanout(user, visible, generation)
 
 
 async def contact_presence_snapshot(
@@ -768,6 +824,8 @@ async def presence_reaper(redis: Redis, sessionmaker: async_sessionmaker[AsyncSe
                             schedule_presence_fanout(user, "offline", generation)
                     if not still_leader:
                         break
+                if await renew_reaper_lease(redis, owner):
+                    await process_due_presence_transitions(redis, sessionmaker)
             await asyncio.sleep(5)
         except asyncio.CancelledError:
             raise
@@ -1167,6 +1225,7 @@ async def hydrated_ready_payload(
 ) -> dict[str, object]:
     """Build READY with optional projections that must not break login."""
     presence_preference = await current_presence_preference(sessionmaker, redis, user)
+    presence_state = await current_presence_state(sessionmaker, user)
     history_statuses = await guild_history_sync_statuses(redis, user, guilds)
     presences = await contact_presence_snapshot(sessionmaker, redis, user, dm_channels)
     payload = ready_payload(
@@ -1179,7 +1238,10 @@ async def hydrated_ready_payload(
         history_statuses,
         presences,
     )
+    if presence_state is not None:
+        payload["presence_state"] = presence_state
 
+    payload["presence_initialized"] = True
     payload["relationships"] = await gateway_relationships(sessionmaker, user)
     return payload
 
@@ -1606,22 +1668,25 @@ async def event_visibility(
         return dispatch_audience_allows(user, event), True
     guild_id, guild_domain = guild_ref.resolve(settings.domain)
     guild_key = (guild_id, guild_domain)
-    prior_thread_delete_ref: tuple[int, str] | None = None
-    prior_thread_delete_visible = False
+    prior_channel_delete_ref: tuple[int, str] | None = None
+    prior_channel_delete_visible = False
     prior_current_member_removal_ref: tuple[int, str] | None = None
     prior_current_member_removal_visible = False
-    if event.get("t") == "THREAD_DELETE" and isinstance(event.get("d"), dict):
+    if event.get("t") in {"CHANNEL_DELETE", "THREAD_DELETE"} and isinstance(event.get("d"), dict):
         delete_data = event["d"]
         try:
             delete_domain = (
-                delete_data.get("origin_domain") or delete_data.get("thread_domain") or guild_domain
+                delete_data.get("channel_domain")
+                or delete_data.get("origin_domain")
+                or delete_data.get("thread_domain")
+                or guild_domain
             )
-            prior_thread_delete_ref = validate_entity_reference(
-                f"{delete_data.get('id')}@{delete_domain}"
+            prior_channel_delete_ref = validate_entity_reference(
+                f"{delete_data.get('channel_id') or delete_data.get('id')}@{delete_domain}"
             ).resolve(guild_domain)
         except ValueError:
-            prior_thread_delete_ref = None
-        prior_thread_delete_visible = prior_thread_delete_ref in summary.channels.get(
+            prior_channel_delete_ref = None
+        prior_channel_delete_visible = prior_channel_delete_ref in summary.channels.get(
             guild_key, set()
         )
     if event.get("t") == "THREAD_MEMBERS_UPDATE" and isinstance(event.get("d"), dict):
@@ -1679,7 +1744,20 @@ async def event_visibility(
     data = event.get("d")
     if not isinstance(data, dict):
         return False, True
-    if event.get("t") == "AUTO_MODERATION_ACTION_EXECUTION":
+    event_type = event.get("t")
+    if not isinstance(event_type, str):
+        return False, True
+    required = {
+        "GUILD_AUDIT_LOG_ENTRY_CREATE": Permission.VIEW_AUDIT_LOG,
+        "GUILD_MEMBERS_PRUNED": Permission.MANAGE_GUILD | Permission.KICK_MEMBERS,
+        "AUTO_MODERATION_ACTION_EXECUTION": Permission.MANAGE_GUILD,
+        "AUTO_MODERATION_RULE_CREATE": Permission.MANAGE_GUILD,
+        "AUTO_MODERATION_RULE_UPDATE": Permission.MANAGE_GUILD,
+        "AUTO_MODERATION_RULE_DELETE": Permission.MANAGE_GUILD,
+    }.get(event_type)
+    if event_type in {"INVITE_CREATE", "INVITE_DELETE"} and data.get("channel_id") is None:
+        required = Permission.MANAGE_CHANNELS
+    if required is not None:
         async with sessionmaker() as session:
             guild = await session.get(Guild, guild_key)
             if guild is None:
@@ -1688,10 +1766,38 @@ async def event_visibility(
                 permissions = await get_permissions(session, redis, guild, user)
             except HTTPException:
                 return False, True
-        if not permissions & Permission.MANAGE_GUILD:
+        if permissions & required != required:
             return False, True
     channel_id = data.get("channel_id")
     channel_domain = data.get("channel_domain")
+    if (
+        event_type in {"GUILD_SCHEDULED_EVENT_USER_ADD", "GUILD_SCHEDULED_EVENT_USER_REMOVE"}
+        and "channel_id" not in data
+    ):
+        try:
+            scheduled_ref = validate_entity_reference(
+                f"{data.get('guild_scheduled_event_id')}@{data.get('guild_scheduled_event_domain')}"
+            ).resolve(guild_domain)
+        except ValueError:
+            return False, True
+        async with sessionmaker() as session:
+            scheduled = await session.get(GuildScheduledEvent, scheduled_ref)
+            if scheduled is None or (scheduled.guild_id, scheduled.guild_domain) != guild_key:
+                return False, True
+            channel_id, channel_domain = scheduled.channel_id, scheduled.channel_domain
+    if event_type == "VOICE_STATE_UPDATE" and channel_id is None:
+        room = data.get("room")
+        if not isinstance(room, str):
+            return False, True
+        from app.voice.rooms import parse_room_name
+
+        try:
+            kind, scope, leaf = parse_room_name(room)
+        except ValueError:
+            return False, True
+        if kind != "g" or scope != guild_id:
+            return False, True
+        channel_id, channel_domain = leaf, guild_domain
     # Attachment state can disclose both a private-channel filename and its
     # moderation outcome.  Unlike older guild-wide events, it is never safe to
     # infer a channel when a retained or malformed event omits either half of
@@ -1699,6 +1805,7 @@ async def event_visibility(
     if event.get("t") == "ATTACHMENT_UPDATE" and (channel_id is None or channel_domain is None):
         return False, True
     if channel_id is None and event.get("t") in {
+        "CHANNEL_DELETE",
         "CHANNEL_CREATE",
         "CHANNEL_UPDATE",
         "THREAD_CREATE",
@@ -1709,6 +1816,8 @@ async def event_visibility(
     }:
         channel_id = data.get("id")
         channel_domain = data.get("origin_domain") or data.get("thread_domain")
+        if channel_id is None:
+            return False, True
     if channel_id is None:
         return True, True
     try:
@@ -1738,12 +1847,11 @@ async def event_visibility(
                 return False, True
         if not permissions & Permission.MANAGE_CHANNELS:
             return False, True
-    if event.get("t") == "CHANNEL_DELETE":
-        return True, True
     resolved_ref = (channel_number, resolved_domain)
     allowed = (
-        prior_thread_delete_visible
-        if event.get("t") == "THREAD_DELETE" and prior_thread_delete_ref == resolved_ref
+        prior_channel_delete_visible
+        if event_type in {"CHANNEL_DELETE", "THREAD_DELETE"}
+        and prior_channel_delete_ref == resolved_ref
         else (
             prior_current_member_removal_visible
             if event.get("t") == "THREAD_MEMBERS_UPDATE"
@@ -1751,7 +1859,7 @@ async def event_visibility(
             else resolved_ref in summary.channels.get((guild_id, guild_domain), set())
         )
     )
-    if event.get("t") == "THREAD_DELETE":
+    if event_type in {"CHANNEL_DELETE", "THREAD_DELETE"}:
         summary.channels.get((guild_id, guild_domain), set()).discard(resolved_ref)
     return allowed, True
 
@@ -2451,10 +2559,7 @@ async def fanout_loop(
                 status_value = str(data.get("status", "online"))
                 if status_value not in {"online", "idle", "dnd", "invisible"}:
                     status_value = "online"
-                visible_status, generation = await broadcast_presence_preference(
-                    redis, user, status_value, topics
-                )
-                schedule_presence_fanout(user, visible_status, generation)
+                await publish_gateway_presence(sessionmaker, redis, user, topics, status_value)
             elif op == GatewayOp.VOICE_STATE_UPDATE:
                 raw_data = payload.get("d")
                 if not isinstance(raw_data, dict) or set(raw_data) != {"self_mute", "self_deaf"}:
@@ -2796,19 +2901,24 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
             )
             sequence += 1
             presence_preference = await current_presence_preference(sessionmaker, redis, user)
+            presence_state = await current_presence_state(sessionmaker, user)
             presences = await contact_presence_snapshot(sessionmaker, redis, user, dm_channels)
+            resumed_data: dict[str, object] = {
+                "session_id": gateway_session_id,
+                "replayed": sequence - start_sequence - 1,
+                "presence_initialized": True,
+                "relationships": await gateway_relationships(sessionmaker, user),
+                "presence_preference": presence_preference,
+                "presences": presences,
+            }
+            if presence_state is not None:
+                resumed_data["presence_state"] = presence_state
             await websocket.send_json(
                 {
                     "op": GatewayOp.DISPATCH,
                     "t": "RESUMED",
                     "s": sequence,
-                    "d": {
-                        "session_id": gateway_session_id,
-                        "replayed": sequence - start_sequence - 1,
-                        "relationships": await gateway_relationships(sessionmaker, user),
-                        "presence_preference": presence_preference,
-                        "presences": presences,
-                    },
+                    "d": resumed_data,
                 }
             )
             await persist_gateway_progress(redis, gateway_session_id, sequence, cursors, topics)
@@ -2939,6 +3049,7 @@ async def gateway(websocket: WebSocket, v: int = PROTOCOL_VERSION, encoding: str
         if connection_lock_key is None or connection_owner is None:
             await websocket.close(code=GatewayCloseCode.UNKNOWN_ERROR)
             return
+        await publish_gateway_presence(sessionmaker, redis, user, topics)
         await fanout_loop(
             websocket,
             redis,

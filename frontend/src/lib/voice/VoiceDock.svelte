@@ -45,6 +45,7 @@
     permissions = null,
     occupants = [],
     startedAt = null,
+    onKeepCallElsewhere,
     headerActions
   }: {
     channelRef?: string;
@@ -52,6 +53,7 @@
     permissions?: string | null;
     occupants?: VoiceOccupant[];
     startedAt?: number | null;
+    onKeepCallElsewhere?: (reference: string) => void;
     headerActions?: Snippet;
   } = $props();
   interface RTCRouting {
@@ -177,6 +179,7 @@
   const connectionFence = new VoiceConnectionFence();
   let connectionId = base64url(randomBytes(32));
   let joinController: AbortController | null = null;
+  let joinedPolicy = $state.raw<{ reference: string; encryption: string } | null>(null);
   const permissionBits = $derived.by(() => {
     if (callRef || permissions === null) return null;
     try {
@@ -458,6 +461,30 @@
     return entities.channels.values.find((item) => entityKey(item) === reference) ?? null;
   }
 
+  function monitorChannelPolicy(channel: Channel) {
+    joinedPolicy = { reference: entityRef(channel), encryption: encryptionPolicy(channel) };
+  }
+
+  function encryptionPolicy(channel: Channel): string {
+    return JSON.stringify([
+      channel.encryption_mode,
+      channel.encryption_state,
+      channel.encryption_group_id,
+      channel.encryption_epoch,
+      channel.encryption_policy_generation
+    ]);
+  }
+
+  $effect(() => {
+    if (!joinedPolicy) return;
+    const channel = selectedChannel(joinedPolicy.reference);
+    if (!channel || joinedPolicy.encryption !== encryptionPolicy(channel)) {
+      void leave().then(() => {
+        if (mounted) error = $t('voice_encryption_changed');
+      });
+    }
+  });
+
   function stageOccupantName(occupant: VoiceOccupant): string {
     return userDisplayName(entities.users.get(`${occupant.user_id}@${occupant.user_domain}`));
   }
@@ -543,7 +570,8 @@
     const { grant, channelRef: targetRef } = (
       event as CustomEvent<{ grant: VoiceToken; channelRef: string }>
     ).detail;
-    if ((grant.move_session_id ?? null) !== voice.moveSessionId) return;
+    if (!voice.connected || !grant.move_session_id || grant.move_session_id !== voice.moveSessionId)
+      return;
     const generation = connectionFence.begin();
     joinController?.abort();
     joinController = null;
@@ -557,6 +585,7 @@
           await voice.disconnect();
           throw new Error($t('ui_the_destination_uses_a_different_voice_encryp_33e3a699'));
         }
+        monitorChannelPolicy(channel);
         const key = await mediaKey(grant, channel);
         connectionId = grant.connection_id;
         const deviceId = await senderDeviceId(channel);
@@ -569,6 +598,10 @@
         }
         await voice.connect(grant, channel, key);
         if (!mounted || !connectionFence.isCurrent(generation)) await voice.disconnect();
+        else if (audioHost) {
+          detachAudio?.();
+          detachAudio = voice.attachAudio(audioHost);
+        }
       } catch (caught) {
         if (mounted && connectionFence.isCurrent(generation)) {
           error = userErrorMessage(
@@ -721,6 +754,7 @@
   });
 
   async function leave() {
+    joinedPolicy = null;
     connectionFence.invalidate();
     joinController?.abort();
     joinController = null;
@@ -728,11 +762,17 @@
   }
 
   async function requireFreshBrowserVoiceGrant() {
+    joinedPolicy = null;
     connectionFence.invalidate();
     joinController?.abort();
     joinController = null;
     await voice.disconnect();
     if (mounted) error = $t('ui_voice_permissions_changed_rejoin_to_refresh_y_7cb6973c');
+  }
+
+  function keepVoiceElsewhere() {
+    takeoverPrompt = null;
+    if (callRef) onKeepCallElsewhere?.(callRef);
   }
 
   async function join(takeover = false) {
@@ -754,6 +794,7 @@
       const channel = selectedChannel();
       if (!channel)
         throw new Error($t('ui_voice_channel_policy_is_unavailable_refresh_a_412347ce'));
+      monitorChannelPolicy(channel);
       const deviceId = await senderDeviceId(channel);
       const path = callRef
         ? `/calls/${encodeURIComponent(callRef)}/voice/token`
@@ -781,6 +822,7 @@
       if (controller.signal.aborted || !connectionFence.isCurrent(generation)) return;
       const grant = await api<VoiceToken>(path, {
         method: 'POST',
+        headers: isNativeDesktop() ? undefined : { 'X-Kaede-Media-Key-Bits': '256' },
         body: JSON.stringify({
           sender_device_id: deviceId,
           connection_id: connectionId,
@@ -802,8 +844,7 @@
           grant,
           channel,
           key,
-          deviceId ?? undefined,
-          takeover
+          deviceId ?? undefined
         );
       } else {
         await voice.connect(grant, channel, key);
@@ -821,6 +862,7 @@
       }
     } catch (caught) {
       if (mounted && connectionFence.isCurrent(generation) && !controller.signal.aborted) {
+        joinedPolicy = null;
         if (caught instanceof ApiError && caught.code === 'VOICE_ACTIVE_ELSEWHERE') {
           const activeClient =
             typeof caught.detail.active_client === 'string' ? caught.detail.active_client : '';
@@ -1130,7 +1172,11 @@
   {/if}
 {/snippet}
 
-<section class="voice-panel" aria-label={$t('ui_voice_channel_52909660')}>
+<section
+  class="voice-panel"
+  class:dm-takeover={Boolean(callRef && takeoverPrompt)}
+  aria-label={$t('ui_voice_channel_52909660')}
+>
   <header class="voice-heading">
     <div class="voice-status">
       <span class:connected={view.connected} class="status-dot" aria-hidden="true"></span>
@@ -1215,7 +1261,7 @@
 
   <div class="audio-host" bind:this={audioHost}></div>
 
-  <main class="voice-stage">
+  <main class="voice-stage" class:dm-stage={Boolean(callRef)}>
     {#if error}<p class="voice-error" role="alert">{error}</p>{/if}
     {#if videoDegraded}<p class="voice-permission-notice" role="status">
         Video quality reduced to keep this call usable.
@@ -1231,7 +1277,7 @@
           <button class="primary" disabled={view.connecting} onclick={() => join(true)}>
             {view.connecting ? $t('ui_moving_voice_05114666') : $t('ui_move_voice_here_a24a87c4')}
           </button>
-          <button class="secondary" onclick={() => (takeoverPrompt = null)}
+          <button class="secondary" onclick={keepVoiceElsewhere}
             >{$t('ui_keep_it_there_2d0d45fb')}</button
           >
         </div>
@@ -1307,6 +1353,7 @@
             <article
               class:speaking={participant.speaking}
               class:priority-speaker={participant.priority}
+              class:local={participant.local}
               class="participant-card"
             >
               {#if participant.priority}
@@ -1980,6 +2027,36 @@
       box-shadow 120ms ease;
   }
 
+  .voice-stage.dm-stage {
+    container-type: size;
+    padding-block: 0.5rem;
+  }
+
+  .dm-stage .participant-card {
+    aspect-ratio: auto;
+    min-height: min(210px, 100cqh);
+    gap: 0.4rem;
+    padding: 0.4rem 0.65rem;
+  }
+
+  .dm-stage .participant-avatar {
+    width: clamp(2.5rem, 38cqh, 5.25rem);
+    height: auto;
+    aspect-ratio: 1;
+  }
+
+  .dm-stage .participant-mic {
+    inset: 0.5rem auto auto 0.5rem;
+  }
+
+  @container (max-height: 6rem) {
+    .dm-stage .participant-card.local {
+      grid-template-columns: auto minmax(0, auto);
+      justify-content: center;
+      padding-inline: 2.75rem;
+    }
+  }
+
   .participant-card.speaking {
     border-color: var(--pine);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--pine) 50%, transparent);
@@ -2108,6 +2185,40 @@
     font-size: 0.74rem;
     font-weight: 700;
     cursor: pointer;
+  }
+
+  .voice-panel.dm-takeover {
+    container: dm-handoff / size;
+  }
+
+  @container dm-handoff (max-height: 17rem) {
+    .voice-heading {
+      display: none;
+    }
+
+    .voice-stage.dm-stage {
+      grid-row: 1 / -1;
+      padding: 0.5rem;
+    }
+
+    .takeover-prompt {
+      gap: 0.375rem;
+      padding: 0.625rem;
+    }
+
+    .takeover-prompt > span {
+      display: none;
+    }
+
+    .takeover-actions {
+      flex-wrap: wrap;
+      justify-content: center;
+      margin: 0;
+    }
+
+    .takeover-actions button {
+      min-height: 2.5rem;
+    }
   }
 
   .join-prompt > span {

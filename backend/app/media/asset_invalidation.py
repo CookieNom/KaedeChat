@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.chat.guild_revision import guild_authority_owner, queue_guild_mutation
 from app.chat.payloads import (
     emoji_payload,
+    federation_sound_payload,
     role_payload,
     soundboard_sound_payload,
     sticker_payload,
@@ -247,6 +248,7 @@ async def _invalidate_role_asset(
         "guild.role.update",
         {"role": rendered},
         snapshot_required=True,
+        pause_e2ee=False,
     )
     return TerminalAssetInvalidation(
         guild=guild,
@@ -342,7 +344,7 @@ async def _invalidate_soundboard_asset(
         guild,
         actor,
         "guild.soundboard.sound.delete",
-        {"sound": rendered},
+        {"sound": federation_sound_payload(rendered)},
     )
     sounds = list(
         await session.scalars(
@@ -363,7 +365,9 @@ async def _invalidate_soundboard_asset(
         {
             "guild_id": str(guild.id),
             "guild_domain": guild.origin_domain,
-            "soundboard_sounds": [soundboard_sound_payload(item) for item in sounds],
+            "soundboard_sounds": [
+                federation_sound_payload(soundboard_sound_payload(item)) for item in sounds
+            ],
         },
     )
     return TerminalAssetInvalidation(

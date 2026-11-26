@@ -200,6 +200,7 @@ async def broadcast_presence_preference(
     activities: list[dict[str, object]] | None = None,
     since: int | None = None,
     afk: bool = False,
+    presence_state: dict[str, object] | None = None,
 ) -> tuple[str, int]:
     """Set authoritative presence and project it to every active client topic."""
 
@@ -236,10 +237,15 @@ async def broadcast_presence_preference(
             if topic == private_topic
             else public_presence
         )
+        private_extras: dict[str, object] = {}
+        if topic == private_topic:
+            private_extras["preference"] = status
+            if presence_state is not None:
+                private_extras["presence_state"] = presence_state
         await publish_presence(
             redis,
             topic,
-            {**presence, **({"preference": status} if topic == private_topic else {})},
+            {**presence, **private_extras},
             user_domain=user.origin_domain,
             user_id=user.id,
             generation=generation,

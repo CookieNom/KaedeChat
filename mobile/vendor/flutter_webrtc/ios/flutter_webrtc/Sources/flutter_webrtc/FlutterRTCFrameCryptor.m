@@ -407,7 +407,8 @@
                                             failureTolerance:failureTolerance != nil ? [failureTolerance intValue] : -1
                                                  keyRingSize:keyRingSize != nil ? [keyRingSize intValue] : 0
                              discardFrameWhenCryptorNotReady:discardFrameWhenCryptorNotReady != nil ? [discardFrameWhenCryptorNotReady boolValue] : NO
-                                       keyDerivationAlgorithm:[self getKeyDerivationAlgorithm:keyDerivationAlgorithm]];
+                                       keyDerivationAlgorithm:[self getKeyDerivationAlgorithm:keyDerivationAlgorithm]
+                                                      keySize:[(keyProviderOptions[@"keySize"] ?: @128) intValue]];
   self.keyProviders[keyProviderId] = keyProvider;
   result(@{@"keyProviderId" : keyProviderId});
 }

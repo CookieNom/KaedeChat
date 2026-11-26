@@ -25,6 +25,7 @@ PATCHES = [
     ROOT / 'desktop/patches/livekit-media-foundation.patch',
     ROOT / 'desktop/patches/livekit-hevc-decode-probe.patch',
     ROOT / 'docs/av1-e2ee/native-interop.patch',
+    ROOT / 'desktop/patches/livekit-frame-keys.patch',
 ]
 
 

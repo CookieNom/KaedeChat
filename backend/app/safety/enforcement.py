@@ -12,6 +12,7 @@ from sqlalchemy import exists, false, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Exists
 
+from app.admin.auth import AdminPrincipal, require_manageable_account
 from app.chat.events import user_topic
 from app.chat.permissions import calculate_permissions
 from app.chat.postcommit import queue_postcommit_dispatch
@@ -354,12 +355,31 @@ async def preserve_attachment(
             raise StorageError("cached evidence integrity check failed")
         provenance = "federated_origin"
     else:
-        data = await S3Storage(settings).get(
-            settings.media_attachments_bucket,
-            attachment.object_key,
-            max_bytes=max(attachment.size, 1),
-        )
         provenance = "reporter_disclosed" if attachment.report_id else "local_upload"
+        retained = None
+        if attachment.scan_status == "pending" and attachment.content_sha256:
+            # A separate case may already hold the only copy after quarantine.
+            retained = await session.scalar(
+                select(ChildSafetyEvidence)
+                .where(
+                    ChildSafetyEvidence.attachment_ref
+                    == f"{attachment.id}@{attachment.origin_domain}",
+                    ChildSafetyEvidence.sha256 == attachment.content_sha256,
+                    ChildSafetyEvidence.stored_at.is_not(None),
+                    ChildSafetyEvidence.deleted_at.is_(None),
+                )
+                .order_by(ChildSafetyEvidence.id)
+                .limit(1)
+                .with_for_update(read=True)
+            )
+        if retained is not None:
+            data = await read_evidence(settings, retained)
+        else:
+            data = await S3Storage(settings).get(
+                settings.media_attachments_bucket,
+                attachment.object_key,
+                max_bytes=max(attachment.size, 1),
+            )
     await preserve_evidence(
         session,
         settings,
@@ -491,7 +511,7 @@ async def apply_case_review(
     settings: Settings,
     case: ChildSafetyCase,
     decision: str,
-    actor: User,
+    principal: AdminPrincipal,
     redis: Redis,
     *,
     suspend_account: bool = False,
@@ -507,6 +527,17 @@ async def apply_case_review(
     details = case_details(settings, case)
     if decision == "confirmed" and case.message_ref and not details.get("provenance_verified"):
         raise HTTPException(status_code=409, detail={"code": "SAFETY_SOURCE_VERIFICATION_REQUIRED"})
+    if suspend_account:
+        if not details.get("provenance_verified") or not case.subject_ref:
+            raise HTTPException(status_code=409, detail={"code": "SAFETY_PROVENANCE_UNVERIFIED"})
+        user = await session.get(
+            User, EntityRef(case.subject_ref).resolve(settings.domain), with_for_update=True
+        )
+        if user is None or not user.is_local or user.id == principal.user.id:
+            raise HTTPException(status_code=409, detail={"code": "SAFETY_SUSPENSION_UNAVAILABLE"})
+        await require_manageable_account(session, principal, user)
+        until = datetime.now(UTC) + timedelta(days=7)
+        user.suspended_until = max(user.suspended_until or until, until)
     refs = {item.attachment_ref for item in evidence if item.attachment_ref}
     if case.attachment_ref:
         refs.add(case.attachment_ref)
@@ -708,13 +739,3 @@ async def apply_case_review(
                 state="removed",
                 reason=REMOVED_REASON,
             )
-    if suspend_account:
-        if not details.get("provenance_verified") or not case.subject_ref:
-            raise HTTPException(status_code=409, detail={"code": "SAFETY_PROVENANCE_UNVERIFIED"})
-        user = await session.get(
-            User, EntityRef(case.subject_ref).resolve(settings.domain), with_for_update=True
-        )
-        if user is None or not user.is_local or user.id == actor.id:
-            raise HTTPException(status_code=409, detail={"code": "SAFETY_SUSPENSION_UNAVAILABLE"})
-        until = datetime.now(UTC) + timedelta(days=7)
-        user.suspended_until = max(user.suspended_until or until, until)

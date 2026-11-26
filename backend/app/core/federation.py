@@ -147,11 +147,14 @@ AUTHORITY_ATTESTED_GUILD_OWNER_EVENT_TYPES = GUILD_MUTATION_EVENT_TYPES | {
 FEDERATION_CAPABILITIES = (
     PERMISSION_SCHEMA_CAPABILITY,
     "dm-history-page/1",
+    "dm-group-inviter-proof/1",
+    "webhook-token-recovery/1",
     "e2ee-mls/1",
     "e2ee-media/1",
     "bot-direct-auth/1",
     "guild-audit-log/1",
     "guild-soundboard/1",
+    "guild-soundboard-decimal-volume/1",
     "guild-history-sync/1",
     "guild-history-sync/2",
     "member-self-moderation/1",
@@ -1119,6 +1122,17 @@ def authority_attested_media_delete_ref(
     ):
         return None
     return int(raw_attachment_id), expected_authority, int(raw_generation)
+
+
+def deletion_control_envelope(envelope: dict[str, Any]) -> bool:
+    return (
+        authority_attested_media_delete_ref(
+            envelope, expected_authority=str(envelope.get("origin"))
+        )
+        is not None
+        or durable_terminal_room_event(envelope)
+        or durable_guild_media_delete_request(envelope)
+    )
 
 
 def policy_held_retry_at(now: datetime | None = None) -> datetime:

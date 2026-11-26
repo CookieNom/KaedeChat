@@ -10,10 +10,12 @@ from fastapi import HTTPException
 
 from app.api.calls import (
     act_on_call,
+    active_dm_voice_participant,
     exact_call_projection,
     federation_call_signal,
     federation_call_state,
     notify_call,
+    propagate_call_state,
     start_call,
 )
 from app.core.settings import Settings
@@ -43,6 +45,35 @@ def allow_call_policy_for_transport_tests(monkeypatch: pytest.MonkeyPatch) -> No
         "app.api.calls.clear_terminal_call_voice_projection",
         AsyncMock(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["active", "blocked", "withdrawn", "rekeying", "banned"])
+async def test_live_dm_media_requires_current_call_and_encryption_policy(monkeypatch, state):
+    channel = Channel(
+        id=10,
+        origin_domain="alpha.localhost",
+        type=1,
+        unavailable=state == "withdrawn",
+        encryption_mode="e2ee" if state == "rekeying" else "plaintext",
+        encryption_state=state,
+    )
+    actor = User(id=2, origin_domain="alpha.localhost")
+    if state == "banned":
+        from datetime import UTC, datetime
+
+        actor.disabled_at = datetime.now(UTC)
+    policy = AsyncMock(side_effect=HTTPException(403) if state == "blocked" else None)
+    monkeypatch.setattr("app.api.calls.require_call_policy", policy)
+    result = await active_dm_voice_participant(
+        SimpleNamespace(get=AsyncMock(side_effect=[channel, actor])),
+        settings(),
+        {"channel_id": "10", "channel_domain": "alpha.localhost"},
+        (2, "alpha.localhost"),
+        "d.10.12",
+        {"e2ee": state == "rekeying"},
+    )
+    assert result is (actor if state == "active" else None)
 
 
 def settings(domain: str = "alpha.localhost") -> Settings:
@@ -115,10 +146,14 @@ def dm_channel() -> Channel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conversation_type", ["direct", "group"])
-async def test_remote_call_is_committed_and_fanned_out_by_conversation_authority(
+@pytest.mark.parametrize(
+    ("conversation_type", "receiving_replica"),
+    [("direct", False), ("group", False), ("direct", True)],
+)
+async def test_remote_call_create_projection(
     monkeypatch: pytest.MonkeyPatch,
     conversation_type: str,
+    receiving_replica: bool,
 ) -> None:
     channel = dm_channel()
     conversation = DMConversation(
@@ -132,9 +167,10 @@ async def test_remote_call_is_committed_and_fanned_out_by_conversation_authority
         state_version=7,
     )
     owner = user(1, "alpha.localhost")
-    actor = user(2, "beta.localhost")
+    peer = user(2, "beta.localhost")
+    actor = owner if receiving_replica else peer
     third = user(3, "gamma.localhost")
-    participants = [owner, actor, third] if conversation_type == "group" else [owner, actor]
+    participants = [owner, peer, third] if conversation_type == "group" else [owner, peer]
 
     async def get_model(model: object, _key: object) -> object | None:
         if model is Channel:
@@ -167,29 +203,49 @@ async def test_remote_call_is_committed_and_fanned_out_by_conversation_authority
             channel_id="34",
             channel_domain="alpha.localhost",
             authority_domain="alpha.localhost",
-            actor_id="2",
-            actor_domain="beta.localhost",
+            actor_id=str(actor.id),
+            actor_domain=actor.origin_domain,
             action="create",
+            ring=False,
             created_at=10,
             state_version="7" if conversation_type == "group" else None,
         ),
-        FederationPrincipal(origin="beta.localhost", key_id="beta-key"),
+        FederationPrincipal(origin=actor.origin_domain, key_id="key"),
         cast(Any, SimpleNamespace(get=get_model)),
         cast(Any, object()),
-        settings(),
+        settings("beta.localhost" if receiving_replica else "alpha.localhost"),
     )
 
     assert response.authority_domain == "alpha.localhost"
     assert remote_user_allowed.await_args.args[1] is actor
-    assert response.caller == "2@beta.localhost"
+    assert response.caller == f"{actor.id}@{actor.origin_domain}"
     assert set(response.participants) == {
         f"{participant.id}@{participant.origin_domain}" for participant in participants
     }
+    if receiving_replica:
+        propagate.assert_not_awaited()
+        return
     propagate.assert_awaited_once()
+    assert propagate.await_args.kwargs["ring"] is False
     assert propagate.await_args.kwargs["exclude_domains"] == {"beta.localhost"}
     assert propagate.await_args.kwargs["state_version"] == (
         7 if conversation_type == "group" else None
     )
+
+
+@pytest.mark.asyncio
+async def test_group_accept_reaches_other_homes_with_the_accepting_identity(monkeypatch):
+    record = call_record()
+    record["participants"].append("3@gamma.localhost")
+    send = AsyncMock(side_effect=[httpx.Response(404), httpx.Response(200, json=record)])
+    monkeypatch.setattr("app.api.calls.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("app.api.calls.signed_request", send)
+    await propagate_call_state(AsyncMock(), settings(), record, accepted_by="2@beta.localhost")
+    assert send.await_count == 2
+    assert send.await_args.args[3] == "gamma.localhost"
+    projection = CallStateFederationRequest.model_validate(send.await_args.kwargs["payload"])
+    assert projection.accepted_by == "2@beta.localhost"
+    assert projection.call.state == "active"
 
 
 @pytest.mark.asyncio
@@ -326,7 +382,7 @@ async def test_long_lived_remote_action_uses_stored_call_context(
     monkeypatch.setattr("app.api.calls.transition_call", transition)
     monkeypatch.setattr("app.api.calls.notify_call", AsyncMock())
     monkeypatch.setattr("app.api.calls.delete_terminal_call_room", AsyncMock())
-    monkeypatch.setattr("app.api.calls.propagate_terminal_call", AsyncMock())
+    monkeypatch.setattr("app.api.calls.propagate_call_state", AsyncMock())
     request = CallFederationRequest(
         call_id="56",
         channel_id="34",
@@ -387,7 +443,7 @@ async def test_transport_retry_after_an_unchanged_transition(
     propagate = AsyncMock()
     monkeypatch.setattr("app.api.calls.notify_call", notify)
     monkeypatch.setattr("app.api.calls.delete_terminal_call_room", cleanup)
-    monkeypatch.setattr("app.api.calls.propagate_terminal_call", propagate)
+    monkeypatch.setattr("app.api.calls.propagate_call_state", propagate)
     request = CallFederationRequest(
         call_id="56",
         channel_id="34",
@@ -434,7 +490,7 @@ async def test_replica_applies_exact_authority_response(monkeypatch: pytest.Monk
     )
     monkeypatch.setattr("app.api.calls.notify_call", AsyncMock())
     monkeypatch.setattr("app.api.calls.delete_terminal_call_room", AsyncMock())
-    monkeypatch.setattr("app.api.calls.propagate_terminal_call", AsyncMock())
+    monkeypatch.setattr("app.api.calls.propagate_call_state", AsyncMock())
 
     response = await act_on_call(
         EntityRef("56@alpha.localhost"),
@@ -560,3 +616,26 @@ async def test_call_push_redeems_caller_name_from_home(
     )
     assert args[8:] == ("56@alpha.localhost", "34@alpha.localhost")
     dispatch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_call_accept_only_marks_answering_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatch = AsyncMock()
+    monkeypatch.setattr("app.api.calls.publish_dispatch", dispatch)
+    participants = [f"{user_id}@alpha.localhost" for user_id in (1, 2, 3)]
+    await notify_call(
+        AsyncMock(),
+        AsyncMock(),
+        participants,
+        "CALL_ACCEPT",
+        {**call_record(), "participants": participants},
+        settings(),
+        actor=participants[1],
+    )
+    assert [call.args[-1]["acted_by_me"] for call in dispatch.await_args_list] == [
+        False,
+        True,
+        False,
+    ]

@@ -69,7 +69,7 @@
   <aside class="link-preview link-preview-error" role="alert">
     <p>{loadError}</p>
     <div>
-      <a href={url} target="_blank" rel="noopener noreferrer nofollow"
+      <a data-shopping-link href={url} target="_blank" rel="noopener noreferrer nofollow"
         >{$t('ui_open_link_aab63f85')}</a
       >
       <button type="button" onclick={() => (loadAttempt += 1)}>{$t('ui_try_again_d8b8392e')}</button
@@ -88,7 +88,12 @@
 {:else if preview}
   <article class="link-preview">
     {#if preview.media_url && preview.media_type === 'image'}
-      <a href={preview.url} target="_blank" rel="noopener noreferrer nofollow">
+      <a
+        data-shopping-link={preview.url === url ? true : undefined}
+        href={preview.url}
+        target="_blank"
+        rel="noopener noreferrer nofollow"
+      >
         <img src={preview.media_url} alt="" loading="lazy" />
       </a>
     {:else if preview.media_url && preview.media_type === 'video'}
@@ -99,8 +104,11 @@
       <div>
         {#if preview.site_name}<small>{preview.site_name}</small>{/if}
         {#if preview.title}
-          <a href={preview.url} target="_blank" rel="noopener noreferrer nofollow"
-            >{preview.title}</a
+          <a
+            data-shopping-link={preview.url === url ? true : undefined}
+            href={preview.url}
+            target="_blank"
+            rel="noopener noreferrer nofollow">{preview.title}</a
           >
         {/if}
         {#if preview.description}<p>{preview.description}</p>{/if}

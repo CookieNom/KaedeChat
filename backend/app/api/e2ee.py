@@ -53,6 +53,7 @@ from app.chat.e2ee_membership import (
     remote_e2ee_authorities_for_user,
 )
 from app.chat.events import publish_dispatch, user_topic
+from app.chat.group_conversations import group_participants
 from app.chat.guild_revision import (
     federation_channel_state,
     queue_guild_mutation,
@@ -1828,14 +1829,10 @@ async def dm_plaintext_continuation_consent(
     if access.guild is not None or channel.type != 1:
         raise HTTPException(status_code=400, detail={"code": "DM_REQUIRED"})
     if channel.origin_domain != settings.domain:
-        return await proxy_room_e2ee_request(
-            session,
-            settings,
-            channel.origin_domain,
-            "/_kaede/v1/e2ee/rooms/continuation-consent",
-            channel=channel,
-            actor=auth.user,
-            body=payload.model_dump(),
+        if payload.action == "status":
+            return {"request": None, "available": False}
+        raise HTTPException(
+            status_code=409, detail={"code": "DM_CONTINUATION_INSTANCE_UNSUPPORTED"}
         )
     # Group membership changes lock the conversation first. Re-read the roster
     # under that same lock so a delayed vote cannot authorize a different group.
@@ -2964,6 +2961,44 @@ def _operation_participant_refs(participants: list[User]) -> list[dict[str, str]
     ]
 
 
+def _legacy_pending_operation(operation: E2EERoomOperation) -> bool:
+    return operation.status in {"claiming", "prepared"} and any(
+        "generation" not in ref for ref in operation.participant_refs
+    )
+
+
+def _operation_roster(participants: list[User]) -> list[dict[str, str]]:
+    return [
+        {
+            "id": str(user.id),
+            "domain": user.origin_domain,
+            "generation": str(user.e2ee_device_generation),
+        }
+        for user in sorted(participants, key=lambda user: (user.origin_domain, user.id))
+    ]
+
+
+async def _fence_operation_devices(
+    session: AsyncSession, participants: list[User]
+) -> list[dict[str, str]]:
+    # Revocation and reset take the User lock before room locks. Acquire the
+    # same locks in stable order, before the committer's own vault lock.
+    locked = list(
+        await session.scalars(
+            select(User)
+            .where(
+                tuple_(User.id, User.origin_domain).in_(
+                    [(u.id, u.origin_domain) for u in participants]
+                )
+            )
+            .order_by(User.origin_domain, User.id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    )
+    return _operation_roster(locked)
+
+
 def _stored_response(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise RuntimeError(f"persisted E2EE {label} response is invalid")
@@ -3059,6 +3094,10 @@ async def _propose_room_operation(
             or not secrets.compare_digest(operation.request_digest, request_digest)
         ):
             raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_CONFLICT"})
+        if _legacy_pending_operation(operation):
+            operation.status = "failed"
+            await session.commit()
+            raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
         if operation.status in {"prepared", "committed"}:
             return _stored_response(operation.prepared_response, "prepared")
         if operation.status == "failed" or operation.expires_at <= datetime.now(UTC):
@@ -3097,7 +3136,7 @@ async def _propose_room_operation(
             .with_for_update()
         )
         if active is not None:
-            if active.expires_at <= datetime.now(UTC):
+            if _legacy_pending_operation(active) or active.expires_at <= datetime.now(UTC):
                 active.status = "failed"
                 await session.flush()
             else:
@@ -3128,7 +3167,7 @@ async def _propose_room_operation(
             policy_generation=channel.encryption_policy_generation + 1,
             group_id=encode_base64url(secrets.token_bytes(32)),
             consent_request_id=consent_request_id,
-            participant_refs=_operation_participant_refs(participants),
+            participant_refs=_operation_roster(participants),
             key_packages=[],
             expires_at=datetime.now(UTC) + ROOM_OPERATION_TTL,
         )
@@ -3144,7 +3183,7 @@ async def _propose_room_operation(
             raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
         participants.append(participant)
     current_participants = await room_participants(session, redis, access)
-    if _operation_participant_refs(current_participants) != operation.participant_refs:
+    if _operation_roster(current_participants) != operation.participant_refs:
         operation.status = "failed"
         await session.commit()
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
@@ -3361,6 +3400,9 @@ async def _commit_room_operation(
         await apply_remote_active_policy(session, access.channel, rendered)
         return rendered
 
+    fenced_roster = await _fence_operation_devices(
+        session, await room_participants(session, redis, access)
+    )
     # A local actor's durable User row is the vault-lease fencing point. Take
     # it before the channel lock and retain both locks through the operation
     # commit, so a reset/vault writer and activation have one total order.
@@ -3380,6 +3422,21 @@ async def _commit_room_operation(
                 status_code=409,
                 detail={"code": "E2EE_ACCOUNT_VAULT_ATTESTATION_REQUIRED"},
             )
+    if access.guild is None:
+        dm = await session.get(
+            DMConversation,
+            (access.channel.id, access.channel.origin_domain),
+            with_for_update=True,
+            populate_existing=True,
+        )
+        if dm is None or dm.authority_domain != settings.domain:
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
+        access = ChannelAccess(access.channel, None, await group_participants(session, dm))
+        if automation_access is None and not any(
+            (p.id, p.origin_domain) == (auth.user.id, auth.user.origin_domain)
+            for p in access.participants
+        ):
+            raise HTTPException(status_code=404, detail={"code": "CHANNEL_NOT_FOUND"})
     access = await lock_local_channel_mutation(session, settings, access)
     conversation = (
         None
@@ -3456,7 +3513,10 @@ async def _commit_room_operation(
     if not valid_context:
         raise HTTPException(status_code=409, detail={"code": "E2EE_POLICY_CONTEXT_MISMATCH"})
     participants = await room_participants(session, redis, access)
-    if _operation_participant_refs(participants) != operation.participant_refs:
+    if (
+        _operation_roster(participants) != operation.participant_refs
+        or fenced_roster != operation.participant_refs
+    ):
         operation.status = "failed"
         await session.commit()
         raise HTTPException(status_code=409, detail={"code": "E2EE_OPERATION_STALE"})
@@ -3882,7 +3942,7 @@ async def room_encryption_operation_status_for_actor(
             actor=auth.user,
             body={"operation_id": operation_id},
         )
-    operation = await session.get(E2EERoomOperation, operation_id)
+    operation = await session.get(E2EERoomOperation, operation_id, with_for_update=True)
     if (
         operation is None
         or (operation.channel_id, operation.channel_domain)
@@ -3890,6 +3950,9 @@ async def room_encryption_operation_status_for_actor(
         or (operation.actor_id, operation.actor_domain) != (auth.user.id, auth.user.origin_domain)
     ):
         raise HTTPException(status_code=404, detail={"code": "E2EE_OPERATION_NOT_FOUND"})
+    if _legacy_pending_operation(operation):
+        operation.status = "failed"
+        await session.commit()
     return {
         "operation_id": operation.id,
         "kind": operation.kind,

@@ -6,7 +6,7 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, or_, select, tuple_, update
+from sqlalchemy import Select, delete, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.dependencies import (
@@ -46,6 +46,7 @@ from app.db.materialization import materialize_updated_at
 from app.db.models import (
     Attachment,
     Channel,
+    Emoji,
     Guild,
     GuildMember,
     MediaTombstoneDestination,
@@ -53,7 +54,9 @@ from app.db.models import (
     Message,
     ReadState,
     RemoteMediaCache,
+    Role,
     RoomFederationRecipient,
+    Sticker,
     User,
 )
 from app.federation.events import build_envelope, queue_event
@@ -434,6 +437,51 @@ async def transfer_guild_ownership(
     return rendered
 
 
+def _guild_channel_refs(guild: Guild) -> Select[tuple[int, str]]:
+    return select(Channel.id, Channel.origin_domain).where(
+        Channel.guild_id == guild.id,
+        Channel.guild_domain == guild.origin_domain,
+    )
+
+
+def _guild_content_attachment_refs(guild: Guild) -> Select[tuple[int, str]]:
+    message_refs = select(Message.id, Message.origin_domain).where(
+        tuple_(Message.channel_id, Message.channel_domain).in_(_guild_channel_refs(guild))
+    )
+    emoji_assets = select(func.concat("emoji:", Emoji.origin_domain, ":", Emoji.id)).where(
+        Emoji.guild_id == guild.id, Emoji.guild_domain == guild.origin_domain
+    )
+    sticker_assets = select(func.concat("sticker:", Sticker.origin_domain, ":", Sticker.id)).where(
+        Sticker.guild_id == guild.id, Sticker.guild_domain == guild.origin_domain
+    )
+    role_assets = select(func.concat("role:", Role.origin_domain, ":", Role.id, ":icon")).where(
+        Role.guild_id == guild.id, Role.guild_domain == guild.origin_domain
+    )
+    routed_refs = select(
+        MediaTombstoneDestination.attachment_id,
+        MediaTombstoneDestination.attachment_domain,
+    ).where(
+        MediaTombstoneDestination.room_kind == "guild",
+        MediaTombstoneDestination.room_id == guild.id,
+        MediaTombstoneDestination.room_domain == guild.origin_domain,
+    )
+    return select(Attachment.id, Attachment.origin_domain).where(
+        or_(
+            tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs),
+            tuple_(Attachment.id, Attachment.origin_domain).in_(routed_refs),
+            Attachment.asset_binding.in_(
+                (
+                    f"guild:{guild.origin_domain}:{guild.id}:icon",
+                    f"guild:{guild.origin_domain}:{guild.id}:banner",
+                )
+            ),
+            Attachment.asset_binding.in_(emoji_assets),
+            Attachment.asset_binding.in_(sticker_assets),
+            Attachment.asset_binding.in_(role_assets),
+        )
+    )
+
+
 async def _prepare_guild_content_deletion(
     session: AsyncSession, settings: Settings, guild: Guild
 ) -> tuple[list[tuple[int, str]], set[str], set[str]]:
@@ -443,45 +491,8 @@ async def _prepare_guild_content_deletion(
             func.pg_advisory_xact_lock(func.hashtextextended("kaede-remote-media-cache-budget", 0))
         )
     )
-    channel_refs = select(Channel.id, Channel.origin_domain).where(
-        Channel.guild_id == guild.id,
-        Channel.guild_domain == guild.origin_domain,
-    )
-    message_refs = select(Message.id, Message.origin_domain).where(
-        tuple_(Message.channel_id, Message.channel_domain).in_(channel_refs)
-    )
-    emoji_asset_prefix = f"emoji:{guild.origin_domain}:"
-    sticker_asset_prefix = f"sticker:{guild.origin_domain}:"
-    role_asset_prefix = f"role:{guild.origin_domain}:"
-    routed_refs = select(
-        MediaTombstoneDestination.attachment_id,
-        MediaTombstoneDestination.attachment_domain,
-    ).where(
-        MediaTombstoneDestination.room_kind == "guild",
-        MediaTombstoneDestination.room_id == guild.id,
-        MediaTombstoneDestination.room_domain == guild.origin_domain,
-    )
-    attachment_refs = list(
-        (
-            await session.execute(
-                select(Attachment.id, Attachment.origin_domain).where(
-                    or_(
-                        tuple_(Attachment.message_id, Attachment.message_domain).in_(message_refs),
-                        tuple_(Attachment.id, Attachment.origin_domain).in_(routed_refs),
-                        Attachment.asset_binding.in_(
-                            (
-                                f"guild:{guild.origin_domain}:{guild.id}:icon",
-                                f"guild:{guild.origin_domain}:{guild.id}:banner",
-                            )
-                        ),
-                        Attachment.asset_binding.startswith(emoji_asset_prefix),
-                        Attachment.asset_binding.startswith(sticker_asset_prefix),
-                        Attachment.asset_binding.startswith(role_asset_prefix),
-                    )
-                )
-            )
-        ).tuples()
-    )
+    channel_refs = _guild_channel_refs(guild)
+    attachment_refs = list((await session.execute(_guild_content_attachment_refs(guild))).tuples())
     for attachment_id, attachment_domain in sorted(
         attachment_refs, key=lambda ref: (ref[1], ref[0])
     ):

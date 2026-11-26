@@ -187,7 +187,13 @@ async def test_interaction_upload_stages_bytes_without_forwarding_bot_credential
         },
         "headers": {},
     }
+    from kaede_bot.media_urls import MediaTransport
+
     assert uploaded["client_kwargs"].pop("timeout") > 0
+    transport = uploaded["client_kwargs"].pop("transport")
+    assert isinstance(transport, MediaTransport)
+    assert transport.origin == "https://media.chat.example"
+    await transport.aclose()
     assert uploaded == {
         "client_kwargs": {
             "follow_redirects": False,

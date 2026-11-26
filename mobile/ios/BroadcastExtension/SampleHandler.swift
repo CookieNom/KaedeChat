@@ -45,6 +45,14 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
   override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
     lastVideoTimestamp = .invalid
+    CFNotificationCenterAddObserver(
+      CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque(),
+      { _, observer, _, _, _ in
+        guard let observer else { return }
+        let handler = Unmanaged<SampleHandler>.fromOpaque(observer).takeUnretainedValue()
+        handler.finishBroadcastWithError(NSError(domain: RPRecordingErrorDomain, code: 10001,
+          userInfo: [NSLocalizedDescriptionKey: "Screen sharing stopped"]))
+      }, "iOS_BroadcastRequestStop" as CFString, nil, .deliverImmediately)
     BroadcastNotificationCenter.post(.started)
     let timer = DispatchSource.makeTimerSource(
       queue: DispatchQueue(label: "chat.kaede.broadcast.connect")
@@ -63,6 +71,8 @@ final class SampleHandler: RPBroadcastSampleHandler {
   }
 
   override func broadcastFinished() {
+    CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+      Unmanaged.passUnretained(self).toOpaque())
     connectTimer?.cancel()
     connectTimer = nil
     connection?.close()

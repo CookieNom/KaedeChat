@@ -33,6 +33,7 @@ from app.chat.e2ee import (
 from app.chat.e2ee_controls import apply_e2ee_control_metadata
 from app.chat.e2ee_membership import (
     GUILD_E2EE_ACCESS_MUTATION_EVENTS,
+    GUILD_E2EE_OPTIONAL_REKEY_EVENTS,
     pause_guild_e2ee_for_membership_change,
 )
 from app.chat.message_flags import (
@@ -117,6 +118,7 @@ from app.federation.network import (
     decode_federation_response_json,
     normalize_domain,
 )
+from app.federation.numbers import read_wire_number
 from app.federation.relationships import (
     GUILD_PROFILE_RELAY_EVENT,
     guild_profile_member_payload,
@@ -2088,8 +2090,8 @@ def _validated_soundboard_sound(guild: Guild, raw: object) -> dict[str, object]:
         raise ValueError("soundboard media digest is invalid")
     if raw.get("content_type") not in {"audio/mpeg", "audio/ogg"}:
         raise ValueError("soundboard content type is invalid")
-    volume = raw.get("volume")
-    if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not 0 <= volume <= 1:
+    volume = read_wire_number(raw.get("volume"))
+    if not 0 <= volume <= 1:
         raise ValueError("soundboard volume is invalid")
     emoji_ref = _projection_ref_fields(
         raw,
@@ -2123,7 +2125,7 @@ def _validated_soundboard_sound(guild: Guild, raw: object) -> dict[str, object]:
     version = database_snowflake(raw.get("version"), "soundboard version")
     if version < 1:
         raise ValueError("soundboard version is invalid")
-    return dict(raw)
+    return {**raw, "volume": volume}
 
 
 def _validated_soundboard_collection(guild: Guild, raw: dict[str, Any]) -> dict[str, object]:
@@ -5039,6 +5041,9 @@ async def apply_guild_mutation_event(
             content,
             actor_ref,
         )
+        if event_type in {"guild.scheduled_event.user.add", "guild.scheduled_event.user.remove"}:
+            dispatch["channel_id"] = context.get("channel_id")
+            dispatch["channel_domain"] = context.get("channel_domain")
     elif event_type in {"guild.pin.add", "guild.pin.remove"}:
         dispatch_type, dispatch = await _apply_pin_mutation(
             session,
@@ -5066,6 +5071,11 @@ async def apply_guild_mutation_event(
 
         await purge_ineligible_federated_history(session, settings, locked)
     pause_e2ee = event_type in GUILD_E2EE_ACCESS_MUTATION_EVENTS
+    if event_type in GUILD_E2EE_OPTIONAL_REKEY_EVENTS and context.get("access_unchanged") is True:
+        pause_e2ee = False
+    permission_source_changed = (
+        event_type == "guild.channel.update" and context.get("permission_source_changed") is True
+    )
     if pause_e2ee and event_type in {
         "guild.member.remove",
         "guild.member.role.add",
@@ -5085,8 +5095,11 @@ async def apply_guild_mutation_event(
                 changed_user = None
             if changed_user is not None and changed_user.account_type == "bot":
                 pause_e2ee = False
-    if pause_e2ee:
-        paused = await pause_guild_e2ee_for_membership_change(session, locked)
+    if pause_e2ee or permission_source_changed:
+        if permission_source_changed or event_type.startswith("guild.overwrite."):
+            paused = await pause_guild_e2ee_for_membership_change(session, locked, channel)
+        else:
+            paused = await pause_guild_e2ee_for_membership_change(session, locked)
         if e2ee_policy_channels is not None:
             known = {(item.id, item.origin_domain) for item in e2ee_policy_channels}
             e2ee_policy_channels.extend(

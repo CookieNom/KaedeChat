@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import delete, exists, func, or_, select, tuple_, update
+from sqlalchemy import delete, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.selectable import Exists
 
@@ -20,6 +20,7 @@ from app.core.federation import (
     DURABLE_LATEST_STATE_EVENTS,
     POLICY_HELD_OUTBOX_PREFIX,
     canonical_json,
+    deletion_control_envelope,
     durable_guild_media_delete_request,
     durable_terminal_room_event,
     federation_policy_holds_event,
@@ -402,6 +403,10 @@ async def drain_destination(
                 .where(
                     FederationOutbox.destination == destination,
                     FederationOutbox.status.in_(("pending", "retry", "circuit")),
+                    or_(
+                        FederationOutbox.last_error.is_(None),
+                        ~FederationOutbox.last_error.startswith(POLICY_HELD_OUTBOX_PREFIX),
+                    ),
                 )
                 .order_by(FederationOutbox.id)
                 .limit(MAX_BATCH_EVENTS)
@@ -423,32 +428,16 @@ async def drain_destination(
         by_ref = {(event.origin_domain, event.event_id): event for event in events}
         block = await matching_block(session, destination)
         if block is not None:
-            held_rows = [
-                row
-                for row in rows
-                if (
-                    (row.event_origin_domain, row.event_id) not in by_ref
-                    or (
-                        by_ref[(row.event_origin_domain, row.event_id)].event_type != "media.delete"
-                        and not durable_terminal_room_event(
-                            by_ref[(row.event_origin_domain, row.event_id)].envelope
-                        )
-                        and not durable_guild_media_delete_request(
-                            by_ref[(row.event_origin_domain, row.event_id)].envelope
-                        )
-                        and (
-                            block.level == "suspend"
-                            or federation_policy_holds_event(
-                                block.level,
-                                by_ref[(row.event_origin_domain, row.event_id)].event_type,
-                                context=by_ref[
-                                    (row.event_origin_domain, row.event_id)
-                                ].envelope.get("context"),
-                            )
-                        )
+            held_rows = []
+            for row in rows:
+                event = by_ref.get((row.event_origin_domain, row.event_id))
+                if event is None or (
+                    not deletion_control_envelope(event.envelope)
+                    and federation_policy_holds_event(
+                        block.level, event.event_type, context=event.envelope.get("context")
                     )
-                )
-            ]
+                ):
+                    held_rows.append(row)
             for row in held_rows:
                 row.status = "circuit"
                 row.next_retry_at = policy_held_retry_at(now)
@@ -554,9 +543,6 @@ async def drain_destination(
                     else retry_override or retry_delay(row.attempts)
                 )
                 row.last_error = str(exc)[:500]
-            await session.execute(
-                update(Guild).where(Guild.origin_domain == destination).values(unavailable=True)
-            )
             await session.commit()
             return 0
         delivered = 0
@@ -633,9 +619,6 @@ async def drain_destination(
         instance = await session.get(Instance, destination)
         if instance is not None:
             instance.last_seen_at = now
-        await session.execute(
-            update(Guild).where(Guild.origin_domain == destination).values(unavailable=False)
-        )
         await session.commit()
         # Generation rollover takes terminal-room state before outbox state.
         # Mark the delivery in a second transaction after releasing outbox row

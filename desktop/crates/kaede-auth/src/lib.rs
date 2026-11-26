@@ -21,6 +21,9 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 
+pub const LOGIN_ACTION: &str = "kaede-login";
+pub const REGISTER_ACTION: &str = "kaede-register";
+
 const PASSWORD_KDF_VERSION: u64 = 2;
 const PASSWORD_KDF_ALGORITHM: &str = "PBKDF2-SHA256";
 const PASSWORD_KDF_ITERATIONS: u64 = 600_000;
@@ -122,6 +125,7 @@ struct RegisterRequest<'a> {
     email: Option<&'a str>,
     password: &'a str,
     password_kdf: &'a Value,
+    accepted_terms: bool,
     turnstile_token: Option<&'a str>,
 }
 
@@ -239,6 +243,7 @@ where
         email: Option<&str>,
         password: &str,
         password_kdf: &Value,
+        accepted_terms: bool,
         challenge_token: Option<&SecretString>,
     ) -> Result<RegistrationResult, AuthError> {
         validate_authentication_secret(password)?;
@@ -251,6 +256,7 @@ where
                     email,
                     password,
                     password_kdf,
+                    accepted_terms,
                     turnstile_token: challenge_token.map(ExposeSecret::expose_secret),
                 },
             )
@@ -641,13 +647,23 @@ where
             .ok_or(AuthError::NotAuthenticated)
     }
 
+    pub async fn clear_credentials(&self) -> Result<(), AuthError> {
+        let _guard = self.refresh_lock.lock().await;
+        self.clear_local_session().await
+    }
+
+    async fn clear_local_session(&self) -> Result<(), AuthError> {
+        self.api.set_access_token(None).await;
+        *self.session.write().await = None;
+        self.vault.delete(&self.account_key).await?;
+        Ok(())
+    }
+
     pub async fn logout(&self) -> Result<(), AuthError> {
         let _guard = self.refresh_lock.lock().await;
         let server_result: Result<serde_json::Value, ApiClientError> =
             self.api.post("auth/logout", &serde_json::json!({})).await;
-        self.api.set_access_token(None).await;
-        *self.session.write().await = None;
-        self.vault.delete(&self.account_key).await?;
+        self.clear_local_session().await?;
         if let Err(error) = server_result {
             tracing::warn!(
                 ?error,

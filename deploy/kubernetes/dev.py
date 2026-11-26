@@ -211,6 +211,11 @@ def create_cluster(federation: bool, env_file: Path | None = None) -> None:
                         "--volume",
                         f"{Path(values[key]).resolve()}:{values[key]}:ro@server:0",
                     ]
+        if values.get("KAEDE_VENDOR_DIR"):
+            path = values["KAEDE_VENDOR_DIR"]
+            mount = f"{path}:{path}:ro@server:0"
+            if mount not in args:
+                args += ["--volume", mount]
         if values.get("KAEDE_PHOTODNA_ENABLED") == "true" and values.get(
             "PHOTODNA_EDGEHASHGENERATOR"
         ):

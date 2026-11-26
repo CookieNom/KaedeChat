@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 from app.db.models import Attachment
+from app.federation.numbers import read_wire_number, write_wire_number
 
 INTERNAL_REJECTED_SCAN_STATUSES = frozenset({"infected", "quarantined", "rejected"})
 
@@ -52,7 +53,28 @@ def attachment_payload(
     return payload
 
 
-def federation_attachment_payload(attachment: Attachment) -> dict[str, object]:
+def federation_attachment_duration(raw: dict[str, object]) -> float | None:
+    """Read the precise recording length while accepting older rounded attachments."""
+    seconds = raw.get("duration_secs")
+    if "duration_secs_exact" in raw:
+        exact = read_wire_number(raw["duration_secs_exact"])
+        if type(seconds) is not int or seconds != math.ceil(exact):
+            raise ValueError("attachment duration projections disagree")
+        seconds = exact
+    if seconds is None:
+        return None
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, (float, int))
+        or not 0 < seconds <= 1200
+    ):
+        raise ValueError("attachment duration is invalid")
+    return float(seconds)
+
+
+def federation_attachment_payload(
+    attachment: Attachment, *, include_lifecycle: bool = True
+) -> dict[str, object]:
     """Add authority-only integrity metadata to an attachment projection.
 
     The digest is never returned by client message APIs.  A plaintext room
@@ -60,7 +82,12 @@ def federation_attachment_payload(attachment: Attachment) -> dict[str, object]:
     remote object or trusting a caller-supplied hash.
     """
 
-    payload = attachment_payload(attachment)
+    payload = attachment_payload(attachment, include_lifecycle=include_lifecycle)
+    if (
+        attachment.duration_secs is not None
+        and attachment.duration_secs != payload["duration_secs"]
+    ):
+        payload["duration_secs_exact"] = write_wire_number(attachment.duration_secs)
     if attachment.encryption_mode == "plaintext" and attachment.content_sha256 is not None:
         payload["content_sha256"] = attachment.content_sha256
     return payload

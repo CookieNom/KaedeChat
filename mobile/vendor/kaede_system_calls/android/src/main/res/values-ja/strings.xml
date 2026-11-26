@@ -1,0 +1,6 @@
+<resources>
+    <string name="incoming_calls_channel">着信</string>
+    <string name="incoming_call">Kaede の着信</string>
+    <string name="answer_call">応答</string>
+    <string name="decline_call">拒否</string>
+</resources>

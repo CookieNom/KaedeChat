@@ -13,7 +13,8 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.admin.auth import AdminPrincipal, require_admin
+from app.admin.audit import audit
+from app.admin.auth import AdminPrincipal, require_admin, require_manageable_account
 from app.admin.instance_statistics import instance_statistics_statement
 from app.admin.report_enforcement import (
     publish_message_purge,
@@ -309,30 +310,6 @@ class InstanceBlockCreate(UnambiguousInputModel):
     level: Literal["silence", "suspend"]
     include_subdomains: bool = False
     reason: str | None = Field(default=None, max_length=500)
-
-
-async def audit(
-    session: AsyncSession,
-    snowflake: SnowflakeGenerator,
-    principal: AdminPrincipal,
-    action: str,
-    target_type: str,
-    target_ref: str,
-    *,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    session.add(
-        InstanceAuditEvent(
-            id=await snowflake.mint(),
-            actor_id=principal.user.id,
-            actor_domain=principal.user.origin_domain,
-            actor_kind="admin",
-            action=action,
-            target_type=target_type,
-            target_ref=target_ref,
-            detail=metadata or {},
-        )
-    )
 
 
 def grant_payload(grant: InstanceAdminGrant, user: User) -> dict[str, object]:
@@ -714,20 +691,25 @@ async def add_operator(
     if "owner" not in principal.roles:
         raise HTTPException(status_code=403, detail={"code": "OWNER_REQUIRED"})
     user_id, user_domain = payload.user_ref.resolve(settings.domain)
-    user = await session.get(User, (user_id, user_domain))
+    user = await session.get(User, (user_id, user_domain), with_for_update=True)
     if user is None or not user.is_local or user.account_type != "human":
         raise HTTPException(status_code=404, detail={"code": "LOCAL_USER_NOT_FOUND"})
     existing = await session.scalar(
-        select(InstanceAdminGrant).where(
+        select(InstanceAdminGrant)
+        .where(
             InstanceAdminGrant.user_id == user.id,
             InstanceAdminGrant.user_domain == user.origin_domain,
             InstanceAdminGrant.role == payload.role,
-            InstanceAdminGrant.revoked_at.is_(None),
         )
+        .with_for_update()
     )
-    if existing is not None:
+    if (
+        existing is not None
+        and existing.revoked_at is None
+        and (existing.expires_at is None or existing.expires_at > datetime.now(UTC))
+    ):
         return grant_payload(existing, user)
-    grant = InstanceAdminGrant(
+    grant = existing or InstanceAdminGrant(
         id=await snowflake.mint(),
         user_id=user.id,
         user_domain=user.origin_domain,
@@ -736,7 +718,14 @@ async def add_operator(
         granted_by_id=principal.user.id,
         granted_by_domain=principal.user.origin_domain,
     )
-    session.add(grant)
+    if existing is None:
+        session.add(grant)
+    else:
+        grant.revoked_at = None
+        grant.expires_at = None
+        grant.granted_by_id = principal.user.id
+        grant.granted_by_domain = principal.user.origin_domain
+        grant.generation += 1
     await audit(
         session,
         snowflake,
@@ -802,6 +791,21 @@ async def list_users(
     ]
 
 
+async def revoke_account_sessions(session: AsyncSession, user: User, now: datetime) -> list[str]:
+    return list(
+        await session.scalars(
+            update(Session)
+            .where(
+                Session.user_id == user.id,
+                Session.user_domain == user.origin_domain,
+                Session.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
+            .returning(Session.id)
+        )
+    )
+
+
 @router.patch("/administration/users/{user_ref}")
 async def patch_user_state(
     user_ref: EntityRef,
@@ -810,6 +814,7 @@ async def patch_user_state(
     session: Annotated[AsyncSession, Depends(get_session)],
     snowflake: Annotated[SnowflakeGenerator, Depends(get_snowflake)],
     settings: Annotated[Settings, Depends(get_settings)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ) -> dict[str, object]:
     principal.require("users.manage")
     user_id, user_domain = user_ref.resolve(settings.domain)
@@ -823,12 +828,16 @@ async def patch_user_state(
         raise HTTPException(status_code=404, detail={"code": "LOCAL_USER_NOT_FOUND"})
     if user.id == principal.user.id and payload.disabled is True:
         raise HTTPException(status_code=409, detail={"code": "CANNOT_DISABLE_SELF"})
+    await require_manageable_account(session, principal, user)
     if payload.age_assurance_state is not None and user.account_type != "human":
         raise HTTPException(status_code=400, detail={"code": "HUMAN_USER_REQUIRED"})
     target_ref = f"{user.id}@{user.origin_domain}"
+    revoked_sessions: list[str] = []
     if payload.disabled is not None:
         user.disabled_at = datetime.now(UTC) if payload.disabled else None
         user.suspended_until = None
+        if user.disabled_at is not None:
+            revoked_sessions = await revoke_account_sessions(session, user, user.disabled_at)
         await audit(
             session,
             snowflake,
@@ -855,6 +864,10 @@ async def patch_user_state(
             },
         )
     await session.commit()
+    if revoked_sessions:
+        token_store = AccessTokenStore(redis, settings.access_token_ttl_seconds)
+        for session_id in revoked_sessions:
+            await token_store.revoke_session(session_id)
     return user_payload(user) | {
         "disabled_at": user.disabled_at.isoformat() if user.disabled_at else None,
         "suspended_until": (user.suspended_until.isoformat() if user.suspended_until else None),
@@ -2087,23 +2100,13 @@ async def enforce_report(
         principal.require("users.manage")
         if target.id == principal.user.id and target.origin_domain == principal.user.origin_domain:
             raise HTTPException(status_code=409, detail={"code": "CANNOT_SUSPEND_SELF"})
+        await require_manageable_account(session, principal, target)
         duration = ACCOUNT_ACTION_SECONDS[payload.account_action]
         if target.is_local:
             if duration is None:
                 target.disabled_at = now
                 target.suspended_until = None
-                revoked_session_ids = list(
-                    await session.scalars(
-                        update(Session)
-                        .where(
-                            Session.user_id == target.id,
-                            Session.user_domain == target.origin_domain,
-                            Session.revoked_at.is_(None),
-                        )
-                        .values(revoked_at=now)
-                        .returning(Session.id)
-                    )
-                )
+                revoked_session_ids = await revoke_account_sessions(session, target, now)
             elif target.disabled_at is None:
                 requested_until = now + timedelta(seconds=duration)
                 target.suspended_until = max(

@@ -63,7 +63,6 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
     );
     controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(context.kaede.canvas)
       ..addJavaScriptChannel(
         'KaedeChallenge',
         onMessageReceived: _receive,
@@ -108,6 +107,12 @@ final class _TurnstileChallengeState extends State<TurnstileChallenge> {
         ),
       )
       ..loadRequest(challengeUri);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    controller.setBackgroundColor(context.kaede.canvas);
   }
 
   void _receive(JavaScriptMessage message) {

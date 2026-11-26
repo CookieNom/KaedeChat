@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +43,6 @@ BOT_PERMISSION_GUILD_ID = 8_900_000_000_000_205
 BOT_PERMISSION_TEMPLATE_ID = 8_900_000_000_000_206
 BOT_PERMISSION_INSTALLATION_ID = 8_900_000_000_000_207
 BOT_PERMISSION_PARENT_REVISION = "fb7c3e9a1d42"
-CURRENT_HEAD_REVISION = "4ea6c2d8f953"
 USE_EXTERNAL_EMOJIS = 1 << 18
 USE_EXTERNAL_STICKERS = 1 << 58
 BOT_PERMISSION_LEGACY_VALUE = SEND_MESSAGES | USE_EXTERNAL_EMOJIS
@@ -420,6 +421,12 @@ async def prepare_bot_permission_fixture(session: AsyncSession) -> None:
     )
 
 
+def current_head_revision() -> str:
+    migrations = Path(__file__).resolve().parents[1] / "migrations"
+    (head,) = ScriptDirectory(str(migrations)).get_heads()
+    return head
+
+
 async def verify_alembic_revision(session: AsyncSession, expected: str) -> None:
     revisions = {
         str(value)
@@ -480,7 +487,7 @@ async def prepare_bot_permission_downgrade(session: AsyncSession) -> None:
     continue exercising the legacy permission split downgrade.
     """
 
-    await verify_alembic_revision(session, CURRENT_HEAD_REVISION)
+    await verify_alembic_revision(session, current_head_revision())
     source_ref = (
         await session.execute(
             text(
@@ -569,7 +576,7 @@ async def prepare_foundation_feature_fixture(session: AsyncSession) -> None:
 
 
 async def verify_foundation_feature_fixture(session: AsyncSession) -> None:
-    await verify_alembic_revision(session, CURRENT_HEAD_REVISION)
+    await verify_alembic_revision(session, current_head_revision())
     stage_limit = await session.scalar(
         text(
             "SELECT user_limit FROM channels "
@@ -710,7 +717,7 @@ async def run(action: str) -> None:
             elif action == "verify-bot-permissions-upgrade":
                 await verify_bot_permission_fixture(
                     session,
-                    expected_revision=CURRENT_HEAD_REVISION,
+                    expected_revision=current_head_revision(),
                     stickers=True,
                 )
             elif action == "prepare-bot-permissions-downgrade":

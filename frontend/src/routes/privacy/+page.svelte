@@ -118,6 +118,22 @@
       <p>{$t('ui_the_web_app_uses_http_only_authentication_coo_dc754f17')}</p>
     </section>
 
+    <section id="shopping-links">
+      <h2>Optional shopping affiliate links</h2>
+      <p>
+        If you enable affiliate links, your device can add the instance’s shared code when you open
+        a participating retailer’s link. Depending on the program, it may replace an existing
+        affiliate code. Your original message stays unchanged. Purchases may earn the instance a
+        commission at no extra cost to you.
+      </p>
+      <p>
+        Kaede saves your choice with your account. This feature sends no click report to Kaede and
+        adds no user, device, or message identifier. The retailer receives the link and may use its
+        own cookies or other attribution methods under its privacy policy. You can change your
+        choice in Settings.
+      </p>
+    </section>
+
     <section>
       <h2>{$t('ui_12_children_144dca55')}</h2>
       <p>

@@ -644,13 +644,13 @@ final class GatewayClient {
       _sessionReadyWatchdog = null;
       _setHealth(const GatewayHealth(GatewayConnectionPhase.connected));
     }
-    if (name == 'READY' || name == 'RESUMED') {
+    if ((name == 'READY' || name == 'RESUMED') &&
+        data['presence_initialized'] != true) {
       final preference = data['presence_preference'];
-      updatePresence(
-        const {'online', 'idle', 'dnd', 'invisible'}.contains(preference)
-            ? preference! as String
-            : 'online',
-      );
+      if (preference is String &&
+          const {'online', 'idle', 'dnd', 'invisible'}.contains(preference)) {
+        updatePresence(preference);
+      }
     }
     _events.add(GatewayEvent(name, data, sequence));
   }

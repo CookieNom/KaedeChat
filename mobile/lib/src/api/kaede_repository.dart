@@ -1967,6 +1967,7 @@ final class KaedeRepository {
       api.sendJson(
         'POST',
         '/api/v1/channels/${channel.wire}/voice/token',
+        headers: const {'X-Kaede-Media-Key-Bits': '256'},
         data: <String, Object?>{
           'sender_device_id': senderDeviceId,
           'connection_id': connectionId,
@@ -2058,6 +2059,7 @@ final class KaedeRepository {
       api.sendJson(
         'POST',
         '/api/v1/calls/${call.wire}/voice/token',
+        headers: const {'X-Kaede-Media-Key-Bits': '256'},
         data: <String, Object?>{
           'sender_device_id': senderDeviceId,
           'connection_id': connectionId,
@@ -2394,7 +2396,11 @@ final class KaedeRepository {
   }
 
   Future<List<int>> attachmentBytes(KaedeAttachment attachment) =>
-      api.getBytes(attachmentStatusPath(attachment.ref));
+      api.getBytes(attachmentMediaPath(
+        attachment.ref,
+        historyMediaUrl: attachment.historyMediaUrl,
+        privateMediaUrl: attachment.privateMediaUrl,
+      ));
 
   Future<KaedeAttachment> attachmentStatus(KaedeAttachment attachment) async =>
       KaedeAttachment.fromJson(

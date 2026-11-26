@@ -37,14 +37,30 @@ export function base64url(value: ByteSource): string {
   }
 }
 
-export function fromBase64url(value: string, maximum = 4 * 1024 * 1024): Bytes {
-  if (!/^[A-Za-z0-9_-]*$/u.test(value) || value.length % 4 === 1) {
+export function base64urlByteLength(value: string, maximum: number): number {
+  if (typeof value !== 'string') throw new TypeError('Invalid base64url value');
+  const remainder = value.length % 4;
+  const length = Math.floor((value.length * 3) / 4);
+  if (length > maximum) throw new TypeError('Decoded value is too large');
+  if (remainder === 1 || /[^A-Za-z0-9_-]/u.test(value)) {
     throw new TypeError('Invalid base64url value');
   }
-  const raw = atob(value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat(-value.length & 3));
-  if (raw.length > maximum) throw new TypeError('Decoded value is too large');
-  const result = Uint8Array.from(raw, (character) => character.charCodeAt(0));
-  if (base64url(result) !== value) throw new TypeError('Non-canonical base64url value');
+  // Unused bits in the final sextet must be zero for canonical unpadded encoding.
+  const last = value.charAt(value.length - 1);
+  if (
+    (remainder === 2 && !'AQgw'.includes(last)) ||
+    (remainder === 3 && !'AEIMQUYcgkosw048'.includes(last))
+  ) {
+    throw new TypeError('Non-canonical base64url value');
+  }
+  return length;
+}
+
+export function fromBase64url(value: string, maximum = 4 * 1024 * 1024): Bytes {
+  const length = base64urlByteLength(value, maximum);
+  const raw = atob(value.replaceAll('-', '+').replaceAll('_', '/'));
+  const result = new Uint8Array(length);
+  for (let i = 0; i < length; i++) result[i] = raw.charCodeAt(i);
   return result;
 }
 

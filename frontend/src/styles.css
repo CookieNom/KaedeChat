@@ -8944,7 +8944,7 @@ body.media-viewer-open {
 }
 
 .dm-conversation-layout.has-active-call {
-  grid-template-rows: minmax(180px, 46%) minmax(0, 1fr);
+  grid-template-rows: var(--call-height, 46%) 24px minmax(0, 1fr);
 }
 
 .dm-call-region {
@@ -8992,9 +8992,31 @@ body.media-viewer-open {
   color: var(--danger);
 }
 
-.dm-call-stage {
-  overflow: hidden;
-  border-bottom: 2px solid var(--line);
+.dm-call-divider {
+  display: grid;
+  place-items: center;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  border-block: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.dm-call-divider::after {
+  content: '';
+  width: 3rem;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+.dm-call-divider:is(:hover, :focus-visible, :active)::after {
+  background: var(--maple);
+}
+
+.dm-call-divider:focus-visible {
+  outline: 2px solid var(--maple);
+  outline-offset: -2px;
 }
 
 .end-call:disabled {

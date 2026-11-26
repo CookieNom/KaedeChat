@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -137,11 +138,54 @@ def test_webhook_credential_and_device_projection_are_exactly_bound() -> None:
 
 
 @pytest.mark.asyncio
+async def test_token_only_webhook_uses_no_worker_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = client()
+    webhook = EntityRef(7, "guild.example")
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(
+            transport=httpx.MockTransport(respond),
+            **kwargs,
+        ),
+    )
+    with pytest.raises(ValueError, match="webhook token"):
+        await bot.delete_webhook_with_token(webhook, "bad/token")
+    await bot.delete_webhook_with_token(webhook, "secret")
+    assert [str(request.url) for request in requests] == [
+        "https://guild.example/api/v1/webhooks/7/secret"
+    ]
+    assert "authorization" not in requests[0].headers
+    assert not any(key.startswith("x-kaede") for key in requests[0].headers)
+
+
+@pytest.mark.asyncio
 async def test_registration_and_key_packages_prove_one_token_scoped_device() -> None:
     bot = client()
     provider = WebhookProvider()
     webhook_ref = EntityRef(7, "guild.example")
-    challenge_input = b"webhook registration challenge"
+    challenge_input = "\n".join(
+        [
+            "kaede-webhook-e2ee-device-registration-v1",
+            str(webhook_ref),
+            b64(provider.identity_key),
+            b64(
+                hashlib.sha256(
+                    webhook_mls_credential(webhook_ref, provider.identity_key)
+                ).digest()
+            ),
+            b64(b"c" * 32),
+        ]
+    ).encode()
     expiry = datetime.now(UTC) + timedelta(days=2)
     bot.request = AsyncMock(  # type: ignore[method-assign]
         side_effect=[
@@ -521,21 +565,21 @@ async def test_webhook_encrypted_forum_lifecycle_is_authority_and_device_bound()
 def test_message_sender_accepts_only_the_bound_webhook_device() -> None:
     from kaede_bot.e2ee import _validate_message_sender_credential
 
-    webhook = EntityRef(30, 'chat.example')
-    key = b'w' * 32
+    webhook = EntityRef(30, "chat.example")
+    key = b"w" * 32
     credential = webhook_mls_credential(webhook, key)
     arguments = dict(
         sender_device_id=webhook_device_protocol_id(webhook, key),
-        author_ref=EntityRef(7, 'chat.example'),
+        author_ref=EntityRef(7, "chat.example"),
         application_ref=None,
         webhook_ref=webhook,
     )
     _validate_message_sender_credential(credential, **arguments)
     for change in (
-        {'webhook_ref': None},
-        {'webhook_ref': EntityRef(31, 'chat.example')},
-        {'sender_device_id': webhook_device_protocol_id(webhook, b'x' * 32)},
-        {'application_ref': EntityRef(9, 'chat.example')},
+        {"webhook_ref": None},
+        {"webhook_ref": EntityRef(31, "chat.example")},
+        {"sender_device_id": webhook_device_protocol_id(webhook, b"x" * 32)},
+        {"application_ref": EntityRef(9, "chat.example")},
     ):
         with pytest.raises(E2EEProtocolError):
             _validate_message_sender_credential(credential, **(arguments | change))

@@ -140,16 +140,20 @@ async def materialize_next_recurrence(
 
     if event.status not in {COMPLETED, CANCELED} or event.recurrence_rule is None:
         return None
-    next_start = next_recurrence_start(
-        event.recurrence_rule,
-        current_start=event.scheduled_start_time,
-        after=after,
-    )
-    duration = (
-        event.scheduled_end_time - event.scheduled_start_time
-        if event.scheduled_end_time is not None
-        else None
-    )
+    try:
+        next_start = next_recurrence_start(
+            event.recurrence_rule,
+            current_start=event.scheduled_start_time,
+            after=after,
+        )
+        next_end = (
+            next_start + (event.scheduled_end_time - event.scheduled_start_time)
+            if event.scheduled_end_time is not None
+            else None
+        )
+    except (ValueError, OverflowError):
+        # Older rules can describe an impossible date or exhaust the calendar.
+        return None
     subscriptions = list(
         await session.scalars(
             select(GuildScheduledEventSubscription)
@@ -173,7 +177,7 @@ async def materialize_next_recurrence(
         name=event.name,
         description=event.description,
         scheduled_start_time=next_start,
-        scheduled_end_time=next_start + duration if duration is not None else None,
+        scheduled_end_time=next_end,
         privacy_level=event.privacy_level,
         status=SCHEDULED,
         entity_type=event.entity_type,

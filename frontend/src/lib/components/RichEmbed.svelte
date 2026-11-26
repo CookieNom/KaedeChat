@@ -61,16 +61,22 @@
           {/if}
         {/if}
         {#if embed.author.url}
-          <a href={embed.author.url} target="_blank" rel="noopener noreferrer nofollow"
-            >{embed.author.name}</a
+          <a
+            data-shopping-link
+            href={embed.author.url}
+            target="_blank"
+            rel="noopener noreferrer nofollow">{embed.author.name}</a
           >
         {:else}<strong>{embed.author.name}</strong>{/if}
       </div>
     {/if}
     {#if embed.title}
       <h3>
-        {#if embed.url}<a href={embed.url} target="_blank" rel="noopener noreferrer nofollow"
-            >{embed.title}</a
+        {#if embed.url}<a
+            data-shopping-link
+            href={embed.url}
+            target="_blank"
+            rel="noopener noreferrer nofollow">{embed.title}</a
           >{:else}{embed.title}{/if}
       </h3>
     {/if}

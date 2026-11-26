@@ -51,6 +51,14 @@ class FederatedIdMixin:
     origin_domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH))
 
 
+class VendorConfiguration(Base):
+    __tablename__ = "vendor_configurations"
+    domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
+    package: Mapped[str] = mapped_column(String(48), primary_key=True)
+    records: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    version: Mapped[int] = mapped_column(Integer)
+
+
 class RTCConfiguration(Base):
     __tablename__ = "rtc_configurations"
     domain: Mapped[str] = mapped_column(String(DOMAIN_LENGTH), primary_key=True)
@@ -397,6 +405,7 @@ class LocalUserMixin:
 
 class UserSettings(Base, LocalUserMixin, TimestampMixin):
     __tablename__ = "user_settings"
+    shopping_links: Mapped[bool | None] = mapped_column(Boolean)
     locale: Mapped[str] = mapped_column(String(16), server_default="en-US")
     theme: Mapped[str] = mapped_column(String(16), server_default="system")
     dm_privacy: Mapped[str] = mapped_column(String(16), server_default="shared_guild")
@@ -423,6 +432,7 @@ class UserSettings(Base, LocalUserMixin, TimestampMixin):
 
 class PushDevice(Base, LocalUserMixin, TimestampMixin):
     __tablename__ = "push_devices"
+    session_id: Mapped[str | None] = mapped_column(String(64))
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     platform: Mapped[str] = mapped_column(String(16), nullable=False)
     transport: Mapped[str] = mapped_column(

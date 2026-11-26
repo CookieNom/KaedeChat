@@ -157,10 +157,9 @@ class InviteCard extends ConsumerWidget {
                   children: [
                     Text(L10n.of(context).ui_guild_invitation_2a233707),
                     const SizedBox(height: 8),
-                    Text(guild[L10n.of(context).ui_name_8d39bde6] as String,
+                    Text(guild['name'] as String,
                         style: Theme.of(context).textTheme.titleMedium),
-                    Text(guild[L10n.of(context).ui_origin_domain_c6fbb9dc]
-                        as String),
+                    Text(guild['origin_domain'] as String),
                     if (guild['description'] case final String description
                         when description.isNotEmpty)
                       Text(description,

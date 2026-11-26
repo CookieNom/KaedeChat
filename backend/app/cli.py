@@ -294,11 +294,13 @@ async def admin_grant_operation(identifier: str, role: str, *, revoke: bool) -> 
             else:
                 username = normalized
             user = await session.scalar(
-                select(User).where(
+                select(User)
+                .where(
                     User.is_local.is_(True),
                     User.account_type == "human",
                     func.lower(User.username) == username.lower(),
                 )
+                .with_for_update()
             )
             if user is None:
                 raise typer.BadParameter("local user was not found")
@@ -308,12 +310,11 @@ async def admin_grant_operation(identifier: str, role: str, *, revoke: bool) -> 
                     InstanceAdminGrant.user_id == user.id,
                     InstanceAdminGrant.user_domain == user.origin_domain,
                     InstanceAdminGrant.role == role,
-                    InstanceAdminGrant.revoked_at.is_(None),
                 )
                 .with_for_update()
             )
             if revoke:
-                if grant is None:
+                if grant is None or grant.revoked_at is not None:
                     raise typer.BadParameter("the user does not have that active role")
                 grant.revoked_at = datetime.now(UTC)
                 grant.generation += 1
@@ -328,6 +329,14 @@ async def admin_grant_operation(identifier: str, role: str, *, revoke: bool) -> 
                         role=role,
                     )
                     session.add(grant)
+                elif grant.revoked_at is not None or (
+                    grant.expires_at is not None and grant.expires_at <= datetime.now(UTC)
+                ):
+                    grant.revoked_at = None
+                    grant.expires_at = None
+                    grant.granted_by_id = None
+                    grant.granted_by_domain = None
+                    grant.generation += 1
                 action = "granted"
             await session.commit()
             return f"{role} {action} for {user.username}@{user.origin_domain}"

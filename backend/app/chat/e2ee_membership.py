@@ -11,7 +11,15 @@ from app.chat.payloads import channel_payload
 from app.core.settings import Settings
 from app.db.bot_models import BotApplication, BotE2EEDevice, BotE2EEParticipation
 from app.db.materialization import materialize_updated_at
-from app.db.models import Channel, DMConversation, DMParticipant, Guild, GuildMember, User
+from app.db.models import (
+    Channel,
+    DMConversation,
+    DMParticipant,
+    E2EERoomOperation,
+    Guild,
+    GuildMember,
+    User,
+)
 from app.federation.events import (
     build_envelope,
     discard_superseded_latest_state_event,
@@ -33,24 +41,52 @@ GUILD_E2EE_ACCESS_MUTATION_EVENTS = frozenset(
 )
 
 
+# The guild authority can attest these mutations changed no access. Envelopes
+# without that explicit decision retain the conservative rekey behavior.
+GUILD_E2EE_OPTIONAL_REKEY_EVENTS = {
+    "guild.role.update",
+    "guild.role.delete",
+    "guild.member.role.add",
+    "guild.member.role.remove",
+    "guild.overwrite.upsert",
+    "guild.overwrite.delete",
+}
+
+
 async def pause_guild_e2ee_for_membership_change(
     session: AsyncSession,
     guild: Guild,
+    permission_source: Channel | None = None,
 ) -> list[Channel]:
     """Fail closed until an MLS-capable manager rotates affected room keys."""
 
-    channels = list(
-        await session.scalars(
-            select(Channel)
-            .where(
-                Channel.guild_id == guild.id,
-                Channel.guild_domain == guild.origin_domain,
-                Channel.encryption_mode == "e2ee",
-                Channel.encryption_state == "active",
-            )
-            .with_for_update()
-        )
+    query = select(Channel).where(
+        Channel.guild_id == guild.id,
+        Channel.guild_domain == guild.origin_domain,
+        Channel.encryption_mode == "e2ee",
+        Channel.encryption_state == "active",
     )
+    if permission_source is not None:
+        # Threads inherit from their parent, including its category sync setting.
+        affected = Channel.id == permission_source.id
+        thread_parent_ids = [permission_source.id]
+        if permission_source.type == 4:
+            child_ids = list(
+                await session.scalars(
+                    select(Channel.id).where(
+                        Channel.guild_id == guild.id,
+                        Channel.guild_domain == guild.origin_domain,
+                        Channel.parent_id == permission_source.id,
+                        Channel.permissions_synced.is_(True),
+                    )
+                )
+            )
+            affected |= Channel.id.in_(child_ids)
+            thread_parent_ids.extend(child_ids)
+        query = query.where(
+            affected | (Channel.type.in_((10, 11, 12)) & Channel.parent_id.in_(thread_parent_ids))
+        )
+    channels = list(await session.scalars(query.with_for_update()))
     for channel in channels:
         channel.encryption_state = "rekeying"
     return channels
@@ -244,6 +280,29 @@ async def pause_local_e2ee_for_device_change(
             BotE2EEParticipation.status.in_(("pending", "active")),
         )
     )
+    # A committed MLS roster identifies who could hold this group's key. Keep
+    # the guild-wide fallback for older rooms without a matching operation.
+    room_policy = tuple_(
+        Channel.id,
+        Channel.origin_domain,
+        Channel.encryption_policy_generation,
+        Channel.encryption_group_id,
+    )
+    recorded_policies = select(
+        E2EERoomOperation.channel_id,
+        E2EERoomOperation.channel_domain,
+        E2EERoomOperation.policy_generation,
+        E2EERoomOperation.group_id,
+    ).where(
+        E2EERoomOperation.authority_domain == settings.domain,
+        E2EERoomOperation.status == "committed",
+        E2EERoomOperation.participant_refs != [],
+    )
+    participant_policies = recorded_policies.where(
+        E2EERoomOperation.participant_refs.contains(
+            [{"id": str(user.id), "domain": user.origin_domain}]
+        )
+    )
     channels = list(
         await session.scalars(
             select(Channel)
@@ -252,7 +311,13 @@ async def pause_local_e2ee_for_device_change(
                 Channel.encryption_state == "active",
                 Channel.dm_successor_id.is_(None),
                 (
-                    tuple_(Channel.guild_id, Channel.guild_domain).in_(guild_refs)
+                    (
+                        tuple_(Channel.guild_id, Channel.guild_domain).in_(guild_refs)
+                        & (
+                            room_policy.not_in(recorded_policies)
+                            | room_policy.in_(participant_policies)
+                        )
+                    )
                     | tuple_(Channel.id, Channel.origin_domain).in_(dm_refs)
                     | tuple_(Channel.id, Channel.origin_domain).in_(bot_participation_refs)
                 ),

@@ -182,7 +182,7 @@ def role_environment(values: dict, role: str) -> dict:
         if role == "preflight"
         else {k: v for k, v in values.items() if k in ROLE_KEYS[role]}
     )
-    if role != "scheduler":
+    if role not in {"scheduler", "storage-init"}:
         result["KAEDE_SERVICE_ROLE"] = {"migrate": "migration"}.get(role, role)
     if role == "gateway":
         result["KAEDE_SECRET_KEY"] = values["KAEDE_GATEWAY_SECRET_KEY"]
@@ -195,6 +195,38 @@ def role_environment(values: dict, role: str) -> dict:
             bool(values.get("KAEDE_PUSH_RELAY_APNS_KEY_B64"))
         ).lower()
     return result
+
+
+def data_access_policy(
+    namespace: str,
+    target: str,
+    port: int,
+    roles: list[str],
+    *,
+    source_namespace: str | None = None,
+    name: str | None = None,
+) -> dict:
+    source = {
+        "podSelector": {
+            "matchExpressions": [{"key": "app", "operator": "In", "values": roles}]
+        }
+    }
+    if source_namespace is not None:
+        source["namespaceSelector"] = {
+            "matchLabels": {"kubernetes.io/metadata.name": source_namespace}
+        }
+    return resource(
+        "NetworkPolicy",
+        name or f"{target}-ingress-{port}",
+        namespace,
+        spec={
+            "podSelector": {"matchLabels": {"app": target}},
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {"from": [source], "ports": [{"protocol": "TCP", "port": port}]}
+            ],
+        },
+    )
 
 
 def render(
@@ -280,7 +312,7 @@ def render(
             "garage",
             IMAGES["garage"],
             stateful=True,
-            ports=[3900, 3901, 3903],
+            ports=[3900, 3901],
             command=["/garage", "server", "--single-node", "--default-bucket"],
             env={
                 "GARAGE_RPC_SECRET": values["GARAGE_RPC_SECRET"],
@@ -327,10 +359,23 @@ def render(
             volumes={"data": persistent("meilisearch-data", "/meili_data")},
         )
 
-    app_objects = {}
-    for role in ("api", "gateway", "worker", "scheduler", "migrate", "preflight"):
+    for role in (
+        "api",
+        "gateway",
+        "worker",
+        "scheduler",
+        "migrate",
+        "preflight",
+        "storage-init",
+    ):
         env = role_environment(values, role)
         volumes = {}
+        if role == "api" and values.get("KAEDE_VENDOR_DIR"):
+            env["KAEDE_VENDOR_DIR"] = "/opt/kaede/extensions"
+            volumes["extensions"] = {
+                "path": "/opt/kaede/extensions", "readOnly": True,
+                "hostPath": {"path": values["KAEDE_VENDOR_DIR"], "type": "Directory"},
+            }
         if (
             values.get("KAEDE_PHOTODNA_ENABLED") == "true"
             and role in {"api", "worker", "preflight"}
@@ -374,6 +419,7 @@ def render(
                 "scheduler": ["taskiq", "scheduler", "app.scheduler:scheduler"],
                 "migrate": ["sh", "-ec", "alembic upgrade head && kaede bootstrap"],
                 "preflight": ["kaede", "preflight", *(["--voice"] if voice else [])],
+                "storage-init": ["python", "-m", "app.media.init_buckets"],
             }[role]
             if role == "scheduler" and development and reload:
                 command = [
@@ -406,7 +452,6 @@ def render(
         if role in {"api", "gateway", "worker", "scheduler"}:
             # A briefly started process must not evict healthy old replicas.
             obj["spec"]["minReadySeconds"] = 10
-        app_objects[role] = obj
         container = obj["spec"]["template"]["spec"]["containers"][0]
         if ports:
             container["readinessProbe"] = {
@@ -429,7 +474,7 @@ def render(
                     }
                 }
             }
-        if role in {"migrate", "preflight"}:
+        if role in {"migrate", "preflight", "storage-init"}:
             obj["kind"], obj["apiVersion"] = "Job", "batch/v1"
             obj["spec"] = {
                 "backoffLimit": 0,
@@ -437,16 +482,6 @@ def render(
                 "template": obj["spec"]["template"],
             }
             obj["spec"]["template"]["spec"]["restartPolicy"] = "Never"
-
-    storage_job = json.loads(json.dumps(app_objects["preflight"]))
-    storage_job["metadata"]["name"] = "storage-init"
-    storage_job["spec"]["template"]["metadata"]["labels"]["app"] = "storage-init"
-    storage_job["spec"]["template"]["spec"]["containers"][0]["command"] = [
-        "python",
-        "-m",
-        "app.media.init_buckets",
-    ]
-    items.append(storage_job)
 
     add(
         "frontend",
@@ -700,10 +735,26 @@ def render(
                     ]
                 },
                 "policyTypes": ["Ingress"],
-                "ingress": [{"from": [{"podSelector": {}}]}],
+                "ingress": [],
             },
         )
     )
+    consumers = {
+        "postgres": (5432, ["api", "gateway", "worker", "migrate"]),
+        "dragonfly": (6379, ["api", "gateway", "worker", "scheduler"]),
+        "garage": (3900, ["api", "worker", "caddy", "storage-init"]),
+        "clamav": (3310, ["api", "worker"]),
+        "meilisearch": (7700, ["api", "worker"]),
+    }
+    deployed = {
+        obj["metadata"]["name"] for obj in items if obj["kind"] == "StatefulSet"
+    }
+    for target, (port, roles) in consumers.items():
+        if target not in deployed:
+            continue
+        items.append(data_access_policy(namespace, target, port, roles))
+    if "garage" in deployed:
+        items.append(data_access_policy(namespace, "garage", 3901, ["garage"]))
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
 

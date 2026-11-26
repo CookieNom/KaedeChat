@@ -14,6 +14,7 @@ PUSH_SYNC_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
 @dataclass(frozen=True, slots=True)
 class PushSyncEvent:
+    session_id: str
     device_id: str
     user_id: int
     user_domain: str
@@ -39,6 +40,7 @@ def _decode_event(value: str | bytes) -> PushSyncEvent:
     if not isinstance(document, dict):
         raise ValueError("invalid push sync event")
     return PushSyncEvent(
+        session_id=str(document["session_id"]),
         device_id=str(document["device_id"]),
         user_id=int(document["user_id"]),
         user_domain=str(document["user_domain"]),

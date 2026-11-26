@@ -475,6 +475,23 @@ describe('GatewayClient lifecycle', () => {
     client.close();
   });
 
+  it('accepts initialized presence without echoing a legacy write', async () => {
+    const { GatewayClient } = await import('./client');
+    const client = new GatewayClient();
+    client.rememberPresence('online');
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.message({ op: GatewayOp.HELLO, d: { heartbeat_interval: 41_250 } });
+    socket.message({
+      op: GatewayOp.DISPATCH,
+      t: 'RESUMED',
+      s: 2,
+      d: { presence_preference: 'dnd', presence_initialized: true }
+    });
+    expect(socket.sent.map((raw) => JSON.parse(raw).op)).not.toContain(GatewayOp.PRESENCE_UPDATE);
+    client.close();
+  });
+
   it('uses the authoritative account preference after resume', async () => {
     storage.setItem('kaede.gateway.session', 'resumed-session');
     storage.setItem('kaede.gateway.sequence', '12');
@@ -564,6 +581,51 @@ describe('GatewayClient lifecycle', () => {
     });
 
     expect(reset).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it('requests a fresh native snapshot once each time the workspace attaches', async () => {
+    const { GatewayClient } = await import('./client');
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockImplementation(() => new Promise(() => {}));
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    const client = new GatewayClient();
+    client.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    client.close();
+    client.connect();
+    expect(invoke.mock.calls).toEqual([
+      ['native_gateway_next', { attach: true }],
+      ['native_gateway_next', { attach: false }],
+      ['native_gateway_next', { attach: true }]
+    ]);
+    client.close();
+  });
+
+  it('reattaches after an interrupted native poll so message checks can resume', async () => {
+    const { GatewayClient } = await import('./client');
+    const ready = (session_id: string) => ({
+      op: GatewayOp.DISPATCH,
+      t: 'READY',
+      s: 0,
+      d: { session_id }
+    });
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(ready('first'))
+      .mockRejectedValueOnce(new Error('Interrupted'))
+      .mockResolvedValueOnce(ready('replacement'))
+      .mockImplementation(() => new Promise(() => {}));
+    vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+    const client = new GatewayClient();
+    const dispatch = vi.fn();
+    client.addEventListener('dispatch', dispatch);
+    client.connect();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenNthCalledWith(3, 'native_gateway_next', { attach: true });
+    expect(dispatch).toHaveBeenCalledTimes(2);
     client.close();
   });
 

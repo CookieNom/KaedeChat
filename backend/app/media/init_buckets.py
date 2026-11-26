@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import time
 
-from app.core.settings import get_settings
+from app.core.settings import StorageSettings
 from app.media.storage import S3Storage, StorageError
 
 
 async def initialize() -> None:
-    settings = get_settings()
+    settings = StorageSettings()
+    settings.validate_storage_transport()
+    # Initialization only makes server-side requests to the storage endpoint.
+    settings.media_public_base_url = settings.media_s3_endpoint
     storage = S3Storage(settings)
     buckets = (
         settings.media_attachments_bucket,

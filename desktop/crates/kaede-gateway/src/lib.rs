@@ -21,12 +21,17 @@ pub struct ResumeState {
     pub sequence: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum GatewayStatus {
     Disconnected,
     Connecting,
     Connected,
     Reconnecting,
+    RateLimited {
+        retry_after_ms: u64,
+        session_limit: bool,
+    },
     AuthenticationFailed,
 }
 
@@ -62,9 +67,33 @@ pub enum GatewayCommand {
     Shutdown,
 }
 
+#[derive(Clone)]
+pub struct GatewayCommands {
+    commands: mpsc::Sender<GatewayCommand>,
+    shutdown: watch::Sender<()>,
+}
+
+impl GatewayCommands {
+    /// # Errors
+    /// Returns the command if the gateway has already stopped.
+    pub async fn send(
+        &self,
+        command: GatewayCommand,
+    ) -> Result<(), mpsc::error::SendError<GatewayCommand>> {
+        if matches!(command, GatewayCommand::Shutdown) {
+            self.shutdown
+                .send(())
+                .map_err(|_| mpsc::error::SendError(command))?;
+            self.shutdown.closed().await;
+            return Ok(());
+        }
+        self.commands.send(command).await
+    }
+}
+
 pub struct GatewayHandle {
     pub events: mpsc::Receiver<GatewayEnvelope>,
-    pub commands: mpsc::Sender<GatewayCommand>,
+    pub commands: GatewayCommands,
     pub status: watch::Receiver<GatewayStatus>,
     pub resume: Arc<Mutex<ResumeState>>,
 }
@@ -83,6 +112,7 @@ where
     let (command_tx, command_rx) = mpsc::channel(128);
     let (status_tx, status_rx) = watch::channel(GatewayStatus::Disconnected);
     let resume = Arc::new(Mutex::new(ResumeState::default()));
+    let (shutdown, stopped) = watch::channel(());
     tokio::spawn(run(
         url,
         token_provider,
@@ -90,10 +120,14 @@ where
         command_rx,
         status_tx,
         resume.clone(),
+        stopped,
     ));
     GatewayHandle {
         events: event_rx,
-        commands: command_tx,
+        commands: GatewayCommands {
+            commands: command_tx,
+            shutdown,
+        },
         status: status_rx,
         resume,
     }
@@ -106,6 +140,7 @@ async fn run<F, Fut, E>(
     mut command_rx: mpsc::Receiver<GatewayCommand>,
     status_tx: watch::Sender<GatewayStatus>,
     resume: Arc<Mutex<ResumeState>>,
+    mut stopped: watch::Receiver<()>,
 ) where
     F: Fn(bool) -> Fut + Send,
     Fut: Future<Output = Result<SecretString, E>> + Send,
@@ -113,44 +148,56 @@ async fn run<F, Fut, E>(
 {
     let mut delay = Duration::from_secs(1);
     let mut refresh_token = false;
-    loop {
+    while !stopped.has_changed().unwrap_or(true) {
         let _ = status_tx.send(if delay == Duration::from_secs(1) {
             GatewayStatus::Connecting
         } else {
             GatewayStatus::Reconnecting
         });
+        // A refresh can rotate the credential on the server. Finish storing its
+        // replacement before acknowledging shutdown to the account switcher.
         let result = match token_provider(refresh_token).await {
             Ok(token) => {
                 refresh_token = false;
-                connect_once(
-                    &url,
-                    &token,
-                    &event_tx,
-                    &mut command_rx,
-                    &status_tx,
-                    &resume,
-                )
-                .await
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => break,
+                    result = connect_once(&url, &token, &event_tx, &mut command_rx, &status_tx, &resume) => result,
+                }
             }
             Err(_) => Ok(ConnectionEnd::AuthenticationFailed),
         };
         if *status_tx.borrow() == GatewayStatus::Connected {
             delay = Duration::from_secs(1);
         }
-        match result {
+        let retry_delay = match result {
             Ok(ConnectionEnd::Shutdown) => break,
             Ok(ConnectionEnd::AuthenticationFailed) => {
                 refresh_token = true;
                 let _ = status_tx.send(GatewayStatus::AuthenticationFailed);
-                time::sleep(delay).await;
-                delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+                delay
+            }
+            Ok(ConnectionEnd::RateLimited {
+                retry_after_ms,
+                session_limit,
+            }) => {
+                let wait = delay.max(Duration::from_millis(retry_after_ms));
+                let _ = status_tx.send(GatewayStatus::RateLimited {
+                    retry_after_ms: wait.as_millis().try_into().unwrap_or(u64::MAX),
+                    session_limit,
+                });
+                wait
             }
             Ok(ConnectionEnd::Reconnect) | Err(_) => {
                 let _ = status_tx.send(GatewayStatus::Reconnecting);
-                time::sleep(delay).await;
-                delay = (delay * 2).min(MAX_RECONNECT_DELAY);
+                delay
             }
+        };
+        tokio::select! {
+            _ = stopped.changed() => break,
+            () = time::sleep(retry_delay) => {}
         }
+        delay = (delay * 2).min(MAX_RECONNECT_DELAY);
     }
     let _ = status_tx.send(GatewayStatus::Disconnected);
 }
@@ -170,6 +217,11 @@ async fn connect_once(
         .await
         .map_err(|_| GatewayError::HelloTimeout)?
         .ok_or(GatewayError::Closed)??;
+    if let Message::Close(Some(frame)) = &hello
+        && u16::from(frame.code) == GatewayCloseCode::RateLimited as u16
+    {
+        return Ok(rate_limit_end(frame.reason.as_str()));
+    }
     let hello = decode_text(hello)?;
     if hello.op != GatewayOp::Hello as u8 {
         return Err(GatewayError::ExpectedHello);
@@ -234,6 +286,9 @@ async fn connect_once(
                 if let Message::Close(frame) = incoming {
                     if let Some(frame) = frame {
                         let code = u16::from(frame.code);
+                        if code == GatewayCloseCode::RateLimited as u16 {
+                            return Ok(rate_limit_end(frame.reason.as_str()));
+                        }
                         if code == GatewayCloseCode::AuthenticationFailed as u16
                             || code == GatewayCloseCode::NotAuthenticated as u16
                         {
@@ -354,8 +409,25 @@ fn decode_text(message: Message) -> Result<GatewayEnvelope, GatewayError> {
     serde_json::from_str(&text).map_err(GatewayError::Decode)
 }
 
+fn rate_limit_end(reason: &str) -> ConnectionEnd {
+    let detail = serde_json::from_str::<Value>(reason).unwrap_or(Value::Null);
+    let session_limit = detail["code"] == "SESSION_LIMIT";
+    let retry_after_ms = detail["retry_after_ms"]
+        .as_u64()
+        .unwrap_or(if session_limit { 30_000 } else { 0 })
+        .min(60_000);
+    ConnectionEnd::RateLimited {
+        retry_after_ms,
+        session_limit,
+    }
+}
+
 enum ConnectionEnd {
     Reconnect,
+    RateLimited {
+        retry_after_ms: u64,
+        session_limit: bool,
+    },
     AuthenticationFailed,
     Shutdown,
 }
@@ -387,6 +459,41 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_finishes_in_flight_credentials_before_returning() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let gateway = spawn(Url::parse("wss://example.test").expect("URL"), {
+            let started = started.clone();
+            let finish = finish.clone();
+            let completed = completed.clone();
+            move |_| {
+                let started = started.clone();
+                let finish = finish.clone();
+                let completed = completed.clone();
+                async move {
+                    started.notify_one();
+                    finish.notified().await;
+                    completed.store(true, Ordering::SeqCst);
+                    Err::<SecretString, ()>(())
+                }
+            }
+        });
+        started.notified().await;
+        let shutdown = gateway.commands.send(GatewayCommand::Shutdown);
+        tokio::pin!(shutdown);
+        assert!(futures_util::poll!(&mut shutdown).is_pending());
+        finish.notify_one();
+        time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown completed")
+            .expect("shutdown accepted");
+        assert!(completed.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // One scripted exchange covers the full reconnect sequence.

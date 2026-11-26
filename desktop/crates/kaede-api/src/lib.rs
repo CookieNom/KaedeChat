@@ -523,11 +523,16 @@ impl ApiClient {
         version: Option<&ResourceVersion>,
     ) -> Result<reqwest::RequestBuilder, ApiClientError> {
         let url = self.endpoint.api_url(path)?;
+        let voice_grant =
+            method == Method::POST && url.path().trim_end_matches('/').ends_with("/voice/token");
         let mut request = self
             .http
             .request(method, url)
             .header(CLIENT_HEADER, CLIENT_KIND)
             .header(header::ACCEPT, "application/json");
+        if voice_grant {
+            request = request.header("X-Kaede-Media-Key-Bits", "256");
+        }
         if let Some(token) = self.access_token.read().await.as_ref() {
             request = request.bearer_auth(token.expose_secret());
         }

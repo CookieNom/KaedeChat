@@ -654,6 +654,9 @@ def validate_values(values: dict[str, str], *, observability: bool) -> None:
         )
 
     photodna_enabled = values.get("KAEDE_PHOTODNA_ENABLED", "false").strip().lower()
+    vendor_dir = values.get("KAEDE_VENDOR_DIR", "")
+    if vendor_dir and (not Path(vendor_dir).is_absolute() or "\x00" in vendor_dir):
+        raise DeploymentConfigurationError("KAEDE_VENDOR_DIR must be an absolute host path")
     if photodna_enabled not in {"true", "false"}:
         raise DeploymentConfigurationError("KAEDE_PHOTODNA_ENABLED must be true or false")
     evidence_key = values.get("KAEDE_SAFETY_EVIDENCE_KEY", "").strip()

@@ -18,7 +18,11 @@ from websockets.typing import Subprotocol
 from app.core.federation import canonical_request_target
 from app.core.json_limits import strict_json_loads
 from app.core.settings import Settings
-from app.federation.client import OUTBOUND_FEDERATION_LIMITER, federation_signing_headers
+from app.federation.client import (
+    OUTBOUND_FEDERATION_LIMITER,
+    federation_signing_headers,
+    require_allowlisted_destination,
+)
 from app.federation.network import (
     ensure_peer,
     normalize_domain,
@@ -246,6 +250,7 @@ async def _send_link_batch_admitted(
     events: list[dict[str, object]],
 ) -> dict[str, object]:
     destination = normalize_domain(destination)
+    await require_allowlisted_destination(session, settings, destination)
     if not 1 <= len(events) <= 100:
         raise FederationLinkError("hot-link event batch is outside protocol bounds")
     loop_id = id(asyncio.get_running_loop())

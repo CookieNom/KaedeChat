@@ -34,11 +34,12 @@ from app.core.federation import (
     guild_crosspost_authority_event_ref,
     guild_media_delete_request_ref,
     guild_message_authority_event_refs,
+    sign_envelope,
     terminal_room_event_ref,
     verify_envelope,
     verify_request,
 )
-from app.core.json_limits import strict_json_loads
+from app.core.json_limits import federation_request_allows_floats, strict_json_loads
 from app.core.permissions import PERMISSION_SCHEMA_CAPABILITY
 from app.core.proxy import connection_client_ip
 from app.core.settings import Settings, get_settings
@@ -524,6 +525,77 @@ async def refresh_event_signing_keys(
     return True
 
 
+async def sign_federation_document(
+    session: AsyncSession,
+    settings: Settings,
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    key_id, private_key = await self_private_key(session, settings)
+    signed = {**document, "origin": settings.domain}
+    signed["signatures"] = {settings.domain: {key_id: sign_envelope(signed, private_key)}}
+    return signed
+
+
+async def verify_federation_document(
+    session: AsyncSession,
+    settings: Settings,
+    document: dict[str, Any],
+    *,
+    expected_origin: str,
+    expected_type: str,
+    maximum_age: int,
+) -> None:
+    try:
+        origin = normalize_domain(str(document["origin"]))
+        document_type = str(document["type"])
+        issued_at = int(document["issued_at"])
+        expires_at = int(document["expires_at"])
+        signatures = document["signatures"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("signed federation document is malformed") from exc
+    if origin != normalize_domain(expected_origin) or document_type != expected_type:
+        raise ValueError("signed federation document has the wrong authority or type")
+    now = int(time.time())
+    if issued_at > now + settings.federation_clock_skew_seconds or expires_at < now:
+        raise ValueError("signed federation document has expired")
+    if expires_at - issued_at > maximum_age:
+        raise ValueError("signed federation document lifetime is too long")
+    if not isinstance(signatures, dict) or not isinstance(signatures.get(origin), dict):
+        raise ValueError("signed federation document has no authority signature")
+
+    keys = signatures[origin]
+    if not 1 <= len(keys) <= 8:
+        raise ValueError("signed federation document has an invalid key count")
+
+    async def verify_cached() -> tuple[bool, bool]:
+        missing = False
+        for key_id, encoded in signatures[origin].items():
+            if not isinstance(key_id, str) or not isinstance(encoded, str):
+                continue
+            key = await session.get(PeerKey, (origin, key_id))
+            if key is None or key.expired_at is not None:
+                missing = True
+                continue
+            try:
+                signature = base64.b64decode(encoded, validate=True)
+                public_key = Ed25519PublicKey.from_public_bytes(key.public_key)
+            except (TypeError, ValueError):
+                continue
+            if verify_envelope(document, signature, public_key):
+                return True, missing
+        return False, missing
+
+    verified, refresh = await verify_cached()
+    if not verified and refresh:
+        try:
+            await ensure_peer(session, settings, origin, force=True)
+        except FederationNetworkError as exc:
+            raise ValueError("authority keys are unavailable") from exc
+        verified, _ = await verify_cached()
+    if not verified:
+        raise ValueError("signed federation document signature is invalid")
+
+
 async def validated_event_envelope(
     session: AsyncSession,
     settings: Settings,
@@ -785,10 +857,7 @@ async def authenticate_federation(
             if not hasattr(request.state, "federation_json"):
                 request.state.federation_json = strict_json_loads(
                     body,
-                    allow_floats=(
-                        request.url.path.startswith("/_kaede/v1/channels/")
-                        and request.url.path.endswith("/interactions")
-                    ),
+                    allow_floats=federation_request_allows_floats(request.url.path),
                 )
         except ValueError:
             raise HTTPException(
@@ -888,6 +957,7 @@ async def authenticate_federation_websocket(
             )
         peer_key = await session.get(PeerKey, (origin, key_id), populate_existing=True)
     if peer_key is None or peer_key.expired_at is not None:
+        await redis.set(f"federation:key-refresh:miss:{origin}:{key_id}", "1", ex=300)
         raise HTTPException(status_code=401, detail={"code": "KAED_FED_UNKNOWN_KEY"})
     instance = await session.get(Instance, origin, populate_existing=True)
     require_pinned_request_nonce(instance, nonce)

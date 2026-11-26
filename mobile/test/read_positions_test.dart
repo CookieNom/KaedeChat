@@ -83,7 +83,7 @@ Future<(MobileController, List<RequestOptions>, void Function(bool))> fixture(
         } else if (query['after'] != null) {
           selected = messages
               .where((m) => id(m.ref.wire) > id(query['after']))
-              .take(50)
+              .take(query['limit'] as int)
               .toList();
         } else if (query['before'] != null) {
           selected = messages
@@ -335,7 +335,7 @@ void main() {
     await controller.selectDm(controller.state.dms.single);
     expect(
         log
-            .where((r) => r.path.endsWith('/messages'))
+            .where((r) => r.queryParameters.containsKey('around'))
             .last
             .queryParameters['around'],
         first.ref.wire);
@@ -368,6 +368,14 @@ void main() {
     expect(compareReadPositions(messageRef(9), messageRef(10)), lessThan(0));
   });
 
+  test('a saved position at the latest message has no newer page', () async {
+    final (controller, _, _) = await fixture();
+    controller.state = controller.state.copyWith(selectedChannel: channelRef);
+    await controller.loadMessages(around: messageRef(200));
+    expect(controller.state.messages.last.ref, messageRef(200));
+    expect(controller.state.channelsWithNewerMessages, isEmpty);
+  });
+
   test(
       'opening, paging forward, latest and saved-position jumps preserve the visit and draft',
       () async {
@@ -376,7 +384,7 @@ void main() {
     await controller.selectDm(controller.state.dms.single);
     expect(
         log
-            .where((r) => r.path.endsWith('/messages'))
+            .where((r) => r.queryParameters.containsKey('around'))
             .single
             .queryParameters['around'],
         messageRef(20).wire);

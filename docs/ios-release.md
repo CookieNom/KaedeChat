@@ -12,11 +12,15 @@ app `6808771548`, and these identifiers:
 
 In Apple Developer, create one **Apple Distribution** certificate. Then create
 an **App Store Connect** provisioning profile for each of the three App IDs
-above and download all three `.mobileprovision` files. Manual signing expects the
-exact profile names `Kaede Chat App Store`, `Kaede Broadcast Extension App Store`,
-and `Kaede Notification Service App Store`. The main app profile must include Push
-Notifications, the app group, Associated Domains, and Data Protection; both
-extension profiles must include the same app group.
+above and download the `.mobileprovision` files. Manual signing expects these
+exact profile names:
+
+- `Kaede Chat App Store`
+- `Kaede Broadcast Extension App Store`
+- `Kaede Notification Service App Store`
+
+The main app profile needs Push Notifications, the app group, Associated
+Domains, and Data Protection. Both extension profiles need the same app group.
 
 Export the distribution certificate and its private key together as a
 password-protected `.p12` file. Keep the `.p12`, password, profiles, and keys
@@ -37,27 +41,23 @@ Add these secrets, with each file base64-encoded as one line:
 On Linux, encode a file with `base64 -w0 FILE`. On macOS, use
 `base64 -i FILE | tr -d '\n'`.
 
-Add the Actions variable `IOS_RELEASE_ENABLED` with value `true`. Tagged GitHub
-releases that select iOS changes will then build a signed IPA using the official
-`push.kaede.chat` relay and attach it to the release. See
-[client release selection](../desktop/docs/releasing.md) for the shared-code rules.
+Add the Actions variable `IOS_RELEASE_ENABLED` with value `true`. From then on,
+tagged releases that select iOS build a signed IPA for the official
+`push.kaede.chat` relay and attach it to the release.
+[Client releases](../desktop/docs/releasing.md) explains which changes select
+iOS and how failed store uploads are retried.
 
-The iOS job explicitly selects Xcode 26.3 on `macos-15` and checks for an
-iOS 26 or newer SDK before building. App Store Connect has required this SDK
-since April 28, 2026; the runner's default Xcode 16.4 is too old.
-The app and extension versions come from the numeric release tag (for example,
-`v0.1.38` becomes `0.1.38`), with `GITHUB_RUN_NUMBER.GITHUB_RUN_ATTEMPT` as the
-build number so retries produce a new build number. The IPA and checksum are
-retained as Actions artifacts before TestFlight upload, even if Apple rejects
-the upload. TestFlight delivery runs only when iOS was built and waits for CI,
-every selected client build, and GitHub Release publication to succeed. A failed upload
-is visible and retryable with **Re-run failed jobs**. The retry downloads the
-existing signed IPA instead of rebuilding it.
+The iOS job selects Xcode 26.3 on `macos-15` and checks for an iOS 26 or newer
+SDK before building. App Store Connect has required this SDK since April 28,
+2026, and the runner's default Xcode 16.4 is too old. App and extension
+versions come from the numeric tag (`v0.1.38` becomes `0.1.38`). The build
+number is `GITHUB_RUN_NUMBER.GITHUB_RUN_ATTEMPT`, so retries get a new one. The
+IPA and checksum are kept as Actions artifacts even if Apple rejects the upload,
+and a retry reuses that signed IPA.
 
-Workflow fixes must be committed and included in a new release tag. Rerunning
-an old tag uses its original workflow and source. Include the matching
-`desktop/rust-toolchain.toml` pin: native mobile builds select that toolchain,
-which must match the release workflow's `RUST_VERSION` and installed targets.
+Keep `desktop/rust-toolchain.toml` in step with the release workflow's
+`RUST_VERSION` and installed targets, since native mobile builds use that
+toolchain.
 
 ## 3. Enable optional TestFlight upload
 
@@ -67,23 +67,26 @@ In App Store Connect, create an API key allowed to upload builds. Add:
 - `APP_STORE_CONNECT_ISSUER_ID`
 - `APP_STORE_CONNECT_PRIVATE_KEY_BASE64`
 
-Then add the Actions variable `IOS_TESTFLIGHT_UPLOAD_ENABLED=true`. This is a
-different key from the APNs key and should not be reused for push delivery.
+Then add the Actions variable `IOS_TESTFLIGHT_UPLOAD_ENABLED=true`. This key is
+separate from the APNs key; don't reuse it for push delivery.
 
-Only the upload step is optional. The macOS desktop build uses these same three
-secrets for notarization, and it fails without them whenever a release builds
-desktop. That holds even if iOS and TestFlight are both off. The iOS signing
-secrets from step 2 aren't used by the desktop build; macOS has its own
-Developer ID secrets, listed in [client releases](../desktop/docs/releasing.md).
+Only the upload is optional. The macOS desktop build needs the same three
+secrets for notarization whenever a release builds desktop, even with iOS and
+TestFlight off. Its other signing secrets are listed in
+[client releases](../desktop/docs/releasing.md#release-secrets).
 
-The TestFlight job waits up to 30 minutes for Apple to process the IPA, then
-applies the encryption answers **standard third-party encryption**, **no
-proprietary encryption**, and **not distributed in France** through the App Store
-Connect API. It reuses an approved matching declaration when available. The API
-key must also have permission to manage encryption declarations and builds.
-Review these answers in `.github/scripts/upload-testflight.py` before changing
-the app's cryptography or distributing in France. If processing or declaration
-assignment fails, rerun the failed job; it resumes an existing matching build.
+The TestFlight job waits up to 30 minutes for Apple to process the IPA. It then
+sets the encryption answers through the App Store Connect API:
+
+- **standard third-party encryption**
+- **no proprietary encryption**
+- **not distributed in France**
+
+It reuses an approved matching declaration when one exists, so the API key also
+needs permission to manage encryption declarations and builds. Review these
+answers in `.github/scripts/upload-testflight.py` before changing the app's
+cryptography or distributing in France. If processing or declaration assignment
+fails, rerun the failed job. It picks up the existing matching build.
 
 ## 4. Configure the official relay
 
@@ -96,8 +99,9 @@ KAEDE_PUSH_RELAY_APNS_TEAM_ID=6Q44L7WH4U
 KAEDE_PUSH_RELAY_APNS_TOPIC=chat.kaede.mobile.voip
 ```
 
-Deploy the code, apply Alembic migration `6b1f4d8a2c90`, and restart the API,
-worker, and scheduler services.
+Deploy the code, apply the database migrations, and restart the API, worker,
+and scheduler services. The rest of the relay setup is in
+[mobile push delivery](mobile-push.md#home-configuration).
 
 ## 5. Test on a physical iPhone
 
@@ -112,6 +116,6 @@ Install a TestFlight build, enable notifications, and verify:
    hang-up dismiss CallKit.
 5. Repeat on Wi-Fi and cellular, then with the phone locked.
 
-No personal Mac is required for these steps; the GitHub macOS runner performs
-the archive, signing, and TestFlight upload. A physical iPhone is required for
-meaningful PushKit, CallKit, and APNs testing.
+You don't need a Mac for any of this, since the GitHub macOS runner archives,
+signs, and uploads the build. You do need a physical iPhone to test PushKit,
+CallKit, and APNs.

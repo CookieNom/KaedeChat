@@ -1,0 +1,34 @@
+diff --git a/webrtc-sys/src/frame_cryptor.cpp b/webrtc-sys/src/frame_cryptor.cpp
+--- a/webrtc-sys/src/frame_cryptor.cpp
++++ b/webrtc-sys/src/frame_cryptor.cpp
+@@ -105,6 +105,7 @@
+ KeyProvider::KeyProvider(KeyProviderOptions options) {
+   webrtc::KeyProviderOptions rtc_options;
+   rtc_options.shared_key = options.shared_key;
++  rtc_options.key_size = 256;
+ 
+   std::vector<uint8_t> ratchet_salt;
+   std::copy(options.ratchet_salt.begin(), options.ratchet_salt.end(),
+diff --git a/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc b/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc
+--- a/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc
++++ b/webrtc-sys/src/av1_e2ee/frame_crypto_transformer.cc
+@@ -683,7 +683,8 @@
+ 
+         auto new_material = key_handler->RatchetKeyMaterial(currentKeyMaterial);
+         ratcheted_key_set = key_handler->DeriveKeys(
+-            new_material, key_provider_->options().ratchet_salt, 128);
++            new_material, key_provider_->options().ratchet_salt,
++            key_provider_->options().frame_key_bits());
+ 
+         if (AesEncryptDecrypt(EncryptOrDecrypt::kDecrypt, algorithm_,
+                               ratcheted_key_set->encryption_key, iv,
+@@ -881,7 +882,8 @@
+ 
+         auto new_material = key_handler->RatchetKeyMaterial(currentKeyMaterial);
+         ratcheted_key_set = key_handler->DeriveKeys(
+-            new_material, key_provider_->options().ratchet_salt, 128);
++            new_material, key_provider_->options().ratchet_salt,
++            key_provider_->options().frame_key_bits());
+ 
+         if (AesEncryptDecrypt(EncryptOrDecrypt::kDecrypt, algorithm_,
+                               ratcheted_key_set->encryption_key, iv,

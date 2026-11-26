@@ -19,6 +19,32 @@ from app.db.models import Channel, Guild, User
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferences", "expected"),
+    [
+        ({"presence_control": {"base_status": "dnd"}}, "dnd"),
+        ({"presence_preference": "dnd"}, "online"),
+    ],
+)
+async def test_gateway_presence_respects_managed_settings_and_legacy_commands(
+    monkeypatch, preferences, expected
+):
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.scalar.return_value = preferences
+    redis = AsyncMock()
+    redis.get.return_value = None
+    user = User(id=7, origin_domain="home.test", username="viewer")
+    broadcast = AsyncMock(return_value=(expected, 2))
+    monkeypatch.setattr(gateway, "broadcast_presence_preference", broadcast)
+    monkeypatch.setattr(gateway, "schedule_presence_fanout", lambda *_: None)
+    await gateway.publish_gateway_presence(lambda: session, redis, user, [], "online")
+    assert broadcast.await_args.args[2] == expected
+    state = broadcast.await_args.kwargs["presence_state"]
+    assert (state["suppress_notifications"] if state else False) == (expected == "dnd")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("peer_delivered", [True, False])
 @pytest.mark.parametrize("shared_guild", [True, False])
 async def test_presence_reaper_notifies_private_peers_before_finalizing(
@@ -302,7 +328,7 @@ async def test_fresh_ready_hydrates_history_statuses(
         "fresh-session",
     )
 
-    assert result == {"ready": True, "relationships": []}
+    assert result == {"ready": True, "relationships": [], "presence_initialized": True}
     assert captured["args"] == (
         user,
         [guild],
@@ -828,14 +854,20 @@ async def test_guild_delivery_fails_closed_after_lost_membership_dispatch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("permissions", "expected_visible"),
+    ("event_type", "permissions", "expected_visible"),
     [
-        (gateway.Permission.MANAGE_GUILD, True),
-        (gateway.Permission.VIEW_CHANNEL, False),
+        ("AUTO_MODERATION_ACTION_EXECUTION", gateway.Permission.MANAGE_GUILD, True),
+        ("AUTO_MODERATION_RULE_UPDATE", gateway.Permission.VIEW_CHANNEL, False),
+        ("GUILD_AUDIT_LOG_ENTRY_CREATE", gateway.Permission.VIEW_CHANNEL, False),
+        ("GUILD_AUDIT_LOG_ENTRY_CREATE", gateway.Permission.VIEW_AUDIT_LOG, True),
+        ("INVITE_CREATE", gateway.Permission.VIEW_CHANNEL, False),
+        ("INVITE_CREATE", gateway.Permission.MANAGE_CHANNELS, True),
+        ("GUILD_MEMBERS_PRUNED", gateway.Permission.KICK_MEMBERS, False),
     ],
 )
-async def test_automod_execution_requires_current_manage_guild_for_human_gateway(
+async def test_sensitive_dispatch_requires_current_permissions_for_human_gateway(
     monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
     permissions: gateway.Permission,
     expected_visible: bool,
 ) -> None:
@@ -880,7 +912,7 @@ async def test_automod_execution_requires_current_manage_guild_for_human_gateway
         summary,
         "guild:alpha.test:42",
         {
-            "t": "AUTO_MODERATION_ACTION_EXECUTION",
+            "t": event_type,
             "d": {
                 "guild_id": "42",
                 "guild_domain": "alpha.test",

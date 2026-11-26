@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.e2ee import channel_encryption_policy_payload
+from app.chat.forwarding import federation_forward_snapshot
 from app.chat.message_flags import MESSAGE_FLAG_IS_CROSSPOST
 from app.core.snowflake import EPOCH_MS, SEQUENCE_BITS, WORKER_BITS
 from app.db.models import (
@@ -30,7 +32,9 @@ from app.db.models import (
     ThreadMember,
     User,
 )
+from app.federation.numbers import read_wire_number, write_wire_number
 from app.media.payloads import attachment_payload as media_attachment_payload
+from app.media.payloads import federation_attachment_payload
 
 
 def resource_version(value: object) -> str | None:
@@ -142,6 +146,10 @@ def sticker_payload(sticker: Sticker) -> dict[str, object]:
         "creator_domain": sticker.creator_domain,
         "version": resource_version(sticker),
     }
+
+
+def federation_sound_payload(rendered: dict[str, object]) -> dict[str, object]:
+    return {**rendered, "volume": write_wire_number(read_wire_number(rendered["volume"]))}
 
 
 def soundboard_sound_payload(sound: SoundboardSound) -> dict[str, object]:
@@ -557,11 +565,14 @@ def message_payload(
         else None
     )
     deleted = message.deleted_at is not None
+    state = getattr(message, "safety_state", None)
     forward_snapshot = (
         dict(message.forward_snapshot)
-        if not deleted and isinstance(message.forward_snapshot, dict)
+        if not deleted and not state and isinstance(message.forward_snapshot, dict)
         else None
     )
+    if include_forward_source and forward_snapshot is not None:
+        forward_snapshot = federation_forward_snapshot(forward_snapshot)
     is_crosspost = bool(int(message.flags or 0) & MESSAGE_FLAG_IS_CROSSPOST)
     encrypted_forward = bool(
         not deleted
@@ -672,7 +683,15 @@ def message_payload(
         ),
         "forward_snapshot": forward_snapshot if include_forward_source else None,
         "message_snapshots": (
-            [{"message": forward_snapshot}] if forward_snapshot is not None else []
+            [
+                {
+                    "message": deepcopy(forward_snapshot)
+                    if include_forward_source
+                    else forward_snapshot
+                }
+            ]
+            if forward_snapshot is not None
+            else []
         ),
         "message_reference": message_reference,
         "poll": None if deleted else poll,
@@ -694,7 +713,12 @@ def message_payload(
         "mention_user_refs": message.mention_user_refs,
         "mention_role_refs": [] if deleted else list(message.mention_role_refs or []),
         "mention_everyone": bool(message.mention_everyone) if not deleted else False,
-        "attachments": [attachment_payload(item) for item in (attachments or [])],
+        "attachments": [
+            federation_attachment_payload(item, include_lifecycle=False)
+            if include_forward_source and forward_snapshot is not None
+            else attachment_payload(item)
+            for item in (attachments or [])
+        ],
         "webhook_id": str(message.webhook_id) if message.webhook_id is not None else None,
         "webhook": webhook,
         "published_at": message.published_at.isoformat() if message.published_at else None,
@@ -703,7 +727,6 @@ def message_payload(
         "created_at": message.created_at.isoformat(),
     }
 
-    state = getattr(message, "safety_state", None)
     safety_updated_at = getattr(message, "safety_updated_at", None)
     payload.update(
         safety_state=state,

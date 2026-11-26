@@ -300,6 +300,46 @@ MobilePreparedForwardSource _preparedSource(
   );
 }
 
+Object? _publicProofSnapshot(Object? value,
+    {bool signed = true, int depth = 0}) {
+  if (value == null) return null;
+  final raw = _record(value, 'Forward source snapshot');
+  final attachments = raw['attachments'];
+  final children = raw['message_snapshots'];
+  if (attachments is! List ||
+      attachments.length > 10 ||
+      children is! List ||
+      children.length > (depth == 0 ? 1 : 0)) {
+    throw const FormatException('Forward source snapshot is invalid.');
+  }
+  return <String, Object?>{
+    ...raw,
+    'attachments': attachments.map((item) {
+      final attachment = _record(item, 'Forward attachment');
+      final duration = attachment['duration_secs'];
+      if (duration == null) return attachment;
+      final seconds = duration is num
+          ? duration.toDouble()
+          : signed &&
+                  duration is String &&
+                  duration == duration.trim() &&
+                  duration.length <= 32 &&
+                  RegExp(r'^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$')
+                      .hasMatch(duration)
+              ? double.tryParse(duration)
+              : null;
+      if (seconds == null || !(seconds > 0 && seconds <= 1200)) {
+        throw const FormatException('Forward recording duration is invalid.');
+      }
+      return <String, Object?>{...attachment, 'duration_secs': seconds};
+    }).toList(growable: false),
+    'message_snapshots': children
+        .map((item) =>
+            _publicProofSnapshot(item, signed: signed, depth: depth + 1))
+        .toList(growable: false),
+  };
+}
+
 void _validateProof(
   Object? value,
   MobilePreparedForwardSource source,
@@ -365,7 +405,8 @@ void _validateProof(
       !mobileCanonicalSortedCustomEmojiRefs(
         content['source_custom_emoji_refs'],
       ) ||
-      !_sameJson(content['source_snapshot'], source.snapshot) ||
+      !_sameJson(_publicProofSnapshot(content['source_snapshot']),
+          _publicProofSnapshot(source.snapshot, signed: false)) ||
       content['application_ref'] != null ||
       content['e2ee_device_id'] != null ||
       content['nonce'] != nonce) {

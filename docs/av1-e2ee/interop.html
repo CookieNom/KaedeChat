@@ -9,7 +9,7 @@ import { Room, RoomEvent, ExternalE2EEKeyProvider, LocalVideoTrack, Track } from
 window.start = async ({ url, token, role, codec, mode, encrypted, late }) => {
   // The harness grants access to Chromium's fake camera only, exposing hardware stats.
   window.hardwarePermission = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-  const keys = new ExternalE2EEKeyProvider({ ratchetWindowSize: 16 });
+  const keys = new ExternalE2EEKeyProvider({ ratchetWindowSize: 16, keySize: 256 });
   await keys.setKey(new Uint8Array(32).fill(7).buffer);
   const room = window.room = new Room({
     dynacast: true,

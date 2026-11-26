@@ -1,5 +1,6 @@
 <script lang="ts">
   let saveNotice = $state('');
+  import { presenceControl } from '$lib/stores/presence.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import GuildOnboarding from '$lib/components/GuildOnboarding.svelte';
   import { draftKey, readDraft, writeDraft } from '$lib/chat/local-drafts';
@@ -957,7 +958,7 @@
       !channel.archived &&
       canEditCurrentThread &&
       channel.encryption_mode === 'e2ee' &&
-      (channel.encryption_state === 'rekeying' || channel.encryption_state === 'failed')
+      channel.encryption_state === 'rekeying'
     )
   );
   const canCreatePublicThreads = $derived(
@@ -2129,14 +2130,7 @@
   }
 
   function myPresencePreference(): 'online' | 'idle' | 'dnd' | 'invisible' {
-    try {
-      const preferred = localStorage.getItem('kaede.presence');
-      if (preferred === 'idle' || preferred === 'dnd' || preferred === 'invisible')
-        return preferred;
-    } catch {
-      // Use online when browser storage is unavailable.
-    }
-    return 'online';
+    return presenceControl.state?.effective_status ?? 'online';
   }
 
   function toggleMemberRoster() {
@@ -4028,7 +4022,8 @@
       let orderedMessages = loadedMessages.reverse().sort(compareMessages);
       if (
         loadedChannel?.encryption_mode === 'e2ee' &&
-        loadedChannel.encryption_state === 'active'
+        (loadedChannel.encryption_state === 'active' ||
+          loadedChannel.encryption_state === 'rekeying')
       ) {
         if (
           !confirmEncryptedRoomJoin(
@@ -4043,8 +4038,16 @@
         const client = await initializeE2EE(loadedCurrentUser);
         if (routeGeneration !== loadGeneration || targetChannel !== channelId) return;
         e2eeClient = client;
-        orderedMessages = await decryptConversationMessages(client, loadedChannel, orderedMessages);
-        const decryptedPins = await decryptConversationMessages(client, loadedChannel, loadedPins);
+        if (orderedMessages.length) {
+          orderedMessages = await decryptConversationMessages(
+            client,
+            loadedChannel,
+            orderedMessages
+          );
+        }
+        const decryptedPins = loadedPins.length
+          ? await decryptConversationMessages(client, loadedChannel, loadedPins)
+          : loadedPins;
         const safetyNumber = await client.safetyNumber(loadedChannel).catch(() => '');
         if (routeGeneration !== loadGeneration || snapshot !== snapshotGeneration) return;
         pinnedMessages = decryptedPins;
@@ -4093,6 +4096,14 @@
 
   async function showEncryptionInfo() {
     if (!channel || channel.encryption_mode !== 'e2ee') return;
+    if (channel.encryption_state !== 'active') {
+      window.alert(
+        channel.encryption_state === 'rekeying'
+          ? $t('ui_paused_the_member_list_changed_and_requires_f_53f1fd53')
+          : $t('ui_encrypted_room_state_is_unavailable_on_this_d_3c6e6cd7')
+      );
+      return;
+    }
     if (currentUser) {
       try {
         const client = e2eeClient ?? (await initializeE2EE(currentUser));
@@ -6677,21 +6688,6 @@
           </button>
         </div>
       </div>
-      <div class="channel-header-actions">
-        {#if canReadMessageHistory && !isVoiceLikeChannel(channel) && channel?.type !== 4}
-          <button
-            class:active={pinsOpen}
-            class="icon-button"
-            type="button"
-            aria-label={pinsOpen
-              ? $t('ui_hide_pinned_messages_9ee082b6')
-              : $t('ui_show_pinned_messages_26b577c8')}
-            aria-pressed={pinsOpen}
-            title={$t('ui_pinned_messages_4c0dbc8c')}
-            onclick={togglePins}>📌</button
-          >
-        {/if}
-      </div>
     </header>
     <button class="guild-events-entry" type="button" onclick={() => void openScheduledEvents()}>
       <Icon name="clock" size={18} />
@@ -7055,6 +7051,19 @@
               <Icon name="bell" size={18} /><span>{$t('ui_follow_641d1ef6')}</span>
             </button>
           {/if}
+          {#if canReadMessageHistory && !isVoiceLikeChannel(channel) && channel?.type !== 4}
+            <button
+              class:active={pinsOpen}
+              class="icon-button"
+              type="button"
+              aria-label={pinsOpen
+                ? $t('ui_hide_pinned_messages_9ee082b6')
+                : $t('ui_show_pinned_messages_26b577c8')}
+              aria-pressed={pinsOpen}
+              title={$t('ui_pinned_messages_4c0dbc8c')}
+              onclick={togglePins}>📌</button
+            >
+          {/if}
           {#if guild && threadDirectoryParent}
             <ThreadsPanel
               bind:open={threadDirectoryOpen}
@@ -7079,7 +7088,11 @@
             <button
               class="icon-button active e2ee-status-button"
               type="button"
-              aria-label={$t('ui_end_to_end_encryption_is_on_view_safety_numbe_89af26f4')}
+              aria-label={channel.encryption_state === 'active'
+                ? $t('ui_end_to_end_encryption_is_on_view_safety_numbe_89af26f4')
+                : channel.encryption_state === 'rekeying'
+                  ? $t('ui_rekey_needed_74d26182')
+                  : $t('ui_encryption_82f4e719')}
               title={$t('ui_end_to_end_encrypted_identities_unverified_un_c09c94c1')}
               onclick={showEncryptionInfo}
             >
@@ -7087,7 +7100,9 @@
               <span
                 >{channel.encryption_state === 'active'
                   ? $t('ui_encrypted_f45aef6e')
-                  : $t('ui_rekey_needed_74d26182')}</span
+                  : channel.encryption_state === 'rekeying'
+                    ? $t('ui_rekey_needed_74d26182')
+                    : $t('ui_encryption_82f4e719')}</span
               >
             </button>
           {/if}
@@ -7791,13 +7806,15 @@
               <div class="composer composer-disabled" role="note">
                 <Icon name="lock" size={18} />
                 <span
-                  >{threadRequiresE2EEActivation(channel)
-                    ? $t('ui_end_to_end_encryption_must_finish_activating__e8b41782')
-                    : channel?.archived
-                      ? $t('ui_this_thread_is_archived_9a952b5f')
-                      : channel?.locked
-                        ? $t('ui_this_post_has_been_locked_only_moderators_can_0fda33ee')
-                        : $t('ui_you_do_not_have_permission_to_send_messages_i_9fd7c47b')}</span
+                  >{channel?.encryption_state === 'rekeying'
+                    ? $t('ui_paused_the_member_list_changed_and_requires_f_53f1fd53')
+                    : threadRequiresE2EEActivation(channel)
+                      ? $t('ui_end_to_end_encryption_must_finish_activating__e8b41782')
+                      : channel?.archived
+                        ? $t('ui_this_thread_is_archived_9a952b5f')
+                        : channel?.locked
+                          ? $t('ui_this_post_has_been_locked_only_moderators_can_0fda33ee')
+                          : $t('ui_you_do_not_have_permission_to_send_messages_i_9fd7c47b')}</span
                 >
               </div>
             {/if}

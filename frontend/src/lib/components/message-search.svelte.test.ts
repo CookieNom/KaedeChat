@@ -11,6 +11,27 @@ let component: ReturnType<typeof mount>;
 afterEach(async () => {
   if (component) await unmount(component);
   document.body.replaceChildren();
+  vi.mocked(api).mockClear();
+});
+
+it('opens the inbox search dialog and keeps the first request and its error visible', async () => {
+  let reject!: (error: Error) => void;
+  vi.mocked(api).mockImplementationOnce(() => new Promise((_, fail) => (reject = fail)));
+  component = mount(MessageSearch, {
+    target: document.body,
+    props: { open: true, scope: 'dms', scopeRef: null, accountRef: null }
+  });
+  flushSync();
+  const form = document.querySelector<HTMLFormElement>('[role="dialog"] form.dialog-query')!;
+  const query = form.querySelector('input')!;
+  query.value = 'hello';
+  flushSync(() => query.dispatchEvent(new Event('input', { bubbles: true })));
+  flushSync(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(document.querySelector('[role="status"]')?.textContent).toContain('Searching');
+  reject(new Error('offline'));
+  await vi.waitFor(() =>
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('Failed')
+  );
 });
 
 it('defaults to the current channel and allows another channel or all channels', async () => {

@@ -480,6 +480,27 @@ def test_valid_external_s3_production_settings() -> None:
     assert configured.media_s3_create_buckets is False
 
 
+@pytest.mark.asyncio
+async def test_bucket_initializer_only_needs_storage_settings(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from app.media import init_buckets
+
+    monkeypatch.chdir(tmp_path)
+    for key in ("KAEDE_DATABASE_URL", "KAEDE_DRAGONFLY_URL", "KAEDE_SECRET_KEY", "KAEDE_DOMAIN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("KAEDE_MEDIA_S3_ACCESS_KEY", "GK" + "a" * 24)
+    monkeypatch.setenv("KAEDE_MEDIA_S3_SECRET_KEY", "b" * 32)
+    ensure = AsyncMock()
+    monkeypatch.setattr(init_buckets.S3Storage, "ensure_bucket", ensure)
+    await init_buckets.initialize()
+    assert [call.args[0] for call in ensure.await_args_list] == [
+        "kaede-attachments",
+        "kaede-derived",
+        "kaede-remote-cache",
+    ]
+
+
 def test_external_s3_production_requires_explicit_https_endpoints() -> None:
     with pytest.raises(ValidationError, match="media_public_base_url"):
         production_settings(media_storage_backend="s3", media_public_base_url=None)

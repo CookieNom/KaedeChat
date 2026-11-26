@@ -20,6 +20,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   RTC_WEBHOOK_ID_CONFLICT: 'This webhook event ID was already accepted with a different body.',
 
   ADMIN_AUTHENTICATION_REQUIRED: 'Sign in with an administrator account to continue.',
+  ADMIN_TARGET_PROTECTED: 'This administrator account is protected from this action.',
   ADMIN_GRANT_NOT_FOUND: 'That administrator grant no longer exists.',
   APPLICATION_NOT_FOUND: 'That application no longer exists or you cannot manage it.',
   APPLICATION_DIRECTORY_NOT_READY:
@@ -154,6 +155,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   AUTHENTICATION_REQUIRED: 'Your session has expired. Sign in again to continue.',
   CSRF_GUARD: 'This page is out of date. Reload it and try again.',
   MISSING_PERMISSIONS: "You don't have permission to do that.",
+  VOICE_CLIENT_UPDATE_REQUIRED: 'Update your Kaede client to join encrypted voice calls.',
   VOICE_ACTIVE_ELSEWHERE:
     'Voice is already active on another device. Choose where you want to continue.',
   CANNOT_MANAGE_PERMISSIONS: "You can't change those permissions.",
@@ -187,6 +189,10 @@ const ERROR_MESSAGES: Record<string, string> = {
   GROUP_DM_NOT_FOUND: 'That group conversation no longer exists or you are no longer a member.',
   GROUP_DM_NOT_MEMBER: 'You are no longer a member of that group conversation.',
   GROUP_DM_DUPLICATE_MEMBER: 'Choose each group member only once.',
+  GROUP_DM_INVITER_PROOF_UNSUPPORTED:
+    'A participant’s home server needs an update to confirm this group invitation.',
+  GROUP_DM_INVITER_PROOF_REQUIRED:
+    'The inviter’s home server needs an update to confirm this group invitation.',
   GROUP_DM_INVITE_NOT_FRIEND: 'Only existing friends can be added to a group conversation.',
   GROUP_DM_FULL: 'That group conversation already has the maximum of 10 members.',
   GROUP_DM_ALREADY_MEMBER: 'That friend is already in the group conversation.',

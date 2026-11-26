@@ -166,6 +166,7 @@
         {#if button.style === 5 && button.url && !disabled}
           <a
             class={buttonClass(button)}
+            data-shopping-link
             href={button.url}
             target="_blank"
             rel="noopener noreferrer nofollow"

@@ -18,10 +18,14 @@ class MediaDeviceNative extends MediaDevices {
     });
   }
 
+  final _screenTracks = <String, WeakReference<MediaStreamTrack>>{};
   static final MediaDeviceNative instance = MediaDeviceNative._internal();
 
   void handleEvent(String event, final Map<dynamic, dynamic> map) async {
     switch (map['event']) {
+      case 'screenCaptureStopped':
+        _screenTracks.remove(map['trackId'])?.target?.onEnded?.call();
+        break;
       case 'onDeviceChange':
         ondevicechange?.call(null);
         break;
@@ -89,6 +93,11 @@ class MediaDeviceNative extends MediaDevices {
       String streamId = response['streamId'];
       var stream = MediaStreamNative(streamId, 'local');
       stream.setMediaTracks(response['audioTracks'], response['videoTracks']);
+      _screenTracks.removeWhere((_, track) => track.target == null);
+      for (final track in stream.getVideoTracks()) {
+        final id = track.id;
+        if (id != null) _screenTracks[id] = WeakReference(track);
+      }
       return stream;
     } on PlatformException catch (e) {
       throw 'Unable to getDisplayMedia: ${e.message}';

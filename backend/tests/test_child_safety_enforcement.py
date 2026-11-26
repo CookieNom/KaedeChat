@@ -219,6 +219,19 @@ async def test_two_prebind_findings_restore_only_after_both_dismissed_and_read_d
 
 
 @pytest.mark.asyncio
+async def test_confirmation_uses_other_cases_verified_copy_after_quarantine(monkeypatch):
+    item = attachment(2, content_sha256=hashlib.sha256(b"abc").hexdigest())
+    previous = buffered(22, item, b"abc")
+    session = SimpleNamespace(scalar=AsyncMock(side_effect=[None, previous]))
+    preserve = AsyncMock()
+    monkeypatch.setattr(enforcement, "preserve_evidence", preserve)
+
+    await enforcement.preserve_attachment(session, config(), retained(21), item)
+
+    assert preserve.await_args.args[3:] == ("2@home.test", b"abc")
+
+
+@pytest.mark.asyncio
 async def test_confirmed_prebind_case_cannot_be_downgraded_by_pending_case(monkeypatch):
     original = message()
     attachments = [attachment(1), attachment(2)]

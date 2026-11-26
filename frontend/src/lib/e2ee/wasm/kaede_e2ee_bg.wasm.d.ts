@@ -36,6 +36,7 @@ export const kaedemlsclient_exportEpochSecret: (
 ) => void;
 export const kaedemlsclient_exportState: (a: number, b: number) => void;
 export const kaedemlsclient_generateKeyPackage: (a: number, b: number) => void;
+export const kaedemlsclient_groupEpoch: (a: number, b: number, c: number, d: number) => void;
 export const kaedemlsclient_hasGroup: (a: number, b: number, c: number, d: number) => void;
 export const kaedemlsclient_inspectKeyPackage: (a: number, b: number, c: number, d: number) => void;
 export const kaedemlsclient_joinGroup: (a: number, b: number, c: number, d: number) => void;

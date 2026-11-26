@@ -113,8 +113,13 @@ async def rotate_refresh_token(
     digest = token_hash(refresh_token)
     record = await session.scalar(
         select(Session)
-        .where(or_(Session.refresh_token_hash == digest, Session.previous_token_hash == digest))
-        .with_for_update()
+        .join(User, (User.id == Session.user_id) & (User.origin_domain == Session.user_domain))
+        .where(
+            or_(Session.refresh_token_hash == digest, Session.previous_token_hash == digest),
+            User.disabled_at.is_(None),
+            User.deleted_at.is_(None),
+        )
+        .with_for_update(of=Session)
     )
     now = datetime.now(UTC)
     if (

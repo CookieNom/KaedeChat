@@ -4,12 +4,14 @@ import base64
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from kaede_bot import ActionRow, Button, View
 from kaede_bot.client import Client
 from kaede_bot.e2ee import (
     E2EEProtocolError,
@@ -200,6 +202,89 @@ def prepared_interaction(
         ),
     }
     return interaction, context, provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", ["timeout", "content"])
+async def test_encrypted_message_edits_preserve_the_view_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+) -> None:
+    bot = client()
+    channel = EntityRef(5, "guild.example")
+    provider = FakeProvider()
+    context = InteractionE2EEContext(provider, channel, b"g" * 32, 3, 7)
+    bot.set_message_e2ee_context(context)
+    monkeypatch.setattr(bot, "_e2ee_device_id", "kbe_" + "d" * 43)
+    identity = SimpleNamespace(
+        application_ref=EntityRef(10, "apps.example"),
+        user=SimpleNamespace(ref=EntityRef(20, "apps.example")),
+    )
+    monkeypatch.setattr(
+        bot,
+        "_ordinary_message_e2ee_lineage",
+        AsyncMock(
+            return_value=(
+                context,
+                identity,
+                "guild_install",
+                EntityRef(77, channel.domain),
+                1,
+            ),
+        ),
+    )
+    requests: list[dict[str, Any]] = []
+
+    async def echo(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        body = kwargs["json"]
+        requests.append(body)
+        return {
+            "id": "9",
+            "origin_domain": channel.domain,
+            "channel_id": str(channel.id),
+            "channel_domain": channel.domain,
+            "created_at": "2026-08-18T00:00:00+00:00",
+            "view_version": int(body["e2ee"]["view_version"]),
+            "e2ee": body["e2ee"],
+        }
+
+    monkeypatch.setattr(bot, "request", echo)
+    registrations: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        bot, "add_view", lambda view, **kwargs: registrations.append(kwargs)
+    )
+    view = View(timeout=30)
+    view.add_row(ActionRow([Button(label="Private label", custom_id="private:action")]))
+    message = await bot.send_message(
+        channel, "private body", view=view, installation_id=77
+    )
+    editor = registrations[0]["timeout_editor"]
+    if edit == "timeout":
+        message.content = "modified locally"
+        view.disable_all_items()
+        await editor(view)
+    else:
+        monkeypatch.setattr(bot, "history", AsyncMock(return_value=[message]))
+        await bot.edit_message(channel, message.ref, "edited body", installation_id=77)
+    assert len(requests) == 2
+    assert "components" not in requests[1] and "content" not in requests[1]
+    envelope = requests[1]["e2ee"]
+    assert envelope["message_revision"] == "2"
+    assert envelope["interaction_contract"]["view_timeout_seconds"] == 30
+    encrypted_data = json.loads(
+        base64.urlsafe_b64decode(envelope["ciphertext"] + "===")
+    )
+    assert encrypted_data["data"]["content"] == (
+        "private body" if edit == "timeout" else "edited body"
+    )
+    assert encrypted_data["data"]["components"][0]["components"][0].get(
+        "disabled", False
+    ) is (edit == "timeout")
+
+    bot.remove_message_e2ee_context(channel)
+    with pytest.raises(E2EEProtocolError, match="current MLS context"):
+        await editor(view)
+    assert len(requests) == 2
 
 
 def test_decrypt_interaction_authenticates_context_and_options() -> None:
@@ -639,20 +724,27 @@ def test_message_edit_replay_memory_is_bounded_without_losing_revision_checks() 
     from kaede_bot.e2ee import MAX_INTERACTION_REPLAY_ENTRIES
 
     context = InteractionE2EEContext(
-        provider=FakeProvider(), channel_ref=EntityRef(20, 'chat.example'),
-        group_id=b'group', policy_generation=1, epoch=7,
+        provider=FakeProvider(),
+        channel_ref=EntityRef(20, "chat.example"),
+        group_id=b"group",
+        policy_generation=1,
+        epoch=7,
     )
-    message = EntityRef(30, 'chat.example')
+    message = EntityRef(30, "chat.example")
     for revision in range(1, MAX_INTERACTION_REPLAY_ENTRIES * 2):
         context.record_message_ciphertext(
-            str(revision).encode(), message, revision,
-            'create' if revision == 1 else 'edit',
+            str(revision).encode(),
+            message,
+            revision,
+            "create" if revision == 1 else "edit",
         )
     assert len(context._message_ciphertexts) == MAX_INTERACTION_REPLAY_ENTRIES
     assert len(context._message_revisions) == 1
-    with pytest.raises(E2EEProtocolError, match='replayed'):
-        context.record_message_ciphertext(str(revision).encode(), EntityRef(31, 'chat.example'), 1, 'create')
-    with pytest.raises(E2EEProtocolError, match='equivocated'):
-        context.record_message_ciphertext(b'changed', message, revision, 'edit')
-    with pytest.raises(E2EEProtocolError, match='stale'):
-        context.record_message_ciphertext(b'old', message, 2, 'edit')
+    with pytest.raises(E2EEProtocolError, match="replayed"):
+        context.record_message_ciphertext(
+            str(revision).encode(), EntityRef(31, "chat.example"), 1, "create"
+        )
+    with pytest.raises(E2EEProtocolError, match="equivocated"):
+        context.record_message_ciphertext(b"changed", message, revision, "edit")
+    with pytest.raises(E2EEProtocolError, match="stale"):
+        context.record_message_ciphertext(b"old", message, 2, "edit")

@@ -6,10 +6,11 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from app.admin.auth import AdminPrincipal
+from app.admin.auth import ROLE_CAPABILITIES, AdminPrincipal, require_manageable_account
 from app.api import admin_portal
 from app.api.admin_portal import ReportActionCreate, ReportPatch, report_subject_ref
 from app.api.dependencies import suspension_blocks_request
@@ -18,7 +19,7 @@ from app.auth.account_status import (
     account_is_suspended,
     account_is_temporarily_suspended,
 )
-from app.db.bot_models import AbuseReport
+from app.db.bot_models import AbuseReport, InstanceAdminGrant
 from app.db.models import InstanceUserRestriction, User
 
 
@@ -116,6 +117,63 @@ def test_suspended_account_request_policy(method: str, path: str, blocked: bool)
     assert suspension_blocks_request(request) is blocked
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target_type, protected, code",
+    [
+        ("bot", False, "ADMIN_CAPABILITY_REQUIRED"),
+        ("human", True, "ADMIN_TARGET_PROTECTED"),
+        ("human", False, None),
+    ],
+)
+async def test_trust_safety_enforcement_respects_operator_and_bot_grants(
+    target_type, protected, code
+):
+    principal = AdminPrincipal(
+        cast(User, None), frozenset({"trust_safety"}), ROLE_CAPABILITIES["trust_safety"]
+    )
+    target = User(id=7, origin_domain="local.test", is_local=True, account_type=target_type)
+    session = SimpleNamespace(scalar=AsyncMock(return_value=1 if protected else None))
+    if code is None:
+        await require_manageable_account(session, principal, target)
+    else:
+        with pytest.raises(HTTPException) as error:
+            await require_manageable_account(session, principal, target)
+        assert error.value.detail["code"] == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [True, False])
+async def test_owner_restores_prior_operator_grant_in_place(expired, monkeypatch):
+    now = datetime.now(UTC)
+    target = User(id=7, origin_domain="local.test", is_local=True, account_type="human")
+    grant = InstanceAdminGrant(
+        id=9,
+        role="auditor",
+        generation=3,
+        created_at=now,
+        expires_at=now if expired else None,
+        revoked_at=None if expired else now,
+    )
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=target), scalar=AsyncMock(return_value=grant), commit=AsyncMock()
+    )
+    principal = AdminPrincipal(
+        User(id=1, origin_domain="local.test"), frozenset({"owner"}), frozenset({"*"})
+    )
+    monkeypatch.setattr(admin_portal, "audit", AsyncMock())
+    result = await admin_portal.add_operator(
+        admin_portal.AdminGrantCreate(user_ref="7@local.test", role="auditor"),
+        principal,
+        session,
+        FakeSnowflake(),
+        SimpleNamespace(domain="local.test"),
+    )
+    assert result["id"] == "9" and result["generation"] == "4"
+    assert grant.revoked_at is grant.expires_at is None
+    assert grant.granted_by_id == 1
+
+
 class FakeSnowflake:
     async def mint(self) -> int:
         return 123
@@ -145,6 +203,9 @@ class FakeSession:
             return self.report
         if model is User:
             return self.target
+        return None
+
+    async def scalar(self, _statement: object) -> None:
         return None
 
     async def scalars(self, _statement: object) -> list[str]:

@@ -26,7 +26,7 @@ class BridgeTest(unittest.TestCase):
 
         async def check():
             handlers = {}
-            bot = Obj(listen=lambda name: lambda handler: handlers.update({name: handler}))
+            bot = Obj(command=lambda **kwargs: lambda handler: handler, listen=lambda name: lambda handler: handlers.update({name: handler}))
             client = bridge.Bridge(Mock(), bot)
             try:
                 with self.assertLogs("bridge", level="INFO") as logs:
@@ -69,11 +69,11 @@ class BridgeTest(unittest.TestCase):
             store = bridge.Store(Path(directory) / 'bridge.sqlite3')
             store.add_pair(route['kaede_channel_ref'], '10@chat.example', route['discord_channel_id'])
             handlers = {}
-            bot = Obj(listen=lambda name: lambda handler: handlers.update({name: handler}))
+            bot = Obj(command=lambda **kwargs: lambda handler: handler, listen=lambda name: lambda handler: handlers.update({name: handler}))
             client = bridge.Bridge(store, bot)
             message = Obj(guild=True, author=Obj(bot=False, display_name='Alice', display_avatar=Obj(url='https://cdn.discordapp.com/avatar.png')),
                           webhook_id=None, channel=Obj(id=123), id=789,
-                          clean_content='hello', attachments=[])
+                          content='hello', clean_content='hello', attachments=[])
             asyncio.run(client.on_message(message))
             asyncio.run(client.on_message(message))
             self.assertEqual(len(store.pending()), 1)
@@ -115,7 +115,7 @@ class BridgeTest(unittest.TestCase):
         async def check():
             with TemporaryDirectory() as directory:
                 store = bridge.Store(Path(directory) / 'bridge.sqlite3')
-                bot = Obj(listen=lambda name: lambda handler: None, send_message=AsyncMock())
+                bot = Obj(command=lambda **kwargs: lambda handler: handler, listen=lambda name: lambda handler: None, send_message=AsyncMock())
                 client = bridge.Bridge(store, bot)
                 channel = Obj(send=AsyncMock())
                 store.add_pair('456@chat.example', '10@chat.example', '123')
@@ -143,7 +143,7 @@ class BridgeTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = bridge.Store(Path(directory) / 'bridge.sqlite3')
             handlers = {}
-            bot = Obj(listen=lambda name: lambda handler: handlers.update({name: handler}))
+            bot = Obj(command=lambda **kwargs: lambda handler: handler, listen=lambda name: lambda handler: handlers.update({name: handler}))
             client = bridge.Bridge(store, bot)
             error = ApiError(403, 'BOT_SCOPE_REQUIRED', 'private diagnostic content')
             with self.assertLogs('bridge', level='ERROR') as logs:

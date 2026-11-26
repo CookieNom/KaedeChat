@@ -64,6 +64,60 @@ void main() {
         ))
           ..httpClientAdapter = adapter;
 
+    test('private media refreshes at home and omits credentials at storage',
+        () async {
+      final requests = <(String, Object?)>[];
+      final media = _JsonAdapter('', respond: (options) async {
+        requests.add((options.uri.host, options.headers['Authorization']));
+        if (options.uri.host == 'objects.example') {
+          return ResponseBody.fromBytes([1, 2, 3], 200);
+        }
+        if (options.headers['Authorization'] == 'Bearer old-access') {
+          return _response('{}', status: 401);
+        }
+        return ResponseBody.fromString('', 302, headers: {
+          'location': ['https://objects.example/signed'],
+        });
+      });
+      final api = KaedeApiClient(
+        vault: vault,
+        httpClient: Dio()..httpClientAdapter = media,
+        refreshClient: refreshClient(_JsonAdapter(
+          '{"access_token":"new-access","refresh_token":"new-refresh"}',
+        )),
+      );
+      await api.useTokens(original);
+      expect(await api.getBytes('/media/chat.example/10/original'), [1, 2, 3]);
+      expect(requests, [
+        ('chat.example', 'Bearer old-access'),
+        ('chat.example', 'Bearer new-access'),
+        ('objects.example', null),
+      ]);
+    });
+
+    test('private media received after sign-out is discarded', () async {
+      final started = Completer<void>();
+      final response = Completer<ResponseBody>();
+      final api = KaedeApiClient(
+        vault: vault,
+        httpClient: Dio()
+          ..httpClientAdapter = _JsonAdapter('', respond: (_) {
+            started.complete();
+            return response.future;
+          }),
+      );
+      await api.useTokens(original);
+      final pending = expectLater(
+        api.getBytes('/media/chat.example/10/original'),
+        throwsA(isA<KaedeException>()
+            .having((error) => error.code, 'code', 'SESSION_CHANGED')),
+      );
+      await started.future;
+      await api.clearTokens();
+      response.complete(ResponseBody.fromBytes([1, 2, 3], 200));
+      await pending;
+    });
+
     test('background clients neither rotate nor clear the shared login',
         () async {
       var refreshes = 0;

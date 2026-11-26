@@ -13,9 +13,11 @@ import 'package:kaede_mobile/src/api/api_client.dart';
 import 'package:kaede_mobile/src/api/kaede_repository.dart';
 import 'package:kaede_mobile/src/app/mobile_controller.dart';
 import 'package:kaede_mobile/src/auth/session_vault.dart';
+import 'package:kaede_mobile/src/core/errors.dart';
 import 'package:kaede_mobile/src/core/refs.dart';
 import 'package:kaede_mobile/src/domain/application_installations.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/presence_control.dart';
 import 'package:kaede_mobile/src/features/auth/push_onboarding.dart';
 import 'package:kaede_mobile/src/features/guild/guild_management_screen.dart';
 import 'package:kaede_mobile/src/features/guild/onboarding_screen.dart';
@@ -542,6 +544,62 @@ void main() {
     expect(controller.currentState.relationshipType(sender.ref), 'friend');
     expect(controller.currentState.relationshipType(other.ref), 'pending_in');
     expect(reads, 2);
+  });
+
+  test('a stale schedule edit reloads the rules for the next attempt',
+      () async {
+    final user = fixtureUser();
+    const original = PresenceScheduleRule(
+      id: 'sleep',
+      name: 'Sleep',
+      status: PresenceStatus.dnd,
+      days: [1],
+      startMinute: 0,
+      endMinute: 420,
+    );
+    final current = original.copyWith(endMinute: 480);
+    final requests = <RequestOptions>[];
+    final http = Dio()
+      ..interceptors.add(InterceptorsWrapper(onRequest: (request, handler) {
+        requests.add(request);
+        if (request.method == 'PATCH') {
+          handler.reject(DioException(
+            requestOptions: request,
+            type: DioExceptionType.badResponse,
+            response: Response(requestOptions: request, statusCode: 409, data: {
+              'detail': {'code': 'PRESENCE_SCHEDULES_CHANGED'}
+            }),
+          ));
+        } else {
+          handler.resolve(
+              Response(requestOptions: request, statusCode: 200, data: {
+            'presence_state': {
+              'schedules': [current.toJson()]
+            }
+          }));
+        }
+      }));
+    final controller =
+        await fixtureController(fixtureGuild(user), user, [], httpClient: http);
+    addTearDown(controller.dispose);
+    await controller.api.useTokens(SessionTokens(
+        instance: user.ref.domain,
+        userRef: user.ref,
+        accessToken: 'access',
+        refreshToken: 'refresh'));
+    controller.state = MobileState(phase: SessionPhase.ready, user: user);
+    await expectLater(
+      controller.updatePresenceSchedules([original], []),
+      throwsA(isA<UserInputException>().having((error) => error.message,
+          'message', contains('Review the latest schedules'))),
+    );
+    expect(requests.map((request) => request.method), ['PATCH', 'GET']);
+    expect(requests.first.data, {
+      'expected_presence_schedules': [original.toJson()],
+      'presence_schedules': <Object?>[],
+    });
+    expect(
+        controller.currentState.presenceState?.schedules.single.endMinute, 480);
   });
 
   testWidgets(

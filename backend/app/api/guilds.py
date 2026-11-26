@@ -1034,6 +1034,7 @@ async def put_overwrite(
         auth.user,
         event_type,
         {"overwrite": overwrite_payload},
+        pause_e2ee=bool(changed_bits),
         channel=channel,
         snapshot_required=True,
         e2ee_policy_channels=e2ee_policy_channels,
@@ -1216,6 +1217,7 @@ async def delete_overwrite(
         channel=channel,
         snapshot_required=True,
         e2ee_policy_channels=e2ee_policy_channels,
+        pause_e2ee=overwrite is not None and bool(overwrite.allow | overwrite.deny),
     )
     await add_audit_entry(
         session,
@@ -1302,6 +1304,8 @@ async def sync_channel_permissions(
             ChannelOverwrite.channel_domain == channel.origin_domain,
         )
     )
+    permission_source_changed = not channel.permissions_synced
+    e2ee_policy_channels: list[Channel] = []
     channel.permissions_synced = True
     guild.permission_generation += 1
     await queue_guild_mutation(
@@ -1313,6 +1317,8 @@ async def sync_channel_permissions(
         {"channel": federation_channel_state(channel)},
         channel=channel,
         snapshot_required=True,
+        permission_source_changed=permission_source_changed,
+        e2ee_policy_channels=e2ee_policy_channels,
     )
     await add_audit_entry(
         session,
@@ -1327,6 +1333,9 @@ async def sync_channel_permissions(
     await materialize_updated_at(session, channel)
     await session.commit()
     await wake_queued_guild_federation(guild)
+    await publish_e2ee_policy_updates(
+        session, redis, settings, [item for item in e2ee_policy_channels if item is not channel]
+    )
     result = await channel_payload_for(session, redis, guild, auth.user, channel)
     await publish_dispatch(redis, guild_topic(settings.domain, guild.id), "CHANNEL_UPDATE", result)
     return result

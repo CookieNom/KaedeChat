@@ -12,7 +12,18 @@ from app.auth.tokens import LoginLimiter
 from app.chat.events import publish_presence
 from app.core.settings import get_settings
 from app.db.models import User
-from app.voice.state import call_key, create_call, get_call, transition_call
+from app.voice.state import (
+    DM_CALL_ALONE_SECONDS,
+    Occupant,
+    admit_occupant,
+    call_key,
+    call_recipient_is_ringing,
+    create_call,
+    get_active_call,
+    get_call,
+    remove_occupant,
+    transition_call,
+)
 
 
 @pytest.mark.asyncio
@@ -110,9 +121,39 @@ async def test_presence_publication_rejects_delayed_offline_generation(redis_sco
         assert await redis.get(f"presence:published:{topic}:{domain}:7") == "2"
 
 
+async def test_reseeding_preserves_a_due_presence_transition(redis_scope, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.chat import presence_control
+
+    redis, domain = redis_scope
+    key = f"presence:transitions:{domain}"
+    monkeypatch.setattr(presence_control, "PRESENCE_TRANSITIONS_KEY", key)
+    monkeypatch.setattr(presence_control, "PRESENCE_TRANSITIONS_SEEDED_KEY", f"{key}:seeded")
+    now = datetime(2026, 11, 26, 12, tzinfo=UTC)
+    later = now + timedelta(hours=1)
+    preferences = {
+        "presence_control": {"timed_status": "idle", "timed_expires_at": later.isoformat()}
+    }
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.execute.return_value = SimpleNamespace(
+        all=lambda: [(7, domain, preferences), (8, domain, preferences)]
+    )
+    await redis.zadd(key, {f"{domain}:7": now.timestamp()})
+    assert await presence_control.seed_presence_transitions(redis, lambda: session, now) == 1
+    assert await redis.zrange(key, 0, -1, withscores=True) == [
+        (f"{domain}:7", now.timestamp()),
+        (f"{domain}:8", later.timestamp()),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_call_lua_rejects_caller_reaccept_and_completes_declines_atomically(
     redis_scope,
+    monkeypatch,
 ) -> None:
     redis, domain = redis_scope
     settings = get_settings()
@@ -130,6 +171,10 @@ async def test_call_lua_rejects_caller_reaccept_and_completes_declines_atomicall
         "participants": [caller, first, second],
     }
     assert await create_call(redis, record, {caller, first, second}, settings, accepted={caller})
+    monkeypatch.setattr("app.voice.state.time.time", lambda: 1001)
+    assert await call_recipient_is_ringing(redis, 10, domain, f"20@{domain}", first)
+    assert not await call_recipient_is_ringing(redis, 10, domain, f"20@{domain}", caller)
+    assert not await call_recipient_is_ringing(redis, 10, domain, f"21@{domain}", first)
     assert await transition_call(redis, domain, 10, caller, "accept", settings, now=1001) == (
         False,
         False,
@@ -143,12 +188,72 @@ async def test_call_lua_rejects_caller_reaccept_and_completes_declines_atomicall
         )
     )
     assert all(accepted and changed for accepted, changed, _ in results)
+    assert not await call_recipient_is_ringing(redis, 10, domain, f"20@{domain}", first)
     terminal = await get_call(redis, domain, 10)
     assert terminal["state"] == "ended" and terminal["ended_at"] == 1002
     assert await redis.scard(f"{call_key(domain, 10)}:declined") == 2
     replay = await transition_call(redis, domain, 10, second, "decline", settings, now=1003)
     assert replay == (True, False, terminal)
     assert 0 < await redis.ttl(call_key(domain, 10)) <= settings.voice_call_ttl_seconds
+
+
+@pytest.mark.asyncio
+async def test_dm_call_ends_after_uninterrupted_solo_session(redis_scope) -> None:
+    redis, domain = redis_scope
+    settings = get_settings().model_copy(update={"domain": domain})
+    room = "d.20.10"
+    occupants = [
+        Occupant(
+            identity=f"{user}@{domain}",
+            user_id=user,
+            user_domain=domain,
+            room=room,
+            guild_id=None,
+            channel_id="20",
+            joined_at=1000,
+        )
+        for user in ("7", "8")
+    ]
+    caller, guest = occupants
+    record = {
+        "id": "10",
+        "channel_id": "20",
+        "channel_domain": domain,
+        "authority_domain": domain,
+        "room": room,
+        "state": "active",
+        "created_at": 1000,
+        "ended_at": None,
+        "caller": caller.identity,
+        "participants": [o.identity for o in occupants],
+    }
+    assert await create_call(redis, record, {o.identity for o in occupants}, settings)
+
+    async def check(now: int, sid: str = "session-a") -> bool:
+        _, changed, _ = await transition_call(
+            redis,
+            domain,
+            10,
+            caller.identity,
+            "check_alone",
+            settings,
+            now=now,
+            solo_session_id=sid,
+        )
+        return changed
+
+    assert await admit_occupant(redis, domain, caller, user_limit=0, bypass_limit=True)
+    assert not await check(1000)
+    assert not await check(1000 + DM_CALL_ALONE_SECONDS - 1)
+    # A brief guest visit between coordinator passes starts a fresh grace period.
+    assert await admit_occupant(redis, domain, guest, user_limit=0, bypass_limit=True)
+    await remove_occupant(redis, domain, room, guest.identity)
+    reset = 1000 + DM_CALL_ALONE_SECONDS
+    assert not await check(reset)
+    assert not await check(reset + DM_CALL_ALONE_SECONDS, "session-b")
+    assert await check(reset + 2 * DM_CALL_ALONE_SECONDS, "session-b")
+    assert (await get_call(redis, domain, 10))["state"] == "ended"
+    assert await get_active_call(redis, domain, 20) is None
 
 
 @pytest.mark.asyncio

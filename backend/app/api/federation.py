@@ -4,7 +4,6 @@ import asyncio
 import base64
 import binascii
 import hashlib
-import json
 import secrets
 import time
 from collections.abc import Sequence
@@ -13,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import reduce
 from operator import or_ as bit_or
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import structlog
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -148,6 +147,8 @@ from app.bots.dm_capability import (
     validated_bot_dm_capability_context,
 )
 from app.bots.installations import (
+    active_guild_installations_statement,
+    channel_restrictions_allow,
     cleanup_installation_roles,
     publish_deleted_installation_roles,
     revoke_installations_for_guild_member,
@@ -224,6 +225,8 @@ from app.chat.forwarding import (
     forward_snapshot_custom_emoji_tokens,
     forward_snapshot_matches_attachments,
     forward_snapshot_sticker_items,
+    matches_attested_plaintext_forward,
+    validate_forward_snapshot,
     validate_forward_snapshot_source_binding,
 )
 from app.chat.group_conversations import (
@@ -235,10 +238,13 @@ from app.chat.group_conversations import (
     reload_group_projection,
     require_group_invite_friend,
     require_group_member,
+    unsupported_group_invite_proof,
 )
 from app.chat.guild_revision import (
+    SOUNDBOARD_DECIMAL_VOLUME_CAPABILITY,
     build_guild_authority_envelope,
     guild_authority_owner,
+    guild_event_uses_decimal_volume,
     queue_guild_access_revocation,
     queue_guild_mutation,
     wake_queued_guild_federation,
@@ -385,9 +391,9 @@ from app.federation.actor_intents import (
     validate_human_actor_intent,
     validate_worker_actor_intent,
 )
-from app.federation.client import signed_request
+from app.federation.client import UnsupportedFederationCapability, signed_request
 from app.federation.delivery import FederationOutboxCapacityExceeded
-from app.federation.dm_history import MAX_DM_HISTORY_RESPONSE_BYTES
+from app.federation.dm_history import MAX_DM_HISTORY_RESPONSE_BYTES, sign_group_history_page
 from app.federation.dm_mutations import DMMutationResult, apply_dm_message_mutation
 from app.federation.dm_storage import (
     FederatedDMQuotaExceeded,
@@ -450,6 +456,7 @@ from app.federation.network import (
     FederationInstanceQuotaExceeded,
     FederationNetworkError,
     normalize_domain,
+    peer_advertises,
     peer_key_needs_refresh,
 )
 from app.federation.poll_mutations import (
@@ -562,7 +569,8 @@ from app.federation.typing import (
     typing_projection_is_fresh,
     validate_typing_relay_scope,
 )
-from app.media.payloads import terminal_attachment_update_payload
+from app.federation.users import resolve_handle
+from app.media.payloads import federation_attachment_duration, terminal_attachment_update_payload
 from app.media.service import discard_attachment
 from app.media.storage import S3Storage, StorageError
 from app.media.tombstones import (
@@ -777,7 +785,13 @@ async def federation_link(websocket: WebSocket) -> None:
                 ):
                     await websocket.close(code=4400)
                     return
-                await enforce_origin_event_rate_limit(redis, principal.origin, len(raw_events))
+                try:
+                    await enforce_origin_event_rate_limit(redis, principal.origin, len(raw_events))
+                except HTTPException as exc:
+                    if exc.status_code != 429:
+                        raise
+                    await websocket.close(code=4429)
+                    return
                 results: list[dict[str, object]] = []
                 for raw_event in raw_events:
                     try:
@@ -1156,6 +1170,8 @@ def proxy_attachment_identity(raw: dict[str, object]) -> dict[str, object]:
     """Project stable attachment identity while ignoring processing metadata."""
 
     identity = {field: raw.get(field) for field in PROXY_ATTACHMENT_IDENTITY_FIELDS}
+    if "duration_secs_exact" in raw:
+        identity["duration_secs"] = federation_attachment_duration(raw)
     identity.update(
         {
             "id": str(database_snowflake(raw.get("id"), "attachment id")),
@@ -1869,8 +1885,15 @@ async def validated_proxy_forward(
     if forwarded_ref is None:
         return None
     source_id, source_domain = forwarded_ref.resolve(settings.domain)
-    source = await session.get(Message, (source_id, source_domain))
-    if source is None or source.deleted_at is not None or source.e2ee is not None:
+    source = await session.get(
+        Message, (source_id, source_domain), with_for_update={"read": True}, populate_existing=True
+    )
+    if (
+        source is None
+        or source.deleted_at is not None
+        or source.safety_state
+        or source.e2ee is not None
+    ):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
     source_channel = await session.get(Channel, (source.channel_id, source.channel_domain))
     if (
@@ -2005,6 +2028,8 @@ async def validate_dm_forward_source_proof(
     if proof["source_nsfw"] is not content.get("forward_source_nsfw"):
         raise ValueError("DM forward source age context is inconsistent")
     raw_snapshot = raw_message.get("forward_snapshot")
+    if raw_snapshot is not None:
+        raw_snapshot = validate_forward_snapshot(raw_snapshot, federation=True)
     encrypted_forward = bool(
         isinstance(e2ee, dict)
         and "rich_payload_digest" in e2ee
@@ -2038,7 +2063,9 @@ async def validate_dm_forward_source_proof(
         ):
             raise ValueError("encrypted DM forward source proof is inconsistent")
     elif proof["source_encryption_mode"] == "plaintext":
-        if raw_snapshot != proof["source_snapshot"]:
+        if not matches_attested_plaintext_forward(
+            proof["source_snapshot"], raw_snapshot, raw_message.get("attachments")
+        ):
             raise ValueError("plaintext DM forward source proof is inconsistent")
     else:
         if raw_snapshot is None:
@@ -2599,7 +2626,7 @@ async def federation_keys(
     return {
         "server_name": settings.domain,
         "display_name": instance.display_name,
-        "software_version": "0.1.0",
+        "software_version": settings.software_version,
         "current_key_id": instance.current_key_id,
         "verify_keys": current,
         "old_verify_keys": old,
@@ -4742,9 +4769,21 @@ async def process_event(
                             )
                             if actor_profile is None:
                                 raise ValueError("group DM actor profile is missing")
-                            actor = await upsert_remote_user(session, settings, actor_profile)
+                            actor = await resolve_delegated_profile(
+                                session,
+                                settings,
+                                actor_profile,
+                                authority_origin=envelope.origin,
+                                participant_reference=True,
+                            )
                         for invitee_profile in added_local_profiles:
-                            invitee = await upsert_remote_user(session, settings, invitee_profile)
+                            invitee = await resolve_delegated_profile(
+                                session,
+                                settings,
+                                invitee_profile,
+                                authority_origin=envelope.origin,
+                                participant_reference=True,
+                            )
                             await require_group_invite_friend(session, actor, invitee)
                 created_dm_channel = await replicate_conversation(
                     session, settings, raw_conversation, profiles
@@ -4775,6 +4814,7 @@ async def process_event(
                         database_snowflake(envelope.actor.id, "group DM notice actor id"),
                         envelope.actor.domain,
                     ),
+                    participant_profiles=tuple(profiles),
                     initial_snapshot=existing_group is None,
                     event_timestamp_ms=envelope.ts,
                 )
@@ -5997,7 +6037,11 @@ async def process_event(
                 if (
                     forward_proof["source_encryption_mode"] == "plaintext"
                     and proxy_request.forward_snapshot is not None
-                    and proxy_request.forward_snapshot != forward_proof["source_snapshot"]
+                    and not matches_attested_plaintext_forward(
+                        forward_proof["source_snapshot"],
+                        proxy_request.forward_snapshot,
+                        proxy_request.attachments,
+                    )
                 ):
                     raise ValueError("proxy forward source proof is inconsistent")
                 if (
@@ -8774,10 +8818,13 @@ async def federation_forward_source_authorize(
         if participant is None:
             raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
     source_ref = payload.source_message_ref.resolve(settings.domain)
-    source = await session.get(Message, source_ref)
+    source = await session.get(
+        Message, source_ref, with_for_update={"read": True}, populate_existing=True
+    )
     if (
         source is None
         or source.deleted_at is not None
+        or source.safety_state
         or (source.channel_id, source.channel_domain) != (channel.id, channel.origin_domain)
     ):
         raise HTTPException(status_code=404, detail={"code": "MESSAGE_NOT_FOUND"})
@@ -8863,10 +8910,13 @@ async def federation_dm_forward_resolve(
     if participant is None:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_DM_HISTORY_FORBIDDEN"})
     source_ref = payload.source_message_ref.resolve(settings.domain)
-    source = await session.get(Message, source_ref)
+    source = await session.get(
+        Message, source_ref, with_for_update={"read": True}, populate_existing=True
+    )
     if (
         source is None
         or source.deleted_at is not None
+        or source.safety_state
         or source.e2ee is not None
         or source.origin_domain == principal.origin
         or (source.channel_id, source.channel_domain)
@@ -8903,6 +8953,7 @@ async def federation_dm_history_page(
     limit: int = Query(default=50, ge=1, le=100),
     requester_id: int | None = Query(default=None, ge=0, le=MAX_SNOWFLAKE),
     requester_domain: str | None = Query(default=None, min_length=1, max_length=253),
+    history_nonce: Annotated[str | None, Query(pattern=r"^[A-Za-z0-9_-]{32}$")] = None,
     principal: FederationPrincipal = Depends(authenticate_federation),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
@@ -8996,6 +9047,8 @@ async def federation_dm_history_page(
         {(message.id, message.origin_domain) for message in selected},
         viewer=requester,
     )
+    attest = conversation.type == "group" and history_nonce is not None and requester_id is not None
+    page_limit = MAX_DM_HISTORY_RESPONSE_BYTES - (2048 if attest else 0)
     rendered: list[dict[str, object]] = []
     for message in selected:
         author = authors.get((message.author_id, message.author_domain))
@@ -9026,7 +9079,7 @@ async def federation_dm_history_page(
             },
             "complete": False,
         }
-        if len(canonical_json(probe)) > MAX_DM_HISTORY_RESPONSE_BYTES:
+        if len(canonical_json(probe)) > page_limit:
             if not rendered:
                 raise HTTPException(
                     status_code=413,
@@ -9067,6 +9120,14 @@ async def federation_dm_history_page(
         ),
     )
     _strip_terminal_attachments(rendered, terminal_refs)
+    if attest and history_nonce is not None and requester_id is not None:
+        result["group_history_proof"] = await sign_group_history_page(
+            session,
+            settings,
+            result,
+            history_nonce,
+            (requester_id, principal.origin),
+        )
     if conversation.type == "group" or disclosed or terminal_wakes:
         await session.commit()
     for destination in terminal_wakes:
@@ -9087,6 +9148,8 @@ async def _federation_media_attachment(
     requester: tuple[int, str] | None = None,
 ) -> Attachment:
     """Authorize media and optionally bind it to an exact DM history assertion."""
+
+    from app.safety.media_access import safety_blocked
 
     if variant not in {"original", "thumbnail_128", "thumbnail_512", "thumbnail_1024", "poster"}:
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
@@ -9112,7 +9175,7 @@ async def _federation_media_attachment(
         if message is not None
         else None
     )
-    if message is None or message.deleted_at is not None or channel is None:
+    if message is None or message.deleted_at is not None or message.safety_state or channel is None:
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
     require_channel_federation_access(principal, channel)
     conversation = (
@@ -9149,9 +9212,8 @@ async def _federation_media_attachment(
     else:
         guild = await session.get(Guild, (channel.guild_id, channel.guild_domain))
         if guild is not None:
-            visible_channels = await cached_visible_guild_channels_for_origin(
+            visible_channels = await visible_guild_channels_for_origin(
                 session,
-                redis,
                 guild,
                 principal.origin,
             )
@@ -9215,7 +9277,12 @@ async def _federation_media_attachment(
         .with_for_update(read=True)
         .execution_options(populate_existing=True)
     )
-    if refreshed_message is None or refreshed_message.deleted_at is not None:
+    if (
+        refreshed_message is None
+        or refreshed_message.deleted_at is not None
+        or refreshed_message.safety_state
+        or await safety_blocked(session, {f"{attachment_id}@{settings.domain}"})
+    ):
         raise HTTPException(status_code=404, detail={"code": "KAED_MEDIA_NOT_FOUND"})
     refreshed_channel = await session.get(
         Channel,
@@ -9256,9 +9323,8 @@ async def _federation_media_attachment(
         )
         reauthorized = False
         if refreshed_guild is not None:
-            visible_channels = await cached_visible_guild_channels_for_origin(
+            visible_channels = await visible_guild_channels_for_origin(
                 session,
-                redis,
                 refreshed_guild,
                 principal.origin,
             )
@@ -9461,8 +9527,41 @@ async def federation_group_dm_authorize(
     )
     if not direct_inviter_request and not authority_request:
         raise HTTPException(status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"})
-    inviter = await upsert_remote_user(session, settings, payload.inviter)
-    invitee = await upsert_remote_user(session, settings, payload.invitee)
+    if not direct_inviter_request:
+        if payload.inviter_intent is None:
+            raise HTTPException(status_code=403, detail={"code": "GROUP_DM_INVITER_PROOF_REQUIRED"})
+        try:
+            await validate_human_actor_intent(
+                session,
+                settings,
+                payload.inviter_intent,
+                expected_action="dm.group.invite",
+                expected_audience=settings.domain,
+                expected_actor_ref=(int(payload.inviter.id), payload.inviter.origin_domain),
+                expected_resources={
+                    "conversation": f"{payload.conversation_id}@{principal.origin}",
+                    "invitee": f"{payload.invitee.id}@{settings.domain}",
+                },
+                redis=redis,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=403, detail={"code": "KAED_FED_AUTHOR_ORIGIN_MISMATCH"}
+            ) from exc
+    inviter = await resolve_delegated_profile(
+        session,
+        settings,
+        payload.inviter,
+        authority_origin=principal.origin,
+        participant_reference=True,
+    )
+    invitee = await resolve_delegated_profile(
+        session,
+        settings,
+        payload.invitee,
+        authority_origin=principal.origin,
+        participant_reference=True,
+    )
     if invitee.origin_domain != settings.domain or not invitee.is_local:
         raise HTTPException(status_code=400, detail={"code": "KAED_GROUP_DM_INVITEE_NOT_LOCAL"})
     await require_group_invite_friend(session, inviter, invitee)
@@ -9477,12 +9576,15 @@ async def authorize_group_invitee_at_home(
     conversation: DMConversation,
     actor: User,
     target: User,
+    inviter_intent: dict[str, Any] | None,
 ) -> None:
     """Require the invitee's home to confirm a cross-origin group invitation."""
 
     if target.origin_domain == settings.domain:
         await require_group_invite_friend(session, actor, target)
         return
+    if actor.origin_domain != settings.domain and inviter_intent is None:
+        raise HTTPException(status_code=409, detail={"code": "GROUP_DM_INVITER_PROOF_REQUIRED"})
     try:
         authorization = await signed_request(
             session,
@@ -9495,10 +9597,14 @@ async def authorize_group_invitee_at_home(
                 "conversation_domain": conversation.origin_domain,
                 "inviter": profile_from_user(actor),
                 "invitee": profile_from_user(target),
+                **({"inviter_intent": inviter_intent} if inviter_intent is not None else {}),
             },
+            required_capability="dm-group-inviter-proof/1" if inviter_intent is not None else None,
             request_timeout=8,
             max_response_bytes=16 * 1024,
         )
+    except UnsupportedFederationCapability as exc:
+        raise unsupported_group_invite_proof(target.origin_domain) from exc
     except FederationNetworkError as exc:
         raise HTTPException(
             status_code=503,
@@ -9529,7 +9635,13 @@ async def federation_group_dm_mutate(
         raise HTTPException(status_code=409, detail={"code": "KAED_GROUP_DM_WRONG_AUTHORITY"})
     actor = await upsert_remote_user(session, settings, payload.actor)
     target = (
-        await upsert_remote_user(session, settings, payload.target)
+        await resolve_delegated_profile(
+            session,
+            settings,
+            payload.target,
+            authority_origin=principal.origin,
+            participant_reference=True,
+        )
         if payload.target is not None
         else None
     )
@@ -9548,7 +9660,30 @@ async def federation_group_dm_mutate(
             unlocked_conversation,
             actor,
             target,
+            payload.inviter_intent,
         )
+        if (
+            payload.target is not None
+            and target.origin_domain != settings.domain
+            and not target.profile_resolved
+        ):
+            # Membership notices are reproduced from names even on older peers.
+            # Learn the invitee's real handle from their home before emitting one.
+            resolved = await resolve_handle(
+                session,
+                settings,
+                redis,
+                f"{actor.id}@{actor.origin_domain}",
+                f"{payload.target.username}@{target.origin_domain}",
+            )
+            if (resolved.id, resolved.origin_domain) != (
+                target.id,
+                target.origin_domain,
+            ) or not resolved.profile_resolved:
+                raise HTTPException(
+                    status_code=409, detail={"code": "FEDERATION_IDENTITY_MISMATCH"}
+                )
+            target = resolved
     if payload.action != "leave":
         await require_remote_user_creation_allowed(session, actor)
     if payload.action == "add" and target is not None:
@@ -10362,7 +10497,10 @@ async def visible_guild_channels_for_origin(
     loaded_roles: list[Role] | None = None,
     loaded_channels: list[Channel] | None = None,
 ) -> list[Channel]:
-    """Return origin-visible channels using a bounded, bulk-loaded permission graph."""
+    """Authorize each snapshot against current thread membership and bot grants.
+
+    These grants can change independently of guild snapshot generations.
+    """
 
     channels = loaded_channels
     if channels is None:
@@ -10399,9 +10537,13 @@ async def visible_guild_channels_for_origin(
     elif len(roles) > MAX_SNAPSHOT_VISIBILITY_ROLES:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
 
-    origin_members = list(
-        await session.scalars(
-            select(GuildMember)
+    member_rows = (
+        await session.execute(
+            select(GuildMember, User.account_type, User.disabled_at)
+            .join(
+                User,
+                (User.id == GuildMember.user_id) & (User.origin_domain == GuildMember.user_domain),
+            )
             .where(
                 GuildMember.guild_id == guild.id,
                 GuildMember.guild_domain == guild.origin_domain,
@@ -10409,7 +10551,8 @@ async def visible_guild_channels_for_origin(
             )
             .limit(MAX_SNAPSHOT_VISIBILITY_MEMBERS + 1)
         )
-    )
+    ).all()
+    origin_members = [member for member, _, _ in member_rows]
     if len(origin_members) > MAX_SNAPSHOT_VISIBILITY_MEMBERS:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     if len(channels) * len(origin_members) > MAX_SNAPSHOT_VISIBILITY_CHECKS:
@@ -10442,6 +10585,47 @@ async def visible_guild_channels_for_origin(
     if len(overwrite_rows) > MAX_SNAPSHOT_VISIBILITY_OVERWRITES:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
 
+    bot_ids = {member.user_id for member, account_type, _ in member_rows if account_type == "bot"}
+    enabled_bot_ids = {
+        member.user_id
+        for member, account_type, disabled_at in member_rows
+        if account_type == "bot" and disabled_at is None
+    }
+    bot_grants: dict[int, BotInstallation | None] = {}
+    if enabled_bot_ids:
+        installations = list(
+            await session.scalars(
+                active_guild_installations_statement(guild)
+                .where(
+                    BotInstallation.bot_user_domain == origin,
+                    BotInstallation.bot_user_id.in_(enabled_bot_ids),
+                )
+                .limit(MAX_SNAPSHOT_VISIBILITY_MEMBERS + 1)
+            )
+        )
+        if len(installations) > MAX_SNAPSHOT_VISIBILITY_MEMBERS:
+            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+        for install in installations:
+            bot_grants[install.bot_user_id] = None if install.bot_user_id in bot_grants else install
+    private_thread_ids = [channel.id for channel in channels if channel.type == 12]
+    private_thread_members: set[tuple[int, int]] = set()
+    if private_thread_ids:
+        thread_members = list(
+            await session.scalars(
+                select(ThreadMember)
+                .where(
+                    ThreadMember.guild_id == guild.id,
+                    ThreadMember.guild_domain == guild.origin_domain,
+                    ThreadMember.thread_domain == guild.origin_domain,
+                    ThreadMember.thread_id.in_(private_thread_ids),
+                    ThreadMember.user_domain == origin,
+                )
+                .limit(MAX_SNAPSHOT_VISIBILITY_CHECKS + 1)
+            )
+        )
+        if len(thread_members) > MAX_SNAPSHOT_VISIBILITY_CHECKS:
+            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
+        private_thread_members = {(item.thread_id, item.user_id) for item in thread_members}
     roles_by_ref = {(role.id, role.origin_domain): role for role in roles}
     role_refs_by_member: dict[tuple[int, str], set[tuple[int, str]]] = {}
     for member_role in member_role_rows:
@@ -10487,35 +10671,31 @@ async def visible_guild_channels_for_origin(
             )
         )
     visibility_work = 0
-    for channel in channels:
-        permission_channel = channel
-        if channel.parent_id is not None and channel.permissions_synced:
-            parent = channels_by_ref.get((channel.parent_id, str(channel.parent_domain)))
-            if parent is None or parent.type != 4:
-                raise HTTPException(status_code=409, detail={"code": "CHANNEL_PARENT_INVALID"})
-            permission_channel = parent
-        visibility_work += len(origin_members) * (
-            1
-            + 3
-            * len(
-                overwrites_by_channel.get(
-                    (permission_channel.id, permission_channel.origin_domain), []
-                )
-            )
-        )
-        if visibility_work > MAX_SNAPSHOT_VISIBILITY_CHECKS:
-            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
     visible: list[Channel] = []
     for channel in channels:
         permission_channel = channel
-        if channel.parent_id is not None and channel.permissions_synced:
-            parent = channels_by_ref.get((channel.parent_id, str(channel.parent_domain)))
+        if channel.type in {10, 11, 12}:
+            parent = (
+                channels_by_ref.get((channel.parent_id, channel.parent_domain))
+                if channel.parent_id is not None and channel.parent_domain is not None
+                else None
+            )
+            if parent is None or parent.type not in {0, 5, 15}:
+                continue
+            permission_channel = parent
+        if permission_channel.parent_id is not None and permission_channel.permissions_synced:
+            parent = channels_by_ref.get(
+                (permission_channel.parent_id, str(permission_channel.parent_domain))
+            )
             if parent is None or parent.type != 4:
-                raise HTTPException(status_code=409, detail={"code": "CHANNEL_PARENT_INVALID"})
+                continue
             permission_channel = parent
         channel_overwrites = overwrites_by_channel.get(
             (permission_channel.id, permission_channel.origin_domain), []
         )
+        visibility_work += len(origin_members) * (1 + 3 * len(channel_overwrites))
+        if visibility_work > MAX_SNAPSHOT_VISIBILITY_CHECKS:
+            raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
         for member, member_ref, role_refs, base_permissions in member_permission_inputs:
             permissions = resolve_permissions(
                 owner=member_ref == (guild.owner_id, guild.owner_domain),
@@ -10530,17 +10710,26 @@ async def visible_guild_channels_for_origin(
                 timed_out=member.timeout_indefinite
                 or (member.timeout_until is not None and member.timeout_until > now),
             )
-            if permissions & Permission.VIEW_CHANNEL:
-                visible.append(channel)
-                break
+            if not permissions & Permission.VIEW_CHANNEL:
+                continue
+            if (
+                channel.type == 12
+                and not permissions & Permission.MANAGE_THREADS
+                and (channel.id, member.user_id) not in private_thread_members
+            ):
+                continue
+            if member.user_id in bot_ids:
+                grant = bot_grants.get(member.user_id)
+                if grant is None or not await channel_restrictions_allow(
+                    session,
+                    grant.channel_restrictions or [],
+                    channel,
+                    loaded_channels=channels_by_ref,
+                ):
+                    continue
+            visible.append(channel)
+            break
     return visible
-
-
-def guild_visibility_cache_key(guild: Guild, origin: str) -> str:
-    return (
-        f"federation:snapshot-visible:{origin}:{guild.origin_domain}:{guild.id}:"
-        f"{guild.permission_generation}:{guild.snapshot_generation}"
-    )
 
 
 def _guild_snapshot_cursor_changed(
@@ -10556,57 +10745,6 @@ def _guild_snapshot_cursor_changed(
         # Legacy peers invalidate on any event, including an ordinary message.
         return requested_seq != current_seq
     return requested_generation != current_generation
-
-
-async def cached_visible_guild_channels_for_origin(
-    session: AsyncSession,
-    redis: Redis,
-    guild: Guild,
-    origin: str,
-    *,
-    loaded_roles: list[Role] | None = None,
-) -> list[Channel]:
-    cache_key = guild_visibility_cache_key(guild, origin)
-    cached_channel_ids: list[int] | None = None
-    cached_visibility = await redis.get(cache_key)
-    if isinstance(cached_visibility, (str, bytes)):
-        try:
-            raw_ids = json.loads(cached_visibility)
-            if (
-                isinstance(raw_ids, list)
-                and len(raw_ids) <= MAX_SNAPSHOT_VISIBILITY_CHANNELS
-                and all(isinstance(item, int) and not isinstance(item, bool) for item in raw_ids)
-            ):
-                cached_channel_ids = raw_ids
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-    if cached_channel_ids is None:
-        channels = await visible_guild_channels_for_origin(
-            session,
-            guild,
-            origin,
-            loaded_roles=loaded_roles,
-        )
-        await redis.set(
-            cache_key,
-            json.dumps([channel.id for channel in channels], separators=(",", ":")),
-            ex=300,
-        )
-        return channels
-    if not cached_channel_ids:
-        return []
-    cached_channels = list(
-        await session.scalars(
-            select(Channel).where(
-                Channel.guild_id == guild.id,
-                Channel.guild_domain == guild.origin_domain,
-                Channel.unavailable.is_(False),
-                Channel.id.in_(cached_channel_ids),
-            )
-        )
-    )
-    by_id = {channel.id: channel for channel in cached_channels}
-    return [by_id[channel_id] for channel_id in cached_channel_ids if channel_id in by_id]
 
 
 @router.post("/_kaede/v1/guilds/{guild_id}/history-exports")
@@ -10924,9 +11062,8 @@ async def federation_guild_snapshot(
     )
     if len(roles) > MAX_SNAPSHOT_VISIBILITY_ROLES:
         raise HTTPException(status_code=429, detail={"code": "KAED_FED_SNAPSHOT_WORK_LIMIT"})
-    channels = await cached_visible_guild_channels_for_origin(
+    channels = await visible_guild_channels_for_origin(
         session,
-        redis,
         guild,
         principal.origin,
         loaded_roles=roles,
@@ -11093,9 +11230,8 @@ async def federation_tracker_snapshot(
     # an existence oracle. Require a current member hosted by that origin
     # before evaluating the origin-union channel permission graph.
     await require_origin_guild_member(session, guild, principal.origin)
-    visible_channels = await cached_visible_guild_channels_for_origin(
+    visible_channels = await visible_guild_channels_for_origin(
         session,
-        redis,
         guild,
         principal.origin,
     )
@@ -11305,15 +11441,15 @@ async def federation_guild_events(
         )
     visible_channel_refs = {
         (channel.id, channel.origin_domain)
-        for channel in await cached_visible_guild_channels_for_origin(
+        for channel in await visible_guild_channels_for_origin(
             session,
-            redis,
             guild,
             principal.origin,
         )
     }
     rendered_events: list[dict[str, object]] = []
     owner: User | None = None
+    supports_decimal_volume: bool | None = None
     for event in events:
         envelope = event.envelope
         event_type = str(envelope.get("type", ""))
@@ -11323,7 +11459,14 @@ async def federation_guild_events(
             and channel_ref not in visible_channel_refs
             and event_type != "guild.channel.delete"
         )
-        if not hidden_channel_event:
+        unsupported_volume = False
+        if guild_event_uses_decimal_volume(event_type, envelope.get("content", {})):
+            if supports_decimal_volume is None:
+                supports_decimal_volume = await peer_advertises(
+                    session, principal.origin, SOUNDBOARD_DECIMAL_VOLUME_CAPABILITY
+                )
+            unsupported_volume = not supports_decimal_volume
+        if not hidden_channel_event and not unsupported_volume:
             rendered_events.append(envelope)
             continue
         if owner is None:
@@ -11628,7 +11771,9 @@ async def federation_guild_proxy(
         if (
             forward_proof["source_encryption_mode"] == "plaintext"
             and payload.forward_snapshot is not None
-            and payload.forward_snapshot != forward_proof["source_snapshot"]
+            and not matches_attested_plaintext_forward(
+                forward_proof["source_snapshot"], payload.forward_snapshot, payload.attachments
+            )
         ):
             raise HTTPException(
                 status_code=409,
@@ -12156,7 +12301,7 @@ async def federation_guild_proxy(
     await enqueue_best_effort(mentions_fanout, *message_ref)
     for destination in remote_destinations:
         await enqueue_best_effort(federation_deliver, destination)
-    return {"message": rendered, "seq": str(seq), "event": committed}
+    return {"message": rendered_for_federation, "seq": str(seq), "event": committed}
 
 
 async def _announcement_federation_actor(

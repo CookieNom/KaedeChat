@@ -22,6 +22,7 @@ import 'package:kaede_mobile/src/domain/guild_admin.dart';
 import 'package:kaede_mobile/src/domain/guild_navigation.dart';
 import 'package:kaede_mobile/src/domain/message_permissions.dart';
 import 'package:kaede_mobile/src/domain/models.dart';
+import 'package:kaede_mobile/src/domain/presence_control.dart';
 import 'package:kaede_mobile/src/domain/reaction_emoji.dart';
 import 'package:kaede_mobile/src/domain/reaction_management.dart';
 import 'package:kaede_mobile/src/domain/rich_content.dart';
@@ -515,6 +516,7 @@ final class MobileState {
     this.visitReadInclusive = false,
     this.outbox = const <OutboxItem>[],
     this.presencePreference = PresenceStatus.online,
+    this.presenceState,
     this.themePreference = KaedeThemePreference.system,
     this.localePreference = 'en-US',
     this.developerMode = false,
@@ -565,6 +567,7 @@ final class MobileState {
   final bool visitReadInclusive;
   final List<OutboxItem> outbox;
   final PresenceStatus presencePreference;
+  final PresenceControlState? presenceState;
   final KaedeThemePreference themePreference;
   final String localePreference;
   final bool developerMode;
@@ -677,6 +680,7 @@ final class MobileState {
     bool clearVisitReadPosition = false,
     List<OutboxItem>? outbox,
     PresenceStatus? presencePreference,
+    PresenceControlState? presenceState,
     KaedeThemePreference? themePreference,
     String? localePreference,
     bool? developerMode,
@@ -735,6 +739,7 @@ final class MobileState {
             : visitReadPosition ?? this.visitReadPosition,
         outbox: outbox ?? this.outbox,
         presencePreference: presencePreference ?? this.presencePreference,
+        presenceState: presenceState ?? this.presenceState,
         themePreference: themePreference ?? this.themePreference,
         localePreference: localePreference ?? this.localePreference,
         developerMode: developerMode ?? this.developerMode,
@@ -939,11 +944,21 @@ final class MobileController extends StateNotifier<MobileState> {
   StreamSubscription<GatewayEvent>? _gatewaySubscription;
   StreamSubscription<GatewayHealth>? _gatewayHealthSubscription;
   StreamSubscription<String>? _pushTokenSubscription;
+  StreamSubscription<void>? _voipTokenSubscription;
   StreamSubscription<PushDestination>? _pushDestinationSubscription;
   StreamSubscription<SystemCallEvent>? _pushCallSubscription;
   StreamSubscription<String?>? _pushHealthSubscription;
   StreamSubscription<void>? _relationshipPushSubscription;
-  StreamSubscription<SystemCallEvent>? _systemCallSubscription;
+  EntityRef? _acceptedLocalCall;
+  Future<void> Function(EntityRef)? leaveNativeCall;
+  bool isLocallyAccepted(EntityRef call) => _acceptedLocalCall == call;
+
+  void localCallEnded(EntityRef call) {
+    if (_acceptedLocalCall == call) _acceptedLocalCall = null;
+    unawaited(systemCalls.end(call.wire));
+    unawaited(push.dismissCall(call.wire));
+  }
+
   StreamSubscription<void>? _sessionExpiredSubscription;
   Timer? _outboxTimer;
   Timer? _appLockTimer;
@@ -954,6 +969,10 @@ final class MobileController extends StateNotifier<MobileState> {
   Timer? _selfModerationExpiryTimer;
   Timer? _selfModerationRetryTimer;
   String? _pushDeviceId;
+  RelayPushState? _enrolledRelay;
+  Future<void>? _relayStateWrite;
+  var _pushSessionClosing = false;
+  var _pushPreferenceGeneration = 0;
   String? _pushRegistrationWarning;
   String? _pushRemoteDeliveryWarning;
   String? _pushLocalDisplayWarning;
@@ -1867,8 +1886,22 @@ final class MobileController extends StateNotifier<MobileState> {
       final tokens = await api.restore();
       if (authenticationGeneration != _authenticationGeneration) return;
       if (tokens == null) {
+        try {
+          await systemCalls.reset();
+          await api.clearRelayPushState();
+        } on Object {
+          // Retry stale native state removal at the next signed-out launch.
+        }
+        if (authenticationGeneration != _authenticationGeneration) return;
         state = state.copyWith(phase: SessionPhase.signedOut);
         return;
+      }
+      try {
+        final relay = await api.relayPushState();
+        if (authenticationGeneration != _authenticationGeneration) return;
+        _enrolledRelay = relay;
+      } on Object {
+        // A push registration can be renewed after the login is restored.
       }
       final preferences = await SharedPreferences.getInstance();
       if (authenticationGeneration != _authenticationGeneration) return;
@@ -1890,6 +1923,8 @@ final class MobileController extends StateNotifier<MobileState> {
         return;
       }
       if (error is KaedeException && error.status == 401) {
+        _pushSessionClosing = true;
+        await _clearPushRegistration();
         final accountRef = state.user?.ref.wire ?? tokens?.userRef?.wire;
         await _discardAccountEncryption(accountRef);
         await api.clearTokens();
@@ -1921,6 +1956,10 @@ final class MobileController extends StateNotifier<MobileState> {
       );
       if (state.user != null) {
         state = state.copyWith(phase: SessionPhase.ready, clearError: true);
+        final account = api.tokens?.accountKey;
+        if (account != null) {
+          await _startSystemCalls(account, _sessionLoadGeneration);
+        }
         unawaited(_flushOutbox());
         return;
       }
@@ -1985,6 +2024,7 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _loadSession(SessionTokens tokens) async {
+    _pushSessionClosing = false;
     final generation = ++_sessionLoadGeneration;
     _messageRequestGenerations.clear();
     _latestReceivedMessages.clear();
@@ -2057,10 +2097,14 @@ final class MobileController extends StateNotifier<MobileState> {
         : const <String, bool>{};
     final guildNotificationLevels =
         decodeGuildNotificationLevels(guildSettings);
-    final presence = PresenceStatus.values.firstWhere(
-      (value) => value.name == '${settings['presence_preference'] ?? 'online'}',
-      orElse: () => PresenceStatus.online,
-    );
+    final presenceState =
+        PresenceControlState.tryParse(settings['presence_state']);
+    final presence = presenceState?.effectiveStatus ??
+        PresenceStatus.values.firstWhere(
+          (value) =>
+              value.name == '${settings['presence_preference'] ?? 'online'}',
+          orElse: () => PresenceStatus.online,
+        );
     final badges = _decodeReadSnapshot(readStates);
     final outbox = await database.outboxForAccount(resolved.accountKey);
     final drafts = _decodeDrafts(
@@ -2099,6 +2143,7 @@ final class MobileController extends StateNotifier<MobileState> {
       selectedChannel: initial?.ref,
       relationships: relationships,
       presencePreference: presence,
+      presenceState: presenceState,
       themePreference: parseThemePreference(settings['theme']),
       localePreference: normalizeLanguage(settings['locale']),
       developerMode: parseDeveloperMode(rawNotifications),
@@ -2145,6 +2190,8 @@ final class MobileController extends StateNotifier<MobileState> {
     int generation,
   ) async {
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    await _startSystemCalls(accountKey, generation);
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     await _gatewaySubscription?.cancel();
     await _gatewayHealthSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
@@ -2167,6 +2214,10 @@ final class MobileController extends StateNotifier<MobileState> {
     );
     await _pushTokenSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    await _voipTokenSubscription?.cancel();
+    if (!_sessionReadyIsCurrent(accountKey, generation)) return;
+    _voipTokenSubscription =
+        push.voipTokenChanges.listen((_) => unawaited(_registerPushDevice()));
     _pushTokenSubscription = push.tokenRefresh.listen(
       (token) => unawaited(_registerPushDevice(token: token)),
     );
@@ -2187,11 +2238,7 @@ final class MobileController extends StateNotifier<MobileState> {
     await _pushHealthSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
     _pushHealthSubscription = push.health.listen(_setPushRemoteDeliveryWarning);
-    await _systemCallSubscription?.cancel();
     if (!_sessionReadyIsCurrent(accountKey, generation)) return;
-    _systemCallSubscription = systemCalls.events.listen(
-      (event) => unawaited(_onSystemCallAction(event)),
-    );
     if (push.consumeInitialDestination() case final destination?) {
       unawaited(openPushDestination(destination));
     }
@@ -2893,15 +2940,20 @@ final class MobileController extends StateNotifier<MobileState> {
     final notifications = rawNotifications is Map<Object?, Object?>
         ? rawNotifications.map((key, value) => MapEntry('$key', value == true))
         : state.notificationSettings;
-    final presence = PresenceStatus.values.firstWhere(
-      (value) =>
-          value.name ==
-          '${settings['presence_preference'] ?? state.presencePreference.name}',
-      orElse: () => state.presencePreference,
-    );
+    final presenceState =
+        PresenceControlState.tryParse(settings['presence_state']) ??
+            state.presenceState;
+    final presence = presenceState?.effectiveStatus ??
+        PresenceStatus.values.firstWhere(
+          (value) =>
+              value.name ==
+              '${settings['presence_preference'] ?? state.presencePreference.name}',
+          orElse: () => state.presencePreference,
+        );
     state = state.copyWith(
       notificationSettings: notifications,
       presencePreference: presence,
+      presenceState: presenceState,
       themePreference: parseThemePreference(
         settings['theme'] ?? state.themePreference.name,
       ),
@@ -3009,14 +3061,20 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
-  Future<void> setPresence(PresenceStatus presence) async {
+  Future<void> setPresence(
+    PresenceStatus presence, {
+    int? durationMinutes,
+    bool includeDuration = false,
+  }) async {
     final previous = state.presencePreference;
     state = state.copyWith(presencePreference: presence, clearError: true);
-    gateway.updatePresence(presence.name);
     try {
-      final settings = await repository.updateSettings(
-        <String, Object?>{'presence_preference': presence.name},
-      );
+      final body = <String, Object?>{
+        'presence_preference': presence.name,
+        if (includeDuration || durationMinutes != null)
+          'presence_duration_minutes': durationMinutes,
+      };
+      final settings = await repository.updateSettings(body);
       applySettings(settings);
       _scheduleMetadataCache(const <String>{'preferences'});
     } on Object catch (error) {
@@ -3024,7 +3082,66 @@ final class MobileController extends StateNotifier<MobileState> {
         presencePreference: previous,
         error: _message(error),
       );
-      gateway.updatePresence(previous.name);
+    }
+  }
+
+  Future<void> skipActivePresenceSchedule() async {
+    applySettings(await repository.updateSettings(
+      const <String, Object?>{'presence_skip_active_schedule': true},
+    ));
+    _scheduleMetadataCache(const <String>{'preferences'});
+  }
+
+  Future<void> resetPresenceOverride() async {
+    try {
+      final settings = await repository.updateSettings(
+        const <String, Object?>{'presence_reset_override': true},
+      );
+      applySettings(settings);
+      _scheduleMetadataCache(const <String>{'preferences'});
+    } on Object catch (error) {
+      state = state.copyWith(error: _message(error));
+    }
+  }
+
+  Future<void> updatePresenceSchedules(
+    List<PresenceScheduleRule> previous,
+    List<PresenceScheduleRule> schedules,
+  ) =>
+      _savePresenceSettings({
+        'expected_presence_schedules':
+            previous.map((rule) => rule.toJson()).toList(growable: false),
+        'presence_schedules':
+            schedules.map((rule) => rule.toJson()).toList(growable: false),
+      });
+
+  Future<void> updatePresenceTimezone(String timezone) =>
+      _savePresenceSettings({'presence_timezone': timezone});
+
+  Future<void> _savePresenceSettings(Map<String, Object?> patch) async {
+    final account = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (account == null || !_sessionReadyIsCurrent(account, generation)) return;
+    try {
+      final settings = await repository.updateSettings(patch);
+      if (!_sessionReadyIsCurrent(account, generation)) return;
+      applySettings(settings);
+      _scheduleMetadataCache(const <String>{'preferences'});
+    } on KaedeException catch (error) {
+      if (error.code != 'PRESENCE_SCHEDULES_CHANGED') rethrow;
+      if (!_sessionReadyIsCurrent(account, generation)) return;
+      final Map<String, Object?> latest;
+      try {
+        latest = await repository.settings();
+      } on KaedeException {
+        throw const UserInputException(
+            'Your schedules changed on another device. The latest schedules could not be loaded. Check your connection and try again.');
+      }
+      if (!_sessionReadyIsCurrent(account, generation)) return;
+      applySettings(latest);
+      _scheduleMetadataCache(const <String>{'preferences'});
+      throw const UserInputException(
+          'Your schedules changed on another device. Review the latest schedules and try again.');
     }
   }
 
@@ -3371,6 +3488,11 @@ final class MobileController extends StateNotifier<MobileState> {
         after: newer && existing.isNotEmpty ? existing.last.ref : null,
         around: around,
       );
+      final hasMoreAfterAnchor = around != null &&
+          page.isNotEmpty &&
+          (await repository.messages(channelRef,
+                  after: page.first.ref, limit: 1))
+              .isNotEmpty;
       if (!_messageRequestIsCurrent(
         channelRef,
         generation,
@@ -3436,8 +3558,7 @@ final class MobileController extends StateNotifier<MobileState> {
           .toList();
       final withNewer = Set<EntityRef>.of(state.channelsWithNewerMessages);
       if (!older) {
-        if ((around != null && page.isNotEmpty) ||
-            (newer && page.length >= 50)) {
+        if (hasMoreAfterAnchor || (newer && page.length >= 50)) {
           withNewer.add(channelRef);
         } else {
           withNewer.remove(channelRef);
@@ -4141,6 +4262,7 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> logout() async {
+    _pushSessionClosing = true;
     _authenticationGeneration += 1;
     _sessionLoadGeneration += 1;
     _messageRequestGenerations.clear();
@@ -4154,64 +4276,70 @@ final class MobileController extends StateNotifier<MobileState> {
     _clearInteractionPresentation();
     final accountKey = api.tokens?.accountKey;
     final accountRef = state.user?.ref.wire ?? api.tokens?.userRef?.wire;
-    final pushDeviceId = _pushDeviceId;
-    if (pushDeviceId != null) {
-      try {
-        await repository.unregisterPushDevice(pushDeviceId);
-      } on Object {
-        // Explicit logout still clears the session when the server cannot be
-        // reached. An unreachable push token expires or can be disabled by FCM.
-      }
-    }
-    _pushDeviceId = null;
     _pushRegistrationWarning = null;
     _pushRemoteDeliveryWarning = null;
     _pushLocalDisplayWarning = null;
-    await _pushTokenSubscription?.cancel();
-    _pushTokenSubscription = null;
-    await _pushDestinationSubscription?.cancel();
-    _pushDestinationSubscription = null;
-    await _pushCallSubscription?.cancel();
-    _pushCallSubscription = null;
-    await _pushHealthSubscription?.cancel();
-    _pushHealthSubscription = null;
-    await _relationshipPushSubscription?.cancel();
-    _relationshipPushSubscription = null;
-    await _sessionExpiredSubscription?.cancel();
-    _sessionExpiredSubscription = null;
-    _outboxTimer?.cancel();
-    _outboxTimer = null;
-    _appLockTimer?.cancel();
-    _appLockTimer = null;
-    _typingExpiryTimer?.cancel();
-    _typingExpiryTimer = null;
-    _navigationRefreshTimer?.cancel();
-    _navigationRefreshTimer = null;
-    _metadataCacheTimer?.cancel();
-    _metadataCacheTimer = null;
-    _acknowledgementRetryTimer?.cancel();
-    _acknowledgementRetryTimer = null;
-    _selfModerationExpiryTimer?.cancel();
-    _selfModerationRetryTimer?.cancel();
-    _selfModerationExpiryTimer = null;
-    _pendingAcknowledgements.clear();
-    _acknowledgementsInFlight.clear();
-    await _gatewaySubscription?.cancel();
-    await _gatewayHealthSubscription?.cancel();
-    _gatewayHealthSubscription = null;
-    await gateway.disconnect();
-    await _discardAccountEncryption(accountRef);
     try {
-      await repository.logout();
+      await _sessionExpiredSubscription?.cancel();
+      _sessionExpiredSubscription = null;
+      await _pushTokenSubscription?.cancel();
+      _pushTokenSubscription = null;
+      await _voipTokenSubscription?.cancel();
+      _voipTokenSubscription = null;
+      await _pushDestinationSubscription?.cancel();
+      _pushDestinationSubscription = null;
+      await _pushCallSubscription?.cancel();
+      _pushCallSubscription = null;
+      await _pushHealthSubscription?.cancel();
+      _pushHealthSubscription = null;
+      await _relationshipPushSubscription?.cancel();
+      _relationshipPushSubscription = null;
+      await _clearSystemCalls();
+      await _clearPushRegistration();
+      _outboxTimer?.cancel();
+      _outboxTimer = null;
+      _appLockTimer?.cancel();
+      _appLockTimer = null;
+      _typingExpiryTimer?.cancel();
+      _typingExpiryTimer = null;
+      _navigationRefreshTimer?.cancel();
+      _navigationRefreshTimer = null;
+      _metadataCacheTimer?.cancel();
+      _metadataCacheTimer = null;
+      _acknowledgementRetryTimer?.cancel();
+      _acknowledgementRetryTimer = null;
+      _selfModerationExpiryTimer?.cancel();
+      _selfModerationRetryTimer?.cancel();
+      _selfModerationExpiryTimer = null;
+      _pendingAcknowledgements.clear();
+      _acknowledgementsInFlight.clear();
+      await _gatewaySubscription?.cancel();
+      await _gatewayHealthSubscription?.cancel();
+      _gatewayHealthSubscription = null;
+      await gateway.disconnect();
     } finally {
       try {
-        if (accountKey != null) {
-          await _queueCacheWrite(() => database.purgeAccount(accountKey));
-        }
+        await repository.logout();
       } finally {
-        _activeAccountKey = null;
-        state = const MobileState(phase: SessionPhase.signedOut);
+        await _finishSignOut(accountKey, accountRef);
       }
+    }
+  }
+
+  Future<void> _finishSignOut(String? accountKey, String? accountRef,
+      {String? error}) async {
+    try {
+      await Future.wait([
+        _discardAccountEncryption(accountRef),
+        if (accountKey != null)
+          _queueCacheWrite(() => database.purgeAccount(accountKey)),
+      ]);
+    } finally {
+      _activeAccountKey = null;
+      _pushRegistrationWarning = null;
+      _pushRemoteDeliveryWarning = null;
+      _pushLocalDisplayWarning = null;
+      state = MobileState(phase: SessionPhase.signedOut, error: error);
     }
   }
 
@@ -4318,6 +4446,7 @@ final class MobileController extends StateNotifier<MobileState> {
     SessionTokens tokens,
     int authenticationGeneration,
   ) async {
+    _pushSessionClosing = false;
     final generation = ++_sessionLoadGeneration;
     _messageRequestGenerations.clear();
     _latestReceivedMessages.clear();
@@ -4704,8 +4833,16 @@ final class MobileController extends StateNotifier<MobileState> {
       _catchUpRelationships();
       contentSafety.resetFreshAuthorizations();
       unawaited(reconcileContentSafety());
+      final parsedPresenceState =
+          PresenceControlState.tryParse(event.data['presence_state']);
       final preference = event.data['presence_preference'];
-      if (const {'online', 'idle', 'dnd', 'invisible'}.contains(preference)) {
+      if (parsedPresenceState != null) {
+        state = state.copyWith(
+          presencePreference: parsedPresenceState.effectiveStatus,
+          presenceState: parsedPresenceState,
+        );
+      } else if (const {'online', 'idle', 'dnd', 'invisible'}
+          .contains(preference)) {
         state = state.copyWith(presencePreference: _presence(preference));
       }
     }
@@ -5386,11 +5523,18 @@ final class MobileController extends StateNotifier<MobileState> {
         break;
       case 'CALL_ACCEPT':
         _scheduleNavigationRefresh();
-        applyCallUpdate(event.data, active: true);
+        if (event.data['acted_by_me'] != false) {
+          applyCallUpdate(event.data,
+              active: _acceptedLocalCall?.wire ==
+                  "${event.data['id']}@${event.data['authority_domain']}");
+        }
         break;
       case 'CALL_DECLINE' || 'CALL_END':
         _scheduleNavigationRefresh();
-        applyCallUpdate(event.data);
+        if (event.data['state'] == 'ended' ||
+            event.data['acted_by_me'] != false) {
+          applyCallUpdate(event.data);
+        }
         break;
       case 'USER_UPDATE':
         final relationship = event.data['relationship'];
@@ -5460,14 +5604,18 @@ final class MobileController extends StateNotifier<MobileState> {
           final accountPreference = _presence(
             event.data['preference'] ?? event.data['status'],
           );
+          final parsedPresenceState = user == state.user?.ref
+              ? PresenceControlState.tryParse(event.data['presence_state'])
+              : null;
           final presenceByUser = Map<EntityRef, PresenceStatus>.of(
             state.presenceByUser,
           )..[user] = visiblePresence;
           state = state.copyWith(
             presenceByUser: Map.unmodifiable(presenceByUser),
             presencePreference: user == state.user?.ref
-                ? accountPreference
+                ? (parsedPresenceState?.effectiveStatus ?? accountPreference)
                 : state.presencePreference,
+            presenceState: parsedPresenceState ?? state.presenceState,
           );
           if (user == state.user?.ref) {
             _scheduleMetadataCache(const <String>{'preferences'});
@@ -6582,18 +6730,35 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
+  bool get _presenceSuppressesNotifications =>
+      state.presenceState?.suppressNotifications ??
+      (state.presencePreference == PresenceStatus.dnd);
+
   void _receiveIncomingCall(Map<String, Object?> data) {
+    if (_presenceSuppressesNotifications) return;
     final incoming = _incomingCallFrom(data);
     if (incoming == null ||
         _removedGuildChannels.containsKey(incoming.channel)) {
       return;
     }
+    final account = api.tokens?.accountKey;
+    if (account == null) return;
     state = state.copyWith(incomingCall: incoming);
-    unawaited(systemCalls.showIncoming(
-      callId: incoming.call.wire,
-      callerName: incoming.callerName,
-    ));
-    unawaited(push.show(
+    unawaited(_showIncomingCall(incoming, account));
+  }
+
+  Future<void> _showIncomingCall(IncomingCall incoming, String account) async {
+    if (await SystemCallService.showIncomingNative(
+          callId: incoming.call.wire,
+          callerName: incoming.callerName,
+          channelRef: incoming.channel.wire,
+          accountKey: account,
+        ) ||
+        api.tokens?.accountKey != account ||
+        state.incomingCall?.call != incoming.call) {
+      return;
+    }
+    await push.show(
       id: stableNotificationId(incoming.call.wire),
       kind: NotificationKind.call,
       title: incoming.callerName,
@@ -6603,12 +6768,12 @@ final class MobileController extends StateNotifier<MobileState> {
         channel: incoming.channel,
         callerName: incoming.callerName,
       ).encode(),
-    ));
+    );
   }
 
   Future<void> _notifyRelationshipEvent(
       EntityRef target, Map<String, Object?> detail) async {
-    if (state.presencePreference == PresenceStatus.dnd ||
+    if (_presenceSuppressesNotifications ||
         state.notificationSettings['relationships'] == false) {
       return;
     }
@@ -6643,6 +6808,7 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _notifyModerationEvent(Map<String, Object?> data) async {
+    if (_presenceSuppressesNotifications) return;
     final timedOut =
         data['timeout_indefinite'] == true || data['timeout_until'] != null;
     await push.show(
@@ -6670,6 +6836,12 @@ final class MobileController extends StateNotifier<MobileState> {
     } on Object {
       return;
     }
+    if (!active && _acceptedLocalCall?.wire == callId) {
+      final local = _acceptedLocalCall!;
+      _acceptedLocalCall = null;
+      if (state.pendingCallJoin?.call == local) clearPendingCallJoin();
+      unawaited(leaveNativeCall?.call(local));
+    }
     final incoming = state.incomingCall;
     if (incoming?.call.wire == callId) {
       state = state.copyWith(clearIncomingCall: true);
@@ -6682,20 +6854,41 @@ final class MobileController extends StateNotifier<MobileState> {
 
   Future<void> answerIncomingCall() async {
     final incoming = state.incomingCall;
-    if (incoming == null) return;
-    await push.dismissCall(incoming.call.wire);
+    if (incoming != null) await _answerCall(incoming);
+  }
+
+  Future<void> _answerCall(IncomingCall incoming) async {
+    final account = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (account == null ||
+        !_sessionReadyIsCurrent(account, generation) ||
+        _acceptedLocalCall == incoming.call) {
+      return;
+    }
+    _acceptedLocalCall = incoming.call;
+    // Dismissing a local alert must not prevent the server from accepting the call.
+    push.dismissCall(incoming.call.wire).ignore();
     try {
       await repository.callAction(incoming.call, 'accept');
+      if (!_sessionIsCurrent(account, generation) ||
+          _acceptedLocalCall != incoming.call) {
+        return;
+      }
       state = state.copyWith(
-        clearIncomingCall: true,
+        clearIncomingCall: state.incomingCall?.call == incoming.call,
         pendingCallJoin: incoming,
         clearError: true,
       );
       await systemCalls.setActive(incoming.call.wire);
     } on Object catch (error) {
+      if (!_sessionIsCurrent(account, generation) ||
+          _acceptedLocalCall != incoming.call) {
+        return;
+      }
+      _acceptedLocalCall = null;
       await systemCalls.end(incoming.call.wire);
       state = state.copyWith(
-        clearIncomingCall: true,
+        clearIncomingCall: state.incomingCall?.call == incoming.call,
         error: userFacingError(error, summary: 'Could not answer the call.'),
       );
     }
@@ -6716,72 +6909,70 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
-  Future<void> _onSystemCallAction(SystemCallEvent event) async {
-    await push.dismissCall(event.callId);
-    if (event.action == SystemCallAction.incoming) {
-      final channel = event.channelRef;
-      if (channel == null || api.tokens == null) return;
-      try {
-        final callRef = EntityRef.parse(event.callId);
-        state = state.copyWith(
-          incomingCall: IncomingCall(
-            call: callRef,
-            channel: EntityRef.parse(channel),
-            caller: callRef,
-            callerName: event.callerName ?? 'Kaede caller',
-          ),
-          clearError: true,
-        );
-        await systemCalls.showIncoming(
-          callId: event.callId,
-          callerName: event.callerName ?? 'Kaede caller',
-        );
-      } on Object {
-        return;
-      }
-      return;
-    }
-    if (state.incomingCall?.call.wire != event.callId) {
-      final channel = event.channelRef;
-      if (channel == null || api.tokens == null) return;
-      try {
-        final callRef = EntityRef.parse(event.callId);
-        final channelRef = EntityRef.parse(channel);
-        if (event.action == SystemCallAction.answer) {
-          await repository.callAction(callRef, 'accept');
-          state = state.copyWith(
-            pendingCallJoin: IncomingCall(
-              call: callRef,
-              channel: channelRef,
-              caller: callRef,
-              callerName: event.callerName ?? 'Kaede caller',
-            ),
-            clearError: true,
-          );
-          await systemCalls.setActive(event.callId);
-        } else {
-          await repository.callAction(callRef, 'decline');
-          await systemCalls.end(event.callId);
+  Future<void> _startSystemCalls(String account, int generation) =>
+      systemCalls.start(account, (event) async {
+        if (!_sessionIsCurrent(account, generation)) return false;
+        if (event.action == SystemCallAction.answer &&
+            state.phase != SessionPhase.ready) {
+          return false;
         }
-      } on Object catch (error) {
-        await systemCalls.end(event.callId);
-        state = state.copyWith(
-          error: userFacingError(error, summary: 'Could not update the call.'),
-        );
+        await _onSystemCallAction(event);
+        return true;
+      });
+
+  Future<void> _onSystemCallAction(SystemCallEvent event) async {
+    final account = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    if (account == null || !_sessionIsCurrent(account, generation)) return;
+    try {
+      final call = EntityRef.parse(event.callId);
+      var incoming = state.incomingCall;
+      if (incoming?.call != call) {
+        final channel = event.channelRef;
+        incoming = channel == null
+            ? null
+            : IncomingCall(
+                call: call,
+                channel: EntityRef.parse(channel),
+                caller: call,
+                callerName: event.callerName ?? 'Kaede caller',
+              );
       }
-      return;
+      switch (event.action) {
+        case SystemCallAction.incoming:
+          if (incoming != null && !_presenceSuppressesNotifications) {
+            state = state.copyWith(incomingCall: incoming);
+          }
+        case SystemCallAction.answer:
+          if (incoming != null) await _answerCall(incoming);
+        case SystemCallAction.decline:
+        case SystemCallAction.ended:
+          final connected = event.action == SystemCallAction.ended;
+          if (_acceptedLocalCall == call) _acceptedLocalCall = null;
+          state = state.copyWith(
+              clearIncomingCall: state.incomingCall?.call == call,
+              clearPendingCallJoin: state.pendingCallJoin?.call == call);
+          await push.dismissCall(event.callId);
+          await systemCalls.end(event.callId);
+          if (connected) await leaveNativeCall?.call(call);
+          if (_sessionIsCurrent(account, generation)) {
+            await repository.callAction(call, connected ? 'end' : 'decline');
+          }
+      }
+    } on Object catch (error) {
+      if (!_sessionIsCurrent(account, generation)) return;
+      state = state.copyWith(
+          error: userFacingError(error, summary: 'Could not update the call.'));
     }
-    switch (event.action) {
-      case SystemCallAction.incoming:
-        return;
-      case SystemCallAction.answer:
-        await answerIncomingCall();
-        return;
-      case SystemCallAction.decline:
-      case SystemCallAction.ended:
-        await declineIncomingCall();
-        return;
-    }
+  }
+
+  Future<void> _clearSystemCalls() async {
+    final ringing = state.incomingCall?.call;
+    final active = _acceptedLocalCall;
+    _acceptedLocalCall = null;
+    await systemCalls.reset();
+    if (ringing != null) await push.dismissCall(ringing.wire);
+    if (active != null) await leaveNativeCall?.call(active);
   }
 
   void clearPendingCallJoin() =>
@@ -6872,7 +7063,7 @@ final class MobileController extends StateNotifier<MobileState> {
     }
     final decision = decideLocalMessageNotification(
       authoredByCurrentUser: message.authorRef == self.ref,
-      doNotDisturb: state.presencePreference == PresenceStatus.dnd,
+      doNotDisturb: _presenceSuppressesNotifications,
       conversationIsVisible: _isChannelVisible(message.channelRef),
       isDirectMessage: isDm,
       mentionsCurrentUser: mentioned,
@@ -6937,47 +7128,60 @@ final class MobileController extends StateNotifier<MobileState> {
     }
   }
 
+  bool _pushRequestIsCurrent(
+          String? accountKey, int generation, int preferenceGeneration) =>
+      !_pushSessionClosing &&
+      accountKey != null &&
+      preferenceGeneration == _pushPreferenceGeneration &&
+      _sessionIsCurrent(accountKey, generation);
+
   Future<bool> _registerPushDevice({
     String? token,
     bool surfaceErrors = false,
     bool requireStoredOptIn = true,
   }) async {
+    final home = api.tokens?.instance;
     final accountKey = api.tokens?.accountKey;
     final generation = _sessionLoadGeneration;
-    if (accountKey == null || !_sessionIsCurrent(accountKey, generation)) {
+    final preferenceGeneration = _pushPreferenceGeneration;
+    bool current() =>
+        _pushRequestIsCurrent(accountKey, generation, preferenceGeneration);
+    if (accountKey == null || home == null || !current()) {
       return false;
     }
     if (requireStoredOptIn && !await api.pushOptedIn()) return false;
     var step = 'provider_token';
     try {
       final resolvedToken = token ?? await push.pushToken();
-      if (resolvedToken == null ||
-          resolvedToken.isEmpty ||
-          !_sessionIsCurrent(accountKey, generation)) {
-        if (_sessionIsCurrent(accountKey, generation)) {
-          _setPushRegistrationWarning(
-            push.remoteDeliveryAvailable
-                ? 'Background notifications are enabled, but this device did not provide a push token. Check notification permissions and the device push service, then retry.'
-                : 'This build is not configured for closed-app notifications. Foreground alerts still work.',
-          );
-        }
+      if (!current()) return false;
+      if (resolvedToken == null || resolvedToken.isEmpty) {
+        _setPushRegistrationWarning(
+          push.remoteDeliveryAvailable
+              ? 'Background notifications are enabled, but this device did not provide a push token. Check notification permissions and the device push service, then retry.'
+              : 'This build is not configured for closed-app notifications. Foreground alerts still work.',
+        );
         return false;
       }
+      final needsVoip = Platform.isIOS && _pushTransport != 'direct_fcm';
+      final voipToken = needsVoip ? await push.voipToken() : null;
+      var voipReady = !needsVoip;
+      if (!current()) return false;
       return await _pushRegistration.run(
         session: (accountKey, generation),
-        token: resolvedToken,
+        token: needsVoip ? '$resolvedToken:${voipToken ?? ""}' : resolvedToken,
+        fullyRegistered: () => voipReady,
         force: surfaceErrors,
         register: () async {
           if (requireStoredOptIn && !await api.pushOptedIn()) return false;
-          if (!_sessionIsCurrent(accountKey, generation)) return false;
+          if (!current()) return false;
           step = 'installation_storage';
           final installationId = await api.installationId();
+          if (!current()) return false;
           final platform = Platform.isIOS ? 'ios' : 'android';
           final deviceName = Platform.operatingSystemVersion.length <= 100
               ? Platform.operatingSystemVersion
               : Platform.operatingSystemVersion.substring(0, 100);
           late final Map<String, Object?> response;
-          var voipReady = !Platform.isIOS;
           String? callSetupWarning;
           if (_pushTransport == 'direct_fcm') {
             step = 'direct_registration';
@@ -6990,6 +7194,24 @@ final class MobileController extends StateNotifier<MobileState> {
           } else {
             step = 'relay_storage';
             final previousRelayState = await api.relayPushState();
+            if (!current()) return false;
+            Future<void> persistRelay(RelayPushState relay) {
+              Future<void> write() async {
+                if (!current()) return;
+                step = 'relay_storage';
+                await api.saveRelayPushState(relay);
+                if (!current()) return;
+                step = 'native_relay_storage';
+                await push.setNativeRelayState(
+                    state: relay,
+                    installationId: installationId,
+                    accountKey: accountKey);
+              }
+
+              return _relayStateWrite = write();
+            }
+
+            _enrolledRelay = previousRelayState;
             final routeId = _randomPushToken();
             final wakeSecret = _randomPushToken();
             final managementSecret = _randomPushToken();
@@ -7019,6 +7241,7 @@ final class MobileController extends StateNotifier<MobileState> {
             final grant = Map<String, Object?>.from(
               enrollment['grant']! as Map,
             );
+            if (!current()) return false;
             step = 'relay_subscription';
             final subscription = await repository.createRelayPushSubscription(
               relayUrl: relayUrl,
@@ -7026,20 +7249,6 @@ final class MobileController extends StateNotifier<MobileState> {
               providerToken: resolvedToken,
               managementSecret: managementSecret,
             );
-            step = 'home_registration';
-            final receipt = Map<String, Object?>.from(
-              subscription['receipt']! as Map,
-            );
-            response = await repository.completeRelayPushEnrollment(
-              installationId: installationId,
-              platform: platform,
-              routeId: routeId,
-              wakeSecret: wakeSecret,
-              receipt: receipt,
-              deviceName: deviceName,
-            );
-            final home = api.tokens?.instance;
-            if (home == null) return false;
             var relayState = RelayPushState(
               home: home,
               relayUrl: relayUrl,
@@ -7049,18 +7258,48 @@ final class MobileController extends StateNotifier<MobileState> {
               wakeSecret: wakeSecret,
               managementSecret: managementSecret,
             );
+            if (!current()) {
+              await _revokePushRoutes(relayState);
+              return false;
+            }
+            step = 'home_registration';
+            final receipt = Map<String, Object?>.from(
+              subscription['receipt']! as Map,
+            );
+            try {
+              response = await repository.completeRelayPushEnrollment(
+                installationId: installationId,
+                platform: platform,
+                routeId: routeId,
+                wakeSecret: wakeSecret,
+                receipt: receipt,
+                deviceName: deviceName,
+              );
+            } on Object {
+              await _revokePushRoutes(relayState);
+              rethrow;
+            }
+            if (!current()) {
+              await _revokePushRoutes(relayState);
+              return false;
+            }
+            if (previousRelayState != null &&
+                previousRelayState.home == home &&
+                previousRelayState.relayUrl == relayUrl) {
+              relayState = RelayPushState.fromJson({
+                ...relayState.toJson(),
+                for (final entry in previousRelayState.toJson().entries)
+                  if (entry.key.startsWith('voip_')) entry.key: entry.value,
+              });
+            }
+            _enrolledRelay = relayState;
             if (Platform.isIOS) {
               // Keep the ordinary notification route usable during call setup.
-              step = 'relay_storage';
-              await api.saveRelayPushState(relayState);
-              step = 'native_relay_storage';
-              await push.setNativeRelayState(
-                state: relayState,
-                installationId: installationId,
-              );
+              await persistRelay(relayState);
+              if (!current()) return false;
               try {
                 step = 'apple_call_token';
-                final voipToken = await push.voipToken();
+                if (!current()) return false;
                 if (voipToken != null && voipToken.isNotEmpty) {
                   final voipRouteId = _randomPushToken();
                   final voipWakeSecret = _randomPushToken();
@@ -7087,6 +7326,7 @@ final class MobileController extends StateNotifier<MobileState> {
                       status: 502,
                     );
                   }
+                  if (!current()) return false;
                   step = 'call_relay_subscription';
                   final voipSubscription =
                       await repository.createRelayPushSubscription(
@@ -7098,19 +7338,7 @@ final class MobileController extends StateNotifier<MobileState> {
                     managementSecret: voipManagementSecret,
                     provider: 'apns_voip',
                   );
-                  step = 'call_home_registration';
-                  await repository.completeRelayPushEnrollment(
-                    installationId: installationId,
-                    platform: platform,
-                    routeId: voipRouteId,
-                    wakeSecret: voipWakeSecret,
-                    receipt: Map<String, Object?>.from(
-                      voipSubscription['receipt']! as Map,
-                    ),
-                    deviceName: deviceName,
-                    provider: 'apns_voip',
-                  );
-                  relayState = RelayPushState(
+                  final voipState = RelayPushState(
                     home: home,
                     relayUrl: relayUrl,
                     relayOrigin: Domain(relayOrigin),
@@ -7124,6 +7352,42 @@ final class MobileController extends StateNotifier<MobileState> {
                     voipWakeSecret: voipWakeSecret,
                     voipManagementSecret: voipManagementSecret,
                   );
+                  if (!current()) {
+                    await _revokePushRoutes(voipState);
+                    return false;
+                  }
+                  step = 'call_home_registration';
+                  try {
+                    await repository.completeRelayPushEnrollment(
+                      installationId: installationId,
+                      platform: platform,
+                      routeId: voipRouteId,
+                      wakeSecret: voipWakeSecret,
+                      receipt: Map<String, Object?>.from(
+                        voipSubscription['receipt']! as Map,
+                      ),
+                      deviceName: deviceName,
+                      provider: 'apns_voip',
+                    );
+                  } on Object {
+                    // The primary route remains valid when call enrollment fails.
+                    try {
+                      await repository.revokeRelayPushSubscriptionById(
+                        voipState,
+                        voipState.voipSubscriptionId!,
+                        voipManagementSecret,
+                      );
+                    } on Object {
+                      // The remote subscription also expires.
+                    }
+                    rethrow;
+                  }
+                  if (!current()) {
+                    await _revokePushRoutes(voipState);
+                    return false;
+                  }
+                  relayState = voipState;
+                  _enrolledRelay = voipState;
                   voipReady = true;
                 }
               } on Object catch (error) {
@@ -7141,34 +7405,17 @@ final class MobileController extends StateNotifier<MobileState> {
                 );
               }
             }
-            step = 'relay_storage';
-            await api.saveRelayPushState(relayState);
-            step = 'native_relay_storage';
-            await push.setNativeRelayState(
-              state: relayState,
-              installationId: installationId,
-            );
+            if (!current()) return false;
+            await persistRelay(relayState);
             if (previousRelayState != null &&
                 previousRelayState.subscriptionId !=
                     '${subscription['subscription_id']}') {
-              try {
-                await repository.revokeRelayPushSubscription(
-                  previousRelayState,
-                );
-                if (previousRelayState.voipSubscriptionId case final id?) {
-                  await repository.revokeRelayPushSubscriptionById(
-                    previousRelayState,
-                    id,
-                    previousRelayState.voipManagementSecret!,
-                  );
-                }
-              } on Object {
-                // The home binding now points at the new route. The old relay
-                // subscription expires even if this best-effort cleanup is lost.
-              }
+              await _revokePushRoutes(previousRelayState,
+                  includeVoip: previousRelayState.voipSubscriptionId !=
+                      relayState.voipSubscriptionId);
             }
           }
-          if (_sessionIsCurrent(accountKey, generation)) {
+          if (current()) {
             _pushDeviceId = '${response['id']}';
             _setPushRegistrationWarning(
               callSetupWarning ??
@@ -7182,6 +7429,7 @@ final class MobileController extends StateNotifier<MobileState> {
         },
       );
     } on KaedeException catch (error) {
+      if (!current()) return false;
       if (surfaceErrors) {
         pushSetupDiagnostics = pushFailureDiagnostics(step, error);
         DebugLog.instance.record(
@@ -7199,6 +7447,7 @@ final class MobileController extends StateNotifier<MobileState> {
         ),
       );
     } on Object catch (error) {
+      if (!current()) return false;
       if (surfaceErrors) {
         pushSetupDiagnostics = pushFailureDiagnostics(step, error);
         DebugLog.instance.record(
@@ -7242,9 +7491,15 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _requestNotificationDelivery() async {
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    final preferenceGeneration = _pushPreferenceGeneration;
+    bool current() =>
+        _pushRequestIsCurrent(accountKey, generation, preferenceGeneration);
+    if (!current()) return;
     try {
       final choice = await api.pushOptInChoice();
-      if (choice == false) return;
+      if (!current() || choice == false) return;
       if (choice == null) {
         // Relay transport introduced an explicit local preference after older
         // builds had already registered devices. Migrate only an installation
@@ -7256,19 +7511,20 @@ final class MobileController extends StateNotifier<MobileState> {
         final previouslyRegistered =
             hasRegisteredPushInstallation(devices, installationId);
         if (!previouslyRegistered || !await push.permissionGranted()) return;
+        if (!current()) return;
         final migrated = await _registerPushDevice(
           requireStoredOptIn: false,
         );
-        if (migrated) await api.savePushOptIn(true);
+        if (migrated && current()) await api.savePushOptIn(true);
         return;
       }
       if (!await push.permissionGranted()) {
         _setPushRegistrationWarning(
-          'System notifications are turned off. Enable them in Android settings to receive alerts.',
+          'System notifications are turned off. Enable them in your device settings to receive alerts.',
         );
         return;
       }
-      await _registerPushDevice();
+      if (current()) await _registerPushDevice();
     } on Object catch (error) {
       _setPushRegistrationWarning(userFacingError(
         error,
@@ -7341,6 +7597,12 @@ final class MobileController extends StateNotifier<MobileState> {
   /// Requests notification permission as a direct result of a user action and
   /// registers this installation only after consent is granted.
   Future<bool> enablePushNotifications() async {
+    final accountKey = api.tokens?.accountKey;
+    final generation = _sessionLoadGeneration;
+    final preferenceGeneration = _pushPreferenceGeneration;
+    bool current() =>
+        _pushRequestIsCurrent(accountKey, generation, preferenceGeneration);
+    if (!current()) return false;
     pushSetupDiagnostics = null;
     DebugLog.instance.record(DebugEvent.pushRegistrationStarted);
     var step = 'permission';
@@ -7378,12 +7640,14 @@ final class MobileController extends StateNotifier<MobileState> {
           status: 503,
         );
       }
+      if (!current()) return false;
       step = 'registration';
       final registered = await _registerPushDevice(
         token: token,
         surfaceErrors: true,
         requireStoredOptIn: false,
       );
+      if (!current()) return false;
       if (registered) {
         step = 'save_preference';
         await api.savePushOptIn(true);
@@ -7406,29 +7670,82 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> disablePushNotifications() async {
+    _pushPreferenceGeneration++;
     await api.savePushOptIn(false);
-    await _pushRegistration.invalidate();
-    final deviceId = _pushDeviceId;
-    final relayState = await api.relayPushState();
-    _pushDeviceId = null;
-    if (relayState != null) {
-      try {
-        await repository.revokeRelayPushSubscription(relayState);
-      } on Object {
-        // The authenticated home revocation below is an independent path.
-      }
-    }
-    if (deviceId != null) {
-      try {
-        await repository.unregisterPushDevice(deviceId);
-      } on Object {
-        // With the device-held relay state removed, subsequent v2 wakes fail
-        // authentication even if an offline home cannot revoke immediately.
-      }
-    }
-    await api.clearRelayPushState();
-    await push.clearNativeRelayState();
+    await _clearPushRegistration();
     _setPushRegistrationWarning(null);
+  }
+
+  Future<void> _revokePushRoutes(RelayPushState relay,
+      {bool includeVoip = true}) async {
+    try {
+      await Future.wait([
+        repository.revokeRelayPushSubscription(relay),
+        if (includeVoip &&
+            relay.voipSubscriptionId != null &&
+            relay.voipManagementSecret != null)
+          repository.revokeRelayPushSubscriptionById(
+              relay, relay.voipSubscriptionId!, relay.voipManagementSecret!),
+      ]);
+    } on Object {
+      // Each subscription also has an expiry if the relay is unreachable.
+    }
+  }
+
+  Future<void> _clearPushRegistration() async {
+    final drained = _pushRegistration.invalidate();
+    if (_pushSessionClosing) {
+      // The generation guard cancels network enrollments. Let any local
+      // secure-storage or App Group write finish before removing its result.
+      unawaited(drained);
+      try {
+        await _relayStateWrite;
+      } on Object {
+        // Clear both stores even when only one write completed.
+      }
+    } else {
+      await drained;
+    }
+    _relayStateWrite = null;
+    final deviceId = _pushDeviceId;
+    final expiredRelay = api.takeExpiredRelay();
+    var relayState = _enrolledRelay ?? expiredRelay;
+    _pushDeviceId = null;
+    _enrolledRelay = null;
+    try {
+      relayState ??= await api.relayPushState();
+    } on Object {
+      // A damaged vault must not prevent removal of the native copy.
+    }
+    try {
+      await api.clearRelayPushState();
+    } on Object {
+      if (!_pushSessionClosing) rethrow;
+      // SessionVault.clear retries both stores when the login is removed.
+    } finally {
+      if (relayState != null) {
+        final revoked = _revokePushRoutes(relayState);
+        if (_pushSessionClosing) {
+          unawaited(revoked);
+        } else {
+          await revoked;
+        }
+      }
+      if (api.tokens != null) {
+        try {
+          if (!_pushSessionClosing ||
+              deviceId != null ||
+              relayState != null ||
+              await api.pushOptedIn()) {
+            await repository
+                .unregisterPushDevice(deviceId ?? await api.installationId())
+                .timeout(const Duration(seconds: 5));
+          }
+        } on Object {
+          // The server also fences delivery when this session is revoked.
+        }
+      }
+    }
   }
 
   String _message(Object error) => userFacingError(error);
@@ -7693,11 +8010,12 @@ final class MobileController extends StateNotifier<MobileState> {
     _clearInteractionPresentation();
     _gatewaySubscription?.cancel();
     _pushTokenSubscription?.cancel();
+    _voipTokenSubscription?.cancel();
     _pushDestinationSubscription?.cancel();
     _pushCallSubscription?.cancel();
     _relationshipPushSubscription?.cancel();
     _pushHealthSubscription?.cancel();
-    _systemCallSubscription?.cancel();
+
     _sessionExpiredSubscription?.cancel();
     _outboxTimer?.cancel();
     _appLockTimer?.cancel();
@@ -7748,6 +8066,8 @@ final class MobileController extends StateNotifier<MobileState> {
   }
 
   Future<void> _expireSession() async {
+    if (_pushSessionClosing) return;
+    _pushSessionClosing = true;
     final accountKey = _activeAccountKey;
     final accountRef = state.user?.ref.wire ?? api.tokens?.userRef?.wire;
     _authenticationGeneration += 1;
@@ -7779,32 +8099,29 @@ final class MobileController extends StateNotifier<MobileState> {
     _selfModerationRetryTimer = null;
     _pendingAcknowledgements.clear();
     _acknowledgementsInFlight.clear();
-    await _pushTokenSubscription?.cancel();
-    _pushTokenSubscription = null;
-    await _pushDestinationSubscription?.cancel();
-    _pushDestinationSubscription = null;
-    await _pushCallSubscription?.cancel();
-    _pushCallSubscription = null;
-    await _pushHealthSubscription?.cancel();
-    _pushHealthSubscription = null;
-    await _relationshipPushSubscription?.cancel();
-    _relationshipPushSubscription = null;
-    await _gatewaySubscription?.cancel();
-    await _gatewayHealthSubscription?.cancel();
-    _gatewayHealthSubscription = null;
-    await gateway.disconnect();
-    await _discardAccountEncryption(accountRef);
-    if (accountKey != null) {
-      await _queueCacheWrite(() => database.purgeAccount(accountKey));
+    try {
+      await _pushTokenSubscription?.cancel();
+      _pushTokenSubscription = null;
+      await _voipTokenSubscription?.cancel();
+      _voipTokenSubscription = null;
+      await _pushDestinationSubscription?.cancel();
+      _pushDestinationSubscription = null;
+      await _pushCallSubscription?.cancel();
+      _pushCallSubscription = null;
+      await _pushHealthSubscription?.cancel();
+      _pushHealthSubscription = null;
+      await _relationshipPushSubscription?.cancel();
+      _relationshipPushSubscription = null;
+      await _clearSystemCalls();
+      await _clearPushRegistration();
+      await _gatewaySubscription?.cancel();
+      await _gatewayHealthSubscription?.cancel();
+      _gatewayHealthSubscription = null;
+      await gateway.disconnect();
+    } finally {
+      await _finishSignOut(accountKey, accountRef,
+          error: 'Your session expired. Sign in again.');
     }
-    _activeAccountKey = null;
-    _pushRegistrationWarning = null;
-    _pushRemoteDeliveryWarning = null;
-    _pushLocalDisplayWarning = null;
-    state = const MobileState(
-      phase: SessionPhase.signedOut,
-      error: 'Your session expired. Sign in again.',
-    );
   }
 }
 

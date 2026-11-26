@@ -1990,8 +1990,7 @@ final class _ChannelsTabState extends State<_ChannelsTab> {
 
   Future<void> _encryption(KaedeChannel channel) async {
     final encrypted = channel.encryptionMode == 'e2ee';
-    final needsRekey =
-        encrypted && {'rekeying', 'failed'}.contains(channel.encryptionState);
+    final needsRekey = encrypted && channel.encryptionState == 'rekeying';
     String? safetyNumber;
     String? error;
     var busy = false;
@@ -5938,7 +5937,7 @@ final class _WebhooksTabState extends State<_WebhooksTab> {
                         PopupMenuItem(
                           value: 'delete',
                           child: Text(
-                            item[L10n.of(context).ui_type_5127f14d] == 2
+                            item['type'] == 2
                                 ? L10n.of(context).ui_stop_following_7a795c5e
                                 : L10n.of(context).ui_delete_5797ea6a,
                             style: TextStyle(color: context.kaede.danger),

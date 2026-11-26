@@ -132,6 +132,12 @@ class ScheduledEventRecurrenceRule(RequestModel):
             raise ValueError("yearly recurrence requires both month and month day")
         if self.by_month is not None and self.frequency != RECURRENCE_YEARLY:
             raise ValueError("month and month-day recurrence is valid only for yearly events")
+        if (
+            self.by_month
+            and self.by_month_day
+            and self.by_month_day[0] > monthrange(2000, self.by_month[0])[1]
+        ):
+            raise ValueError("recurrence day does not occur in the selected month")
         return self
 
 
@@ -196,7 +202,7 @@ def _next_rule_occurrence(
 
     if rule.frequency == RECURRENCE_MONTHLY:
         year, month = _next_month(current)
-        while True:
+        while year <= datetime.max.year:
             if rule.by_n_weekday is not None:
                 selector = rule.by_n_weekday[0]
                 first = datetime(
@@ -219,14 +225,15 @@ def _next_rule_occurrence(
                 return monthly_candidate
             year, month = (year + 1, 1) if month == 12 else (year, month + 1)
 
+        raise ValueError("no further monthly occurrence is representable")
+
     month = rule.by_month[0] if rule.by_month is not None else rule.start.month
     day = rule.by_month_day[0] if rule.by_month_day is not None else rule.start.day
-    year = current.year + 1
-    while True:
+    for year in range(current.year + 1, datetime.max.year + 1):
         yearly_candidate = _replace_date(current, year, month, day)
         if yearly_candidate is not None and yearly_candidate > current:
             return yearly_candidate
-        year += 1
+    raise ValueError("no further yearly occurrence is representable")
 
 
 def next_recurrence_start(

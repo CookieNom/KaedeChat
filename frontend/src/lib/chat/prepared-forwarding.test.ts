@@ -261,6 +261,34 @@ describe('prepared secure forwarding', () => {
     ).toThrow(/proof binding/u);
   });
 
+  it('compares fractional recording lengths without changing the signed forward', () => {
+    const dest = '2@local.example';
+    const prepared = preparedPlaintext(dest, 'nonce');
+    const args = [
+      '8@source.example',
+      '9@source.example',
+      '7@users.example',
+      new Map([[dest, 'nonce']]),
+      new Map([[dest, channel('2', 'local.example')]])
+    ] as const;
+    const voice = (duration_secs: number | string) => ({
+      ...snapshot,
+      attachments: [{ duration_secs }],
+      message_snapshots: [{ ...snapshot, attachments: [{ duration_secs }] }]
+    });
+    prepared.source.snapshot = voice(1.23456);
+    const proof = prepared.destinations[0].authorization as { content: Record<string, unknown> };
+    proof.content.source_snapshot = voice('1.23456');
+    expect(validatePreparedForwardResponse(prepared, ...args).source.snapshot).toEqual(
+      voice(1.23456)
+    );
+    expect(proof.content.source_snapshot).toEqual(voice('1.23456'));
+    proof.content.source_snapshot = voice('1.23457');
+    expect(() => validatePreparedForwardResponse(prepared, ...args)).toThrow(/binding/u);
+    proof.content.source_snapshot = voice('2e999');
+    expect(() => validatePreparedForwardResponse(prepared, ...args)).toThrow(/duration/u);
+  });
+
   it('compares signed snapshot JSON canonically instead of trusting object key order', () => {
     const destination = channel('2', 'local.example');
     const prepared = preparedPlaintext('2@local.example', 'nonce');

@@ -311,6 +311,7 @@ pub struct VoiceGrantRequest<'a> {
     pub sender_device_id: Option<&'a str>,
     pub connection_id: &'a str,
     pub takeover: bool,
+    pub routing: Option<&'a serde_json::Value>,
 }
 
 impl Default for MediaPublishSettings {
@@ -376,7 +377,18 @@ impl Default for ScreenShareSettings {
     }
 }
 
+#[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent activity and publication states.
+pub struct RemoteVoiceParticipant {
+    name: String,
+    speaking: bool,
+    microphone: bool,
+    camera: bool,
+    screen: bool,
+}
+
 pub struct VoiceHandle {
+    room: Arc<Room>,
     pub video_degraded: Arc<AtomicBool>,
     pub commands: mpsc::UnboundedSender<VoiceCommand>,
     pub status: watch::Receiver<VoiceStatus>,
@@ -395,6 +407,32 @@ pub struct VoiceHandle {
 }
 
 impl VoiceHandle {
+    #[must_use]
+    pub fn remote_participants(&self) -> BTreeMap<String, RemoteVoiceParticipant> {
+        self.room
+            .remote_participants()
+            .into_iter()
+            .map(|(id, peer)| {
+                let tracks = peer.track_publications();
+                let enabled = |source| {
+                    tracks
+                        .values()
+                        .any(|track| track.source() == source && !track.is_muted())
+                };
+                (
+                    id.to_string(),
+                    RemoteVoiceParticipant {
+                        name: peer.name(),
+                        speaking: peer.is_speaking(),
+                        microphone: enabled(TrackSource::Microphone),
+                        camera: enabled(TrackSource::Camera),
+                        screen: enabled(TrackSource::Screenshare),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Marks a still-current native room terminally failed when a fenced grant
     /// refresh cannot construct its replacement.
     pub fn mark_failed(&self, message: String) {
@@ -430,6 +468,7 @@ pub async fn join_channel(
                 "sender_device_id": request.sender_device_id,
                 "connection_id": request.connection_id,
                 "takeover": request.takeover,
+                "routing": request.routing,
                 "client_kind": "desktop"
             }),
         )
@@ -464,6 +503,7 @@ pub async fn join_call(
                 "sender_device_id": request.sender_device_id,
                 "connection_id": request.connection_id,
                 "takeover": request.takeover,
+                "routing": request.routing,
                 "client_kind": "desktop"
             }),
         )
@@ -475,8 +515,12 @@ pub async fn join_call(
     Box::pin(join(grant, media, expected_policy, media_key, false)).await
 }
 
+/// Join using an authenticated grant retained by the native transport.
+///
+/// # Errors
+/// Returns an error when the policy changed or media setup or connection fails.
 #[allow(clippy::too_many_lines)] // Join validates and installs one linear media pipeline.
-async fn join(
+pub async fn join(
     grant: VoiceGrant,
     media: VoiceMediaSettings,
     expected_policy: ExpectedVoicePolicy,
@@ -606,8 +650,9 @@ async fn join(
         camera_enabled: false,
     });
     let video_degraded = Arc::new(AtomicBool::new(false));
+    let room = Arc::new(room);
     let task = tokio::spawn(run_room(
-        room,
+        room.clone(),
         events,
         command_rx,
         status_tx,
@@ -629,6 +674,7 @@ async fn join(
         video_degraded.clone(),
     ));
     Ok(VoiceHandle {
+        room,
         video_degraded,
         commands: command_tx,
         status: status_rx,
@@ -908,7 +954,7 @@ struct LocalPrioritySpeakerAccess {
     clippy::too_many_lines
 )]
 async fn run_room(
-    room: Room,
+    room: Arc<Room>,
     mut events: tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
     mut commands: mpsc::UnboundedReceiver<VoiceCommand>,
     status: watch::Sender<VoiceStatus>,

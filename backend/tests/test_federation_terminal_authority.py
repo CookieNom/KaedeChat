@@ -931,3 +931,80 @@ async def test_nonterminal_group_delete_is_not_authority_attested(
     prepare.assert_not_awaited()
     assert channel.unavailable is False
     assert not session.get_calls
+
+
+@pytest.mark.asyncio
+async def test_upgrade_releases_only_removal_control_and_drains_past_held_traffic(
+    postgres_schema, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import FederationEvent, FederationOutbox
+    from app.federation import delivery
+
+    for table in ("federation_events", "federation_outbox", "instances", "guilds"):
+        await postgres_schema.execute(
+            text(f"CREATE TABLE {table} AS TABLE public.{table} WITH NO DATA")
+        )
+    maker = async_sessionmaker(bind=postgres_schema, expire_on_commit=False)
+    removal = envelope(
+        "kcfe_mediadelete00001",
+        "media.delete",
+        actor_id=2,
+        actor_domain=AUTHORITY_DOMAIN,
+        content={"attachment_id": "41", "origin_domain": AUTHORITY_DOMAIN, "generation": "1"},
+        context={},
+    ).model_dump(mode="json")
+    ordinary = {**removal, "type": "guild.message.create", "event_id": "kcfe_ordinaryevt0001"}
+    now = datetime.now(UTC)
+    async with maker() as session:
+        for index, raw in enumerate((ordinary, removal), 1):
+            session.add(
+                FederationEvent(
+                    origin_domain=AUTHORITY_DOMAIN,
+                    event_id=raw["event_id"],
+                    event_type=raw["type"],
+                    envelope=raw,
+                    created_at=now,
+                )
+            )
+            session.add(
+                FederationOutbox(
+                    id=index,
+                    destination=LOCAL_DOMAIN,
+                    event_origin_domain=AUTHORITY_DOMAIN,
+                    event_id=raw["event_id"],
+                    status="circuit",
+                    attempts=3,
+                    last_error="held by local federation block: suspend",
+                    next_retry_at=now.replace(year=now.year + 100),
+                    created_at=now,
+                )
+            )
+        await session.commit()
+
+    def upgrade(connection):
+        scripts = ScriptDirectory(str(Path(__file__).parents[1] / "migrations"))
+        with Operations.context(MigrationContext.configure(connection)):
+            scripts.get_revision("d2b67ce43981").module.upgrade()
+
+    await postgres_schema.run_sync(upgrade)
+    monkeypatch.setattr(
+        delivery, "matching_block", AsyncMock(return_value=SimpleNamespace(level="suspend"))
+    )
+    send = AsyncMock(
+        return_value={"results": [{"event_id": removal["event_id"], "status": "accepted"}]}
+    )
+    monkeypatch.setattr(delivery, "send_link_batch", send)
+    assert await delivery.drain_destination(maker, cast(Any, settings()), LOCAL_DOMAIN) == 1
+    assert send.await_args.args[-1] == [removal]
+    statuses = list(
+        await postgres_schema.scalars(select(FederationOutbox.status).order_by(FederationOutbox.id))
+    )
+    assert statuses == ["circuit", "delivered"]

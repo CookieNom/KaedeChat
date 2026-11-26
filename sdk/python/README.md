@@ -11,6 +11,8 @@ python -m pip install 'kaede-bot[voice]'
 
 For a uv project, use `uv add kaede-bot` (or `uv add 'kaede-bot[voice]'`).
 Encoded audio playback also needs the `ffmpeg` executable on your PATH.
+For encrypted calls with Kaede clients, Linux x86_64 workers can opt in to
+the matching native LiveKit library. [Encrypted bot voice setup](https://github.com/CookieNom/KaedeChat/blob/main/docs/bot-api-quickstart.md#encrypted-bot-voice)
 
 ## First bot
 
@@ -26,20 +28,31 @@ The control token is used for enrollment and command publishing. A running bot
 uses its worker key and short-lived tokens issued by each target instance.
 Keep the worker directory private, persistent, and writable for replay cursors.
 
+For self-hosted storage on a private network, configure its exact HTTPS origin
+for the API target that issues its media tickets. For example, pass
+`private_media_origins={"https://chat.example": ["https://storage.internal"]}`
+to `kaede_bot.Client`. The standard `media.<authority>` host also supports
+private addresses for the bot's application home and explicitly configured targets.
+
 ## Examples and reference
 
 [SDK recipes](https://github.com/CookieNom/KaedeChat/blob/main/docs/bot-api-quickstart.md#sdk-recipes)
-cover messages, interactions, files, polls, buttons, forums, threads, task
-boards, guild administration, webhooks, events, federated guilds and DMs,
-audio playback/receiving, camera and screen video, and encrypted participants.
-The same resource methods work across instances when the application has an
-approved installation there; preserve full `id@domain` references.
+cover:
+
+- messages, files, polls, buttons, and other interactions
+- guild administration, webhooks, events, forums, threads, and task boards
+- federated guilds and DMs
+- audio playback and receiving, camera and screen video
+- encrypted participants
+
+The same methods work on any instance where the application has an approved
+installation. Keep full `id@domain` references.
 
 [API reference](https://github.com/CookieNom/KaedeChat/blob/main/docs/bots-and-automations.md)
 covers scopes, intents, REST routes, Gateway events, authorization, and E2EE.
-Event delivery can repeat after reconnects, so handlers that perform durable
-work should deduplicate it. Bots can create and end polls but cannot vote.
-User installations support explicit commands; ordinary messaging, calls, and
-voice require guild-install access and the appropriate grants.
+Events can be delivered again after a reconnect, so deduplicate any durable
+work. Bots can create and end polls but can't vote. User installations only
+run commands; messaging, calls, and voice need a guild installation with the
+right grants.
 
 Maintainers: see the [release guide](https://github.com/CookieNom/KaedeChat/blob/main/sdk/python/RELEASING.md).

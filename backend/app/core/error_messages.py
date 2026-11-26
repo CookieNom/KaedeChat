@@ -7,6 +7,7 @@ from http import HTTPStatus
 # what the user can do next without exposing database, storage, or federation
 # implementation details.
 ERROR_MESSAGES: dict[str, str] = {
+    "PRESENCE_SCHEDULES_CHANGED": "Your schedules changed on another device. Reload them before saving.",
     "GUILD_OWNER": "You still own one or more guilds. Transfer ownership of each guild to another member, or delete those guilds, before deleting your account. You do not need to leave guilds you do not own.",
     "APPLICATION_OWNER": "You still own a developer team or application. Transfer ownership or delete the teams and applications you own before deleting your account.",
     "DELETION_IN_PROGRESS": "Your content is already being deleted. Wait for cleanup to finish before requesting another deletion. You can close the app while it continues.",
@@ -41,6 +42,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "ONBOARDING_DISABLED": "The welcome setup is not enabled for this guild. Return to the guild to continue.",
     "ONBOARDING_INVALID_ROLE": "Choose a role from this guild that does not grant moderation or administrator permissions, including through channel permissions.",
     "ONBOARDING_INVALID_CHANNEL": "One of the selected welcome channels is unavailable or not allowed. Refresh the channel list and choose an available channel in this guild.",
+    "VOICE_CLIENT_UPDATE_REQUIRED": "Update your Kaede client to join encrypted voice calls.",
     "VOICE_ACTIVE_ELSEWHERE": "Your account is already connected to voice on another device. Disconnect there or use the option to move the call to this device.",
     "VOICE_CHANNEL_FULL": "This voice channel is full. Wait for someone to leave, or join a different voice channel.",
     "VOICE_SESSION_STALE": "Your voice connection has changed or ended. Leave and rejoin the voice channel or call, then try again.",
@@ -83,6 +85,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "RTC_TEST_BUSY": "An RTC connection test is already running. Wait for it to finish and try again.",
     "RTC_WEBHOOK_ID_CONFLICT": "This webhook event ID was already accepted with a different body.",
     "ADMIN_AUTHENTICATION_REQUIRED": "Administrator authentication is required for this action.",
+    "ADMIN_TARGET_PROTECTED": "This administrator account is protected from this action.",
     "ADMIN_GRANT_NOT_FOUND": "That administrator grant no longer exists.",
     "ANNOUNCEMENT_CROSSPOST_DELIVERY_FAILED": "The destination server rejected this announcement. Check the followed channel and try publishing again.",
     "ANNOUNCEMENT_CROSSPOST_DELIVERY_INVALID": "The destination server returned an invalid announcement-delivery response. Try again after the server is updated.",
@@ -356,6 +359,8 @@ ERROR_MESSAGES: dict[str, str] = {
     "GROUP_DM_NOT_FOUND": "That group conversation no longer exists or you are no longer a member.",
     "GROUP_DM_NOT_MEMBER": "You are no longer a member of that group conversation.",
     "GROUP_DM_DUPLICATE_MEMBER": "Choose each group member only once.",
+    "GROUP_DM_INVITER_PROOF_UNSUPPORTED": "A participant’s home server needs an update to confirm this group invitation.",
+    "GROUP_DM_INVITER_PROOF_REQUIRED": "The inviter’s home server needs an update to confirm this group invitation.",
     "GROUP_DM_INVITE_NOT_FRIEND": "Only existing friends can be added to a group conversation.",
     "GROUP_DM_FULL": "That group conversation already has the maximum of 10 members.",
     "GROUP_DM_ALREADY_MEMBER": "That friend is already in the group conversation.",

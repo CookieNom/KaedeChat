@@ -18,6 +18,7 @@ from app.core.federation import (
     canonical_json,
     canonical_request_target,
     content_sha256,
+    deletion_control_envelope,
     sign_request,
 )
 from app.core.settings import Settings
@@ -45,6 +46,10 @@ OUTBOUND_FEDERATION_LIMITER = anyio.CapacityLimiter(4)
 # immediately. Keep it deliberately small because callers may already own a
 # SQL session while contacting the peer.
 OUTBOUND_FEDERATION_REQUEST_LIMITER = anyio.CapacityLimiter(4)
+
+
+class UnsupportedFederationCapability(FederationNetworkError):
+    """The authenticated destination does not advertise a required operation."""
 
 
 def silence_blocks_path(path: str) -> bool:
@@ -124,6 +129,7 @@ async def signed_request(
     hop: int = 1,
     max_response_bytes: int = MAX_FEDERATION_RESPONSE_BYTES,
     allow_json_floats: bool = False,
+    required_capability: str | None = None,
     guild_context: bool = False,
 ) -> httpx.Response:
     try:
@@ -144,6 +150,7 @@ async def signed_request(
                 hop=hop,
                 allow_json_floats=allow_json_floats,
                 guild_context=guild_context,
+                required_capability=required_capability,
             )
             async with client:
                 return await bounded_http_request(
@@ -162,6 +169,15 @@ async def signed_request(
         OUTBOUND_FEDERATION_REQUEST_LIMITER.release()
 
 
+async def require_allowlisted_destination(
+    session: AsyncSession, settings: Settings, destination: str
+) -> None:
+    if settings.federation_mode == "allowlist":
+        approved = await session.get(Instance, destination)
+        if approved is None or approved.is_self or approved.federation_mode != "allowlist":
+            raise FederationNetworkError("peer is not allowlisted")
+
+
 async def _prepare_signed_request(
     session: AsyncSession,
     settings: Settings,
@@ -174,6 +190,7 @@ async def _prepare_signed_request(
     request_timeout: float,
     hop: int,
     allow_json_floats: bool = False,
+    required_capability: str | None = None,
     guild_context: bool = False,
 ) -> tuple[str, httpx.AsyncClient, str, bytes, dict[str, str]]:
     destination = normalize_domain(destination)
@@ -186,20 +203,28 @@ async def _prepare_signed_request(
     # not acquire the outbox-drain lock: it coalesces duplicate background
     # drains and must not reject unrelated user actions to the same peer.
     await lock_block_policy_shared(session)
-    if settings.federation_mode == "allowlist":
-        approved = await session.get(Instance, destination)
-        if approved is None or approved.is_self or approved.federation_mode != "allowlist":
-            raise FederationNetworkError("peer is not allowlisted")
+    await require_allowlisted_destination(session, settings, destination)
     block = await matching_block(session, destination)
-    if block is not None and block.level == "suspend":
+    events = payload.get("events") if payload and set(payload) == {"events"} else None
+    deletion_batch = (
+        method == "POST"
+        and path == "/_kaede/v1/inbox"
+        and isinstance(events, list)
+        and bool(events)
+        and all(isinstance(event, dict) and deletion_control_envelope(event) for event in events)
+    )
+    if block is not None and block.level == "suspend" and not deletion_batch:
         raise FederationNetworkError("federation with this destination is suspended")
     if (
         block is not None
         and block.level == "silence"
+        and not deletion_batch
         and (guild_context or silence_blocks_path(path))
     ):
         raise FederationNetworkError("this federation surface is silenced for the destination")
-    await ensure_peer(session, settings, destination)
+    peer = await ensure_peer(session, settings, destination)
+    if required_capability is not None and required_capability not in peer.capabilities:
+        raise UnsupportedFederationCapability(required_capability)
     body = canonical_json(payload, allow_floats=allow_json_floats) if payload is not None else b""
     query_text = urlencode(sorted((query or {}).items()))
     target = canonical_request_target(path, query_text)

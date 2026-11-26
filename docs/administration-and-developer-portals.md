@@ -1,172 +1,177 @@
 # Instance Administration and Developer Portal
 
-Kaede provides two responsive management areas on the web and desktop:
+Kaede has two management areas, available on the web and in the desktop app:
 
-- `/administration` is for instance owners and delegated staff.
-- `/developers` is available to every active local human account.
+- `/administration` is for instance owners and the staff they delegate.
+- `/developers` is open to every active local human account.
 
-The supported desktop app embeds the same web interface. Native mobile clients
-provide corresponding Developer Portal and capability-gated Instance
-Administration screens under User Settings.
+On mobile, the same areas live under User Settings. The mobile Instance
+Administration screens show only the sections your role can use.
 
 ## Instance Administration
 
 ### Voice and video (RTC)
 
-Built-in LiveKit remains the default. Owners and instance administrators can
-configure the optional Cinnamon provider under **Administration → Voice and video**
-(on mobile, under Instance Administration). No Cinnamon credentials, endpoints,
-or regions are preconfigured.
+Kaede uses its built-in LiveKit server by default. Owners and instance
+administrators can set up Cinnamon as an optional provider under
+**Administration → Voice and video** (on mobile, under Instance
+Administration). Nothing for Cinnamon is preconfigured; you supply the
+credentials, endpoints and regions.
 
-Enter the **project** API key and secret, an automatic `wss://` endpoint, and the
-regional endpoints your project allows. The administration API encrypts credentials
-using the instance secret key; the saved secret is never returned. Keep the instance
-secret key with your database backups. Use **Save RTC settings**, test Automatic,
-**Test without latency hints**, and test each enabled region before selecting Cinnamon as the
-provider. Tests create and remove only uniquely named `kaede-rtc-test-…` rooms;
-a cleanup failure reports the exact room to remove.
+1. Enter the **project** API key and secret, an automatic `wss://` endpoint,
+   and the regional endpoints your project allows. Kaede encrypts the
+   credentials with the instance secret key and never shows the saved secret
+   again, so keep the instance secret key with your database backups.
+2. Click **Save RTC settings**.
+3. Test Automatic, then **Test without latency hints**, then each enabled
+   region. Tests only create and remove rooms named `kaede-rtc-test-…`. If
+   cleanup fails, the result names the room you need to remove.
+4. Select Cinnamon as the provider.
 
-For Cinnamon project setup, copy the complete receiver URL shown in administration:
-`https://<configured instance domain>/api/v1/voice/cinnamon/webhook`. This is a direct
-public route without a query or redirect. Configure delivery signing with the same
-project API-key identifier shown there, enable the listed region IDs for the project
-and plan, and permit automatic/manual routing. Keep Cinnamon's **required hint**
-policy off: only successful client HTTPS RTT measurements are sent; if all probes
-fail, routing must work without hints. No location information is collected or sent.
-Keep Cinnamon's automatic-routing allowlist consistent with the regions you intend
-to permit; Kaede's disabled regions are excluded from its selector and probes.
+In your Cinnamon project:
 
-Refresh webhook status after a disposable room test to verify delivery acceptance
-and processing. Signature-verified events are committed to PostgreSQL before HTTP
-204; a separate worker retries failures and checks live room/participant state to
-ignore stale lifecycle events. Pending events survive restarts. Apply database
-migrations before starting the updated API workers.
+- Set the webhook receiver to the complete URL shown in administration:
+  `https://<configured instance domain>/api/v1/voice/cinnamon/webhook`. It's a
+  direct public route, so don't add a query string or redirect.
+- Sign deliveries with the same project API-key identifier shown there.
+- Enable the listed region IDs for your project and plan, and allow both
+  automatic and manual routing.
+- Keep the automatic-routing allowlist consistent with the regions you want to
+  permit. Regions you disable in Kaede are left out of its selector and probes.
+- Leave the **required hint** policy off. Clients send only successful HTTPS
+  round-trip measurements, so routing has to work when every probe fails. No
+  location information is collected or sent.
 
-Provider, endpoint, and credential changes apply when creating a new room. Active
-rooms retain their saved connection endpoint and credentials, including moderation
-and reconnects. Keep old project credentials valid until those rooms finish.
+After a test room, refresh the webhook status to confirm that Cinnamon's
+events were accepted and processed. Kaede stores each verified event before
+acknowledging it and retries failed processing in the background, ignoring
+events that no longer match the live room. Pending events survive restarts.
+When you upgrade, apply database migrations before starting the new API
+workers.
+
+Provider, endpoint and credential changes apply to new rooms only. Rooms that
+are already running keep their saved endpoint and credentials, including for
+moderation and reconnects, so keep old project credentials valid until those
+rooms finish.
 
 ### Granting access
 
-Administrative access belongs to an ordinary local user account. The host grants
-the first owner role from the CLI:
-
-Run this from the repository root after registering the local account:
+Administrative access belongs to an ordinary local user account. The host
+grants the first owner role from the CLI. Register the local account first,
+then run this from the repository root:
 
 ```sh
 make exec SERVICE=api COMMAND='kaede admin-grant alice --role owner'
 ```
 
-Use the same `make exec SERVICE=api COMMAND='...'` wrapper for `kaede admin-grant bob --role trust_safety`
-or `kaede admin-revoke bob --role trust_safety`. The command reads the deployment's
-`.env`.
+Use the same `make exec SERVICE=api COMMAND='...'` wrapper for other changes,
+such as `kaede admin-grant bob --role trust_safety` or
+`kaede admin-revoke bob --role trust_safety`. The command reads the
+deployment's `.env`.
 
-Accepted roles are `owner`, `administrator`, `trust_safety`, `bot_reviewer`,
-`operations`, and `auditor`. The command accepts a local `username` or
-`username@this-instance`. Remote and bot accounts are rejected. Granting a role
-the user already holds succeeds without change. Revoking a role they don't hold
-returns an error.
+The command accepts a local `username` or `username@this-instance` and rejects
+remote and bot accounts. Granting a role the user already holds succeeds
+without changing anything. Revoking a role they don't hold returns an error.
 
-Owner grants and removals remain CLI-only. An owner can delegate or revoke every
-non-owner role from the Administration page. Production instances should keep
-at least two owner-capable local accounts.
+The owner role can only be granted or removed from the CLI. An owner can grant
+and revoke every other role from the Administration page. Keep at least two
+owner-capable local accounts on a production instance.
 
-The browser never receives `KAEDE_ADMIN_TOKEN`. Every request uses the normal
-local-user session and reloads active `InstanceAdminGrant` rows. Disabled users,
-expired or revoked grants, remote users, and bot users are rejected.
+Staff use their normal account session; the browser never receives
+`KAEDE_ADMIN_TOKEN`. Every request rechecks the caller's active grants, so
+disabled users, expired or revoked grants, remote users and bot users are
+refused.
 
 ### Roles
 
 | Role | Access |
 | --- | --- |
-| Owner | Every administration capability; CLI controlled |
-| Administrator | Voice and video, users, instances, bots, reports, and audit; can view operators but not change them |
-| Trust & Safety | Reports, child safety, local-user state, and instance policy |
-| Bot reviewer | Bot applications and the audit log |
-| Operations | Instance policy and the audit log |
-| Auditor | Read-only reports and audit log |
+| Owner (`owner`) | Every administration capability; CLI controlled |
+| Administrator (`administrator`) | Voice and video, users, instances, bots, reports, and audit; can view operators but not change them |
+| Trust & Safety (`trust_safety`) | Reports, child safety, local-user state, and instance policy |
+| Bot reviewer (`bot_reviewer`) | Bot applications and the audit log |
+| Operations (`operations`) | Instance policy and the audit log |
+| Auditor (`auditor`) | Read-only reports and audit log |
 
-Every role can also read the overview, users, applications, instances, and
+Every role can also view the overview, users, applications, instances and
 operators.
 
-`GET /api/v1/administration/@me` returns the caller's roles and effective
-capabilities. The panel hides mutation controls the caller cannot use, but the
-API still repeats every authorization check.
+The panel hides controls you can't use, and the API repeats every permission
+check. `GET /api/v1/administration/@me` returns your roles and effective
+capabilities.
 
 ### Panel sections
 
-**Overview** shows counts for local users, known instances, bot applications,
-active bot installations, open reports, and blocked instances.
+**Overview** shows counts of local users, known instances, bot applications,
+active bot installations, open reports and blocked instances.
 
-**Users** supports bounded local-username search and lets staff disable or
-enable accounts. An administrator cannot disable their own account through this
-endpoint.
+**Users** lets staff search local usernames and disable or re-enable accounts.
+You can't disable your own account here.
 
-**Applications** lists known local and federated bot applications. Staff with
-`bots.manage` can suspend an application. Suspension advances its revocation
-generation. Authority-owned guild installations move to `suspended` and
-advance their grant revision; a user installation remains owned by the user's
-home and its grant revision is never rewritten by application runtime state.
-The application home publishes signed, monotonic runtime snapshots so every
-existing target independently requires both an active application and a valid
-installation grant. Reactivating the application restores only the
-suspension-owned guild rows and advances those guild grant revisions, so
-targets and Gateways re-evaluate resumed access instead of reusing stale
-authorization.
+**Applications** lists local and federated bot applications. Staff with
+`bots.manage` can suspend or reactivate an application and review App
+Directory listings (see [App Directory](#app-directory)).
 
-Suspension does not preserve private-conversation or cryptographic admission.
-It terminally revokes the application's active DM capability leases, DM
-grants and participant consents, MLS room-participation rows, and active voice
-media sessions; affected encrypted rooms enter rekeying. After reactivation,
-the worker must open a fresh DM capability and repeat the applicable consent,
-room-admission, and MLS rekey flow. An old capability, consent, participation,
-or media grant is never resumed merely because its source installation became
-active again.
+Suspending an application:
 
-Independent removal remains terminal. A guild kick, ban, uninstall, failed
-reinstall, or explicit revocation records the installation as `revoked` (and
-sets its revocation timestamp); application reactivation never selects or
-resurrects that row. Guild administrators therefore retain control over every
-terminal membership and installation decision while an instance administrator
-can safely pause and resume grants that the application suspension itself
-paused.
+- moves its guild installations to `suspended` and takes its commands and
+  interactions out of service, including user-installed commands;
+- ends its active DM capabilities, DM grants and consents, encrypted-room
+  participation and voice/video media sessions. Affected encrypted rooms are
+  rekeyed.
 
-Application suspension removes user-install commands and interaction delivery
-from the active application surface without changing the independently owned
-user grant. Reactivation makes a command eligible again only when that user-home
-grant remains active and, on a foreign target, its bounded authority lease has
-not expired. A user-revoked record remains revoked.
+Reactivating it:
 
-Only the application's home instance may perform this authority-state change.
-A foreign instance administrator can enforce local target policy, but cannot
-activate or suspend the remote application record; remote targets converge from
-the home authority's signed runtime snapshot.
+- resumes only the guild installations that the suspension paused;
+- makes a user-installed command available again only while the user's own
+  installation is still active and, on another instance, its time-limited
+  lease hasn't expired;
+- doesn't restore DM access, consents, encrypted-room participation or media
+  sessions. The bot has to open a fresh DM capability and repeat consent, room
+  admission and the MLS rekey.
 
-**Instances** shows each known remote peer’s locally retained users and authored
-messages, guild replicas, federated DM conversations, cached media, inbound event
-accounting, last contact, software version, and delivery backlog. Expand a peer
-for storage categories; search and sort to compare peers. Storage totals combine
-quota-accounted database data and cached media bytes, not physical database size
-or remote server totals. Guild usage belongs to the guild origin, DM usage to its
-quota origin, and media usage to the attachment origin. Counts follow retention
-and exclude logically deleted messages. The endpoint requires `admin.read`.
+Removals made for other reasons are permanent. A guild kick, ban, uninstall,
+failed reinstall or explicit revocation marks the installation `revoked`, and
+reactivating the application never brings it back. A user's own revocation
+also stays in place. Guild administrators keep the final say over
+installations in their guilds; instance staff can only pause and resume what a
+suspension paused.
 
-It also manages exact-domain `silence` and `suspend` rules using Kaede's
-existing `InstanceBlock` enforcement. Subdomains are included only when the
-operator selects that option. Policy changes go through the existing lock and
-reconciliation path, so queues and replicas observe the new rule consistently.
+Only the application's home instance can suspend or reactivate it. Staff on
+other instances can enforce their own instance policy against a remote
+application, but can't change its status there. Their instance follows the
+home's signed updates.
 
-**Operators** lists active grants. Owners can add or revoke non-owner roles.
-Owner rows are visible but remain CLI managed.
+**Instances** shows, for each known remote instance, what your instance holds
+locally: users and their messages, guild replicas, federated DM
+conversations, cached media, inbound event counts, last contact, software
+version and delivery backlog. Expand a row for a storage breakdown, and use
+search and sorting to compare instances. Viewing it requires `admin.read`.
+
+Storage totals combine quota-counted database data and cached media bytes.
+They aren't the physical database size or the remote server's own totals.
+Guild usage counts toward the guild's origin, DM usage toward its quota origin,
+and media toward the attachment's origin. Counts follow retention and leave
+out deleted messages.
+
+The same section manages exact-domain `silence` and `suspend` rules.
+Subdomains are included only when you select that option. A new rule applies
+consistently to queued deliveries and replicas. See
+[Federation allowlists and blocklists](operator.md#federation-allowlists-and-blocklists)
+for what each rule blocks.
+
+**Operators** lists active grants. Owners can add or revoke non-owner roles
+here. Owner rows are shown but are managed from the CLI.
 
 **Audit log** lists recent instance actions with actor, action, target, safe
-metadata, and timestamp. Sensitive secrets and message bodies are not written
-to audit metadata.
+metadata and timestamp. Secrets and message bodies are never written to audit
+metadata.
 
 ### Reports and Trust & Safety
 
-Users can report an accessible plaintext message from its context menu and view
-the status of their own reports at `/reports`. Categories are fixed in code:
+Users can report a plaintext message they can access from its context menu,
+and follow the status of their own reports at `/reports`. The categories are
+fixed:
 
 - child sexual abuse material (CSAM)
 - spam
@@ -182,63 +187,64 @@ the status of their own reports at `/reports`. Categories are fixed in code:
 - other
 
 When a report is submitted, the server rechecks the reporter's channel access.
-It then copies the message content, author reference, channel reference, and
-message timestamp into the case, so later edits or deletion cannot erase the
-review record. The reporter cannot read the evidence snapshot, assignee, or
-internal resolution.
+It then copies the message content, author reference, channel reference and
+message timestamp into the case, so later edits or deletion can't erase the
+review record. The reporter can't read the evidence snapshot, the assignee or
+the internal resolution.
 
 An E2EE message can be reported only after the reporter's client decrypts that
 specific message and the reporter confirms the selective disclosure. The case
 stores the disclosed text, a fingerprint of the original ciphertext, and
-`server_verified=false`; moderators see that the evidence is reporter-supplied.
-Room keys, other messages, and surrounding history are never included
-automatically.
+`server_verified=false`, and moderators see that the evidence is
+reporter-supplied. Room keys, other messages and surrounding history are never
+included automatically.
 
 A report about a message in a channel hosted on another instance is forwarded
-to that instance, and the local copy is marked `awaiting_remote`. If the remote instance
-is unavailable or rejects it, the report isn't saved and the reporter sees an
-error. CSAM reports are never forwarded. They always stay with the reporter's
-home instance for child-safety review.
+to that instance, and the local copy is marked `awaiting_remote`. If the
+remote instance is unavailable or rejects it, the report isn't saved and the
+reporter sees an error. CSAM reports are never forwarded. They always stay
+with the reporter's home instance for child-safety review.
 
-The Trust & Safety queue is instance-level; guild moderators do not receive it.
-Authorized staff can triage, review, request more information, record action or
-no action, mark duplicates, and reopen cases. Report creation is rate limited to
-10 per local user per hour.
+The Trust & Safety queue belongs to the instance; guild moderators don't
+receive it. Authorized staff can triage, review, request more information,
+record action or no action, mark duplicates and reopen cases. Each local user
+can submit at most 10 reports per hour.
 
 ### Child-safety review and external reporting
 
 CSAM reports and PhotoDNA matches are handled in **Administration → Child
-safety**, separate from the ordinary report queue. Reading cases, managing
-them and downloading preserved evidence require the `safety.read`,
-`safety.manage` and `safety.evidence` capabilities respectively. Evidence is
-encrypted and is not previewed automatically. Staff must explicitly download
-it through an authenticated, audited endpoint.
+safety**, separate from the ordinary report queue. Reading cases requires
+`safety.read`, managing them requires `safety.manage`, and downloading
+preserved evidence requires `safety.evidence`. Evidence is encrypted and is
+never previewed automatically. Staff must download it explicitly through an
+authenticated, audited endpoint.
 
-Review a pending case to confirm removal or dismiss the finding. An optional
-account suspension is available only for a local subject with verified
-provenance; reporter-disclosed E2EE evidence does not establish the alleged
-sender's responsibility. Confirming removal for an unverified source requires
-explicitly recording that you independently verified the source message.
-The original identity snapshot is retained alongside the account's current
-identity and available session device, IP address and activity metadata at deletion;
-passwords, MFA secrets, session IDs and authentication tokens are never copied.
-Remote account identities remain claims
-of their originating instance.
+Review a pending case to confirm removal or dismiss the finding. Account
+suspension is an option only for a local subject with verified provenance;
+reporter-disclosed E2EE evidence doesn't establish the alleged sender's
+responsibility. To confirm removal when the source is unverified, you must
+record that you independently verified the source message.
 
-Submit the report through CyberTipline manually, then record the completed
-submission's receipt/reference, actual submission time, selected evidence and
-optional notes. This action records completion; it does not transmit anything
-to NCMEC. The retention deadline is at least one calendar year from the
-recorded submission time and can be extended with a reason. Placing or releasing a hold also requires a
-reason and is audited.
+The case keeps the original identity snapshot alongside the account's current
+identity and the session device, IP address and activity metadata available at
+deletion. Passwords, MFA secrets, session IDs and authentication tokens are
+never copied. Remote account identities remain claims of their originating
+instance.
 
-Closing a case does not delete its evidence. Deletion becomes available only
-after review and applicable reporting obligations are complete, the retention
-deadline has passed and every hold is released. Pending or unsubmitted
-confirmed cases cannot be expired by this action. Eligible disposal also
-removes preserved account/message snapshots. Ordinary account or message
-deletion does not dispose of retained case evidence.
-The daily retention task also disposes of closed cases once these conditions hold.
+Submit the report through CyberTipline yourself, then record the completed
+submission's receipt or reference, the actual submission time, the evidence
+you selected and any notes. This records that the submission is complete; it
+doesn't transmit anything to NCMEC. The retention deadline is at least one
+calendar year from the recorded submission time, and you can extend it with a
+reason. Placing or releasing a hold also requires a reason and is audited.
+
+Closing a case doesn't delete its evidence. Deletion becomes available only
+after review and any applicable reporting obligations are complete, the
+retention deadline has passed and every hold is released. Pending cases, and
+confirmed cases that haven't been submitted, can't be expired this way.
+Disposal also removes the preserved account and message snapshots. Ordinary
+account or message deletion doesn't dispose of retained case evidence. A daily
+retention task also disposes of closed cases once these conditions hold.
 
 ### Administration API
 
@@ -276,14 +282,13 @@ The daily retention task also disposes of closed cases once these conditions hol
 
 ## Developer Portal
 
-Every active local human user may create applications. Opening `/developers`
-provisions a protected **Personal** team if the account does not have one yet.
-Personal is always available and stays private to that account. It owns new
-applications by default, even when the user also belongs to shared teams. Users
-may create named teams and add human users from any federated Kaede home to
-those shared workspaces.
+Every active local human user can create applications. The first time you
+open `/developers`, Kaede creates a protected **Personal** team for you. It's
+always available, stays private to your account, and owns new applications by
+default even if you also belong to shared teams. You can create named teams
+too, and add human users from any federated Kaede instance to them.
 
-Developer-team roles are separate from instance-administrator roles:
+Developer-team roles are separate from instance administration roles:
 
 | Role | Developer access |
 | --- | --- |
@@ -294,20 +299,27 @@ Developer-team roles are separate from instance-administrator roles:
 | Analyst | Read-only access to applications, commands, workers, invite links, installations, and rules |
 | Support | Same read-only access as Analyst |
 
-Only owners, administrators, and Security members can see control
-credentials. Changing application settings, including scopes, intents, and
-target policy, needs an owner or administrator. The last owner cannot be
-demoted or removed. Personal teams remain single-user;
-shared teams accept federated human members. Each team, including Personal, can
-own at most 75 non-deleted applications, matching Discord's developer-team capacity.
+Only owners, administrators and Security members can see control credentials.
+Changing application settings, including scopes, intents and target policy,
+needs an owner or administrator. The last owner can't be demoted or removed.
+Personal teams stay single-user. Each team, including Personal, can own at most
+75 applications that haven't been deleted.
+
+Teams and applications stay on their home instance when members use other Kaede
+instances. Members can still use the normal team and application URLs from
+their own instance, which forwards each portal action to the team's home. The
+home rechecks the member's current membership and role every time. When
+someone is removed from a team, their instance is told, and the removal still
+arrives after a long outage. A member's profile details are accepted only from
+that member's own instance.
 
 ### Applications
 
-Creating an application creates a normal federated bot user with
-`account_type=bot`. Bot usernames use regular `username@domain` formatting and
-a unique numeric suffix. API payloads also include the bot's composite snowflake
-reference. The Python SDK exposes both forms as `User.handle` and `User.ref`;
-snowflakes are never decoded into usernames.
+Creating an application also creates its bot user, with `account_type=bot`.
+Bot usernames use the regular `username@domain` format with a unique numeric
+suffix. API payloads also include the bot's composite snowflake reference. The
+Python SDK exposes both forms as `User.handle` and `User.ref`; snowflakes are
+never decoded into usernames.
 
 An application page manages:
 
@@ -321,102 +333,81 @@ An application page manages:
 - active and suspended installations
 
 The web page shows whether encrypted participation is enabled but can't change
-it. Turn on the `participant` E2EE mode from the mobile Developer Portal's
-**Encrypted interaction modes** setting or with `PATCH
-/api/v1/applications/{app}`. Guild-specific command sets aren't edited in
-either portal; publish them through the API or `Client.sync_commands(guild=...)`.
+it. To turn on the `participant` E2EE mode, use the mobile Developer Portal's
+**Encrypted interaction modes** setting or `PATCH /api/v1/applications/{app}`.
+Neither portal edits guild-specific command sets; publish those through the API
+or with `Client.sync_commands(guild=...)`.
 
 Control credentials are shown once and stored as hashes. They carry only
-`workers.manage` and `commands.manage`. They cannot authenticate a user session,
-a bot REST request, or a Gateway connection. Revocation is immediate for future
-control operations.
+`workers.manage` and `commands.manage`, and can't authenticate a user session,
+a bot REST request or a Gateway connection. Revoking one blocks future control
+operations immediately.
 
-Workers generate their Ed25519 private key locally. Only the public key is
-enrolled. A worker exchanges a short assertion for an eight-minute target token.
-Every REST or Gateway request carries a nonce-based DPoP proof bound to the
-HTTP method, path, query, token, and worker key.
-
-Developer teams and applications keep their authority when members use another
-Kaede instance. The team home sends each remote member a full, signed,
-revisioned projection of that member's role and applications. Each local member
-has an independent durable high-water, while the shared team/application state
-is fingerprinted once per team revision. A delayed older projection is ignored;
-a different projection for the same member at the same revision is rejected.
-Removal sends an empty revocation projection, while the team home still rechecks
-current membership and role for every operation.
-The latest snapshot for each remote member is coalesced and retried without an
-age cutoff until the member's home accepts it. Acknowledged snapshots return to
-normal bounded retention, so a long outage cannot lose a revocation and team
-churn does not create an unbounded archive.
-
-The normal qualified team and application URLs remain usable from the member's
-home instance. That home forwards only a closed set of typed member, application,
-private Directory preview, credential, worker, command, template, rule, installation, asset, and emoji
-operations to the authority with a 15-second deadline and a one-use replay ID.
-Responses are bound to the exact request, authority, operation, and expected
-status. Adding a user carries the selected composite identity, but a team home
-accepts mutable profile fields only from that user's own home; third-party
-profiles remain opaque until a direct signed profile proof arrives.
+Workers generate their Ed25519 private key locally, and only the public key is
+enrolled. A worker exchanges a short assertion for an eight-minute target
+token. Every REST or Gateway request carries a nonce-based DPoP proof bound to
+the HTTP method, path, query, token and worker key.
 
 ### App Directory
 
-The web and desktop clients expose **App Directory** from all three Discord-like
-server entry points: right-click a server in the server rail and hover **Server
-Settings**, use the server menu, or open **Server Settings → App Directory**.
-The standalone product-page Directory remains a desktop/browser surface,
-matching Discord. Native mobile still discovers reviewed applications from the
-chat-bar App Launcher and opens the existing native **Add App** review flow.
+On the web and desktop, you can open **App Directory** from a server in three
+ways: right-click it in the server rail and hover **Server Settings**, use the
+server menu, or open **Server Settings → App Directory**. The standalone
+Directory page is only on desktop and the web. On mobile, people find reviewed
+apps through the chat-bar App Launcher, which opens the native **Add App**
+review.
 
-An application owner opts in from the Developer Portal and supplies a short
-summary, category, one to five unique tags, a full description, HTTPS support,
-privacy-policy and terms links, and at least one active install template. The
-product profile may order up to five total uploaded images and allowlisted
-YouTube video IDs, add up to five named HTTPS links, declare supported Discord
-locales, and provide a localized description for any declared locale.
-User-only listings use the same consent template as guild listings, but must
-also publish an active global user-install command before the listing can claim
-user-install support. The product page also derives up to five popular global
-slash commands from authority-local use and up to three reviewed similar apps
-from category and tag overlap, and exposes **Copy link** for its portable
-product URL. Changing public identity, discovery metadata, install support, or
-ordered media removes the previous approval until an instance reviewer
-approves the new revision.
+To list an application, an owner opts in from the Developer Portal and
+provides:
 
-Team members can open **Directory listing** to see **Discovery status** and
-**Product page preview** before
-public approval or checklist completion. The private draft preview keeps the
-same bounded identity, media, link, locale, command, and similar-app contracts,
-but permits `verified: false` and nullable incomplete product fields; it never
-invents placeholder content or applies public target-policy visibility. A fixed
-readiness checklist is calculated independently by the application authority,
-and a remote team member reaches the same preview through the replay-bounded
-application-management RPC.
+- a short summary, a category, one to five unique tags and a full description;
+- HTTPS support, privacy-policy and terms links;
+- at least one active install template.
+
+The product page can also show up to five uploaded images and allowlisted
+YouTube video IDs in total, in an order you choose, up to five named HTTPS
+links, the
+Discord locales the app supports, and a localized description for any declared
+locale. A user-install-only listing uses the same consent template as a guild
+listing, but it can claim user-install support only after it publishes an
+active global user-install command.
+
+Kaede adds up to five popular global slash commands, based on use at the app's
+home instance, and up to three reviewed apps with overlapping categories and
+tags. **Copy link** copies the product page's shareable URL.
+
+Changing the app's public identity, discovery details, install support or media
+order withdraws the existing approval until an instance reviewer approves the
+new version.
+
+Team members can open **Directory listing** to check **Discovery status** and
+the **Product page preview** before the listing is approved or the checklist is
+complete. The preview shows only what's been filled in, without placeholder
+content, and a readiness checklist shows what's still missing. Team members on
+other instances see the same preview.
 
 Staff with `bots.manage` review opted-in applications in **Administration →
-Applications**. Approval, removal, and placement in the `featured`,
-`staff-picks`, or `new-and-noteworthy` collections require a visible reason;
-that reason is retained in the administration audit log. A remote application's
-home remains its state authority, so a foreign administrator can apply local
-instance policy but cannot forge the application's approval state.
+Applications**. Approving or removing a listing, or placing it in the
+`featured`, `staff-picks` or `new-and-noteworthy` collection, needs a visible
+reason, which is kept in the audit log. A remote application's approval comes
+from its home instance; you can apply your own instance policy to it but can't
+approve it yourself.
 
-Directory searches are bounded and cursor-paged. A user may search the local
-catalog or choose one exact federated domain. The user's home signs the request,
-the application home applies both the developer's target policy and the
-requesting instance's block state, and the consumer binds every result to the
-requested origin, application reference, filters, collection, ordering, and
-cursor. Silenced or suspended peers cannot enumerate the catalog.
+Directory search covers your own instance's catalog or one federated domain
+you choose. Results come back a page at a time. The app's home instance applies
+the developer's target policy and the requesting instance's block status, and
+silenced or suspended instances can't browse its catalog.
 
-The chat-bar **App Launcher** sits to the right of the web/desktop composer and
-to the left of the native-mobile composer. It keeps recent apps scoped to the
-exact signed-in composite account, groups commands from current installations,
-shows reviewed collections, and searches the selected instance's entire
-catalog. The optional **Directory instance** control defaults to the user's
-home but accepts one canonical federated domain; malformed domains and results
-whose origin differs from that selection fail closed. Apps with no command in
-the current channel still open their authority-attested install review instead
-of producing an inert row. An app account's chat/member profile likewise shows
-**Add App**, using the bot authority's active template even when the app is not
-publicly listed; ordinary friendship controls are never rendered for bots.
+The **App Launcher** sits to the right of the composer on web and desktop, and
+to the left of it on mobile. It shows your recent apps for the signed-in
+account, commands from current installations, reviewed collections, and a
+search of the selected instance's whole catalog. The optional **Directory
+instance** control defaults to your home instance but accepts one federated
+domain; malformed domains, and results from any other instance, are rejected.
+An app with no command in the current channel opens its install review instead
+of showing an empty row. A bot's chat or member profile also shows **Add App**,
+using its active template even when the app isn't publicly listed. Bots never
+show friend controls.
 
 ### Guild installation
 
@@ -426,44 +417,43 @@ Install templates produce shareable links at:
 /applications/{application-ref}/install/{template-slug}
 ```
 
-The invite card shows the application home, bot identity, requested scopes,
-intents, named guild permissions, privacy/support links, and E2EE disclosure. The guild
-chooser includes only guilds where the current user has Manage Guild or
-Administrator. The authoritative guild home rechecks that permission before
-committing the installation.
+The invite card shows the application's home instance, bot identity, requested
+scopes, intents, named guild permissions, privacy and support links, and E2EE
+disclosure. The guild picker lists only guilds where you have Manage Guild or
+Administrator, and the guild's home instance rechecks that permission before
+installing.
 
-The same link works for a guild on another Kaede instance. The target retrieves
-a signed manifest from the application home and applies both operators'
-federation policy. It then creates the bot member and role at the guild
-authority and stores the installation grant. Bot workers connect directly to
-that target instance; runtime traffic is not proxied through the application
-home.
+The same link works for a guild on another Kaede instance. That instance
+fetches a signed manifest from the application's home, applies both
+instances' federation policy, creates the bot member and role, and stores the
+installation grant. Bot workers then connect directly to that instance;
+runtime traffic isn't routed through the application's home.
 
-Guild administrators manage installed bots at
-`/g/{guild-ref}/integrations`. Removal revokes future access, removes the bot
-member and role, advances the grant revision, and sends a signed uninstall to a
-remote application home when required.
+Guild administrators manage installed bots at `/g/{guild-ref}/integrations`.
+Removing a bot revokes its future access, removes its member and role, and
+notifies a remote application home when needed.
 
 ### Commands and E2EE
 
-Command definitions use a bounded Discord-style schema. Option types include
+Commands use a bounded, Discord-style schema. Option types include
 subcommands, strings, integers, numbers, booleans, users, channels, roles,
-mentionables, and attachments. Names, descriptions, choices, numeric and string
-bounds, option counts, nesting depth, and total command-set bytes are validated.
+mentionables and attachments. Kaede validates names, descriptions, choices,
+numeric and string bounds, option counts, nesting depth and the total size of
+the command set.
 
-Installed slash commands appear in the channel composer. Invocations are
-permission checked by the authoritative guild home and delivered over the bot's
-direct Gateway. A bot must respond or defer within 3 seconds; the interaction token
-then stays valid for 15 minutes.
+Installed slash commands appear in the channel composer. The guild's home
+instance checks permissions on each use and delivers the interaction over the
+bot's direct Gateway connection. A bot must respond or defer within 3 seconds;
+the interaction token then stays valid for 15 minutes.
 
 In plaintext channels, content and history require their own scope and the
-`message_content` intent. In an E2EE channel, server-side content and history
-remain unavailable. A `participant` installation can be admitted separately to
-an encrypted channel by a guild administrator. Admission snapshots the app's
-verified devices, rotates room keys, and grants only post-admission history.
-Until a verified bot device is admitted, encrypted payloads remain opaque and
-no API falls back to plaintext. A bot operator that receives room keys becomes
-a recipient and may retain anything the bot decrypts.
+`message_content` intent. In an E2EE channel, the server can't
+provide content or history. A guild administrator can separately admit a
+`participant` installation to an encrypted channel. Admission snapshots the
+app's verified devices, rotates the room keys, and gives the bot only history
+from after admission. Until a verified bot device is admitted, encrypted
+payloads stay opaque and no API falls back to plaintext. A bot operator that
+receives room keys becomes a recipient and may keep anything the bot decrypts.
 
 ### Developer API
 
@@ -502,6 +492,14 @@ See [Bot API quickstart](bot-api-quickstart.md) for the Python SDK and
 [Bot and automation API](bots-and-automations.md) for runtime routes, Gateway
 events, rate limits, federation, and E2EE behavior.
 
-Control and target tokens are stored as hashes; worker private keys stay with
-the worker. Database migrations run through the deployment's `migrate` service.
-See the [operator guide](operator.md) for upgrades and backups.
+Target tokens, like control credentials, are stored as hashes. Database
+migrations run through the deployment's `migrate` service. See the
+[operator guide](operator.md) for upgrades and backups.
+
+### Installing vendor extensions
+
+Install trusted packages under `vendor/extensions/<name>/extension.py`. This directory is ignored by Git. Back it up and distribute it separately. For Kubernetes set `KAEDE_VENDOR_DIR` to the absolute directory containing the packages on each API node, then redeploy and restart the API. Packages execute with the API process's permissions. Install them through your deployment process.
+
+Each entry point exports an `app.vendor.Extension`. Its title and description identify a dashboard pane. Declare text or checkbox fields with a unique key and label. The validator accepts the edited list of records and returns normalized records or raises `ValueError` with a message for the administrator. Configuration is versioned per instance. For task buttons supply an `admin_router` and matching `actions` pairs of route name and label. Buttons POST to the package's named subroute. The connector enforces the extensions management capability on every route. Link packages can return exact-host HTTPS query rules from `link_rules(records, platform)`. Client-visible rules must contain only public values.
+
+With the affiliate package installed, open **Administration → Shopping links**, add a retailer hostname, its query parameter and your shared affiliate code. Select Web, Desktop (Tauri), or Mobile app per program. Selecting no platform pauses the entry. Existing values of that parameter are preserved unless you select **Replace an existing affiliate code**. Confirm the program permits each selected platform and any replacement. Use separate entries for separate hostnames.

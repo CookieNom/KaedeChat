@@ -11,8 +11,10 @@ import CryptoKit
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private static let appGroup = "group.chat.kaede.mobile"
+  private var voiceCuePlayer: AVAudioPlayer?
   private var screenShareChannel: FlutterMethodChannel?
   private var systemCallChannel: FlutterMethodChannel?
+  private var nativeRelayDisabled = false
   private var pushStateChannel: FlutterMethodChannel?
   private var aeadChannel: FlutterMethodChannel?
   private var voipRegistry: PKPushRegistry?
@@ -44,20 +46,27 @@ import CryptoKit
   }
 
   private var voipToken: String?
-  private var pendingVoipTokenResult: FlutterResult?
   private lazy var callProvider: CXProvider = {
     let configuration = CXProviderConfiguration(localizedName: "Kaede Chat")
     configuration.supportsVideo = true
     configuration.maximumCallsPerCallGroup = 1
     configuration.supportedHandleTypes = [.generic]
     let provider = CXProvider(configuration: configuration)
-    provider.setDelegate(self, queue: nil)
+    provider.setDelegate(self, queue: .main)
     return provider
   }()
   private let callController = CXCallController()
   private var callIDs: [String: UUID] = [:]
   private var callDetails: [String: (channel: String, caller: String)] = [:]
   private var pendingCallActions: [UUID: String] = [:]
+  private var answerActions: [UUID: CXAnswerCallAction] = [:]
+  private var activeCalls = Set<UUID>()
+  private var callAccounts: [UUID: String] = [:]
+  private var callAccount: String?
+  private var queuedActions: [String: (action: String, arguments: [String: String])] = [:]
+  private var delivering = Set<String>()
+  private var callAudioActive = false
+  private var externalAudio = false
 
   override func application(
     _ application: UIApplication,
@@ -78,6 +87,33 @@ import CryptoKit
     recordDebugEvent("implicit_engine_initializing")
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     recordDebugEvent("plugins_registered")
+    let cues = FlutterMethodChannel(
+      name: "chat.kaede.mobile/voice_cues",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    cues.setMethodCallHandler { [weak self] call, result in
+      guard ["join", "leave"].contains(call.method) else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let key = FlutterDartProject.lookupKey(forAsset: "assets/sounds/\(call.method).wav")
+      guard let path = Bundle.main.path(forResource: key, ofType: nil) else {
+        result(FlutterError(code: "MISSING_CUE", message: nil, details: nil))
+        return
+      }
+      do {
+        // LiveKit owns the recording session and its route.
+        let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        self?.voiceCuePlayer = player
+        if player.play(), call.method == "leave" {
+          DispatchQueue.main.asyncAfter(deadline: .now() + min(player.duration, 0.8)) { result(nil) }
+        } else {
+          result(nil)
+        }
+      } catch {
+        result(FlutterError(code: "CUE_FAILED", message: nil, details: nil))
+      }
+    }
     let channel = FlutterMethodChannel(
       name: "chat.kaede.mobile/screen_share",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
@@ -124,20 +160,44 @@ import CryptoKit
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     )
     calls.setMethodCallHandler { [weak self] call, result in
-      guard let self,
-            let arguments = call.arguments as? [String: Any],
-            let callID = arguments["callId"] as? String,
-            !callID.isEmpty else {
+      guard let self else { result(nil); return }
+      let arguments = call.arguments as? [String: Any] ?? [:]
+      if call.method == "ready" {
+        self.callAccount = arguments["accountKey"] as? String
+        self.reportCallAudio()
+        for id in Array(self.queuedActions.keys) { self.deliverCallAction(id) }
+        result(nil)
+        return
+      }
+      if call.method == "reset" {
+        self.callAccount = nil
+        self.queuedActions.removeAll()
+        for id in Array(self.callIDs.keys) { self.endSystemCall(callID: id) { _ in } }
+        result(nil)
+        return
+      }
+      guard let callID = arguments["callId"] as? String, !callID.isEmpty else {
         result(FlutterError(code: "INVALID_CALL", message: "A call identifier is required.", details: nil))
         return
       }
       switch call.method {
       case "showIncoming":
         let caller = arguments["callerName"] as? String ?? "Kaede caller"
+        if let channel = arguments["channelRef"] as? String { self.callDetails[callID] = (channel, caller) }
         self.reportIncoming(callID: callID, caller: caller, result: result)
+        if let uuid = self.callIDs[callID] { self.callAccounts[uuid] = arguments["accountKey"] as? String }
       case "setActive":
-        if let uuid = self.callIDs[callID] {
-          self.callProvider.reportOutgoingCall(with: uuid, connectedAt: Date())
+        guard let uuid = self.callIDs[callID] else { result(nil); return }
+        if let answer = self.answerActions.removeValue(forKey: uuid) {
+          self.activeCalls.insert(uuid)
+          answer.fulfill(withDateConnected: Date())
+        } else if !self.activeCalls.contains(uuid) {
+          self.activeCalls.insert(uuid)
+          self.callController.request(CXTransaction(action: CXAnswerCallAction(call: uuid))) { error in
+            DispatchQueue.main.async {
+              if error != nil { self.activeCalls.remove(uuid) }
+            }
+          }
         }
         result(nil)
       case "end":
@@ -179,7 +239,7 @@ import CryptoKit
         result(FlutterError(code: "APP_GROUP_UNAVAILABLE", message: "Kaede's app group is unavailable.", details: nil))
         return
       }
-      let stateURL = directory.appendingPathComponent("push-state.json")
+      var stateURL = directory.appendingPathComponent("push-state.json")
       switch call.method {
       case "setRelayState":
         guard let values = call.arguments as? [String: String],
@@ -193,6 +253,7 @@ import CryptoKit
         do {
           var state: [String: String] = [
             "home": home,
+            "account_key": values["accountKey"] ?? "",
             "installation_id": installationID,
             "route_id": routeID,
             "wake_secret": wakeSecret,
@@ -201,19 +262,28 @@ import CryptoKit
           state["voip_wake_secret"] = values["voipWakeSecret"]
           let data = try JSONSerialization.data(withJSONObject: state)
           try data.write(to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+          var attributes = URLResourceValues()
+          attributes.isExcludedFromBackup = true
+          try stateURL.setResourceValues(attributes)
+          self.nativeRelayDisabled = false
           result(nil)
         } catch {
+          self.nativeRelayDisabled = true
+          try? FileManager.default.removeItem(at: stateURL)
           result(FlutterError(code: "PUSH_STATE_WRITE_FAILED", message: error.localizedDescription, details: nil))
         }
       case "clearRelayState":
-        try? FileManager.default.removeItem(at: stateURL)
-        result(nil)
-      case "voipToken":
-        if let token = self.voipToken {
-          result(token)
-        } else {
-          self.pendingVoipTokenResult = result
+        self.nativeRelayDisabled = true
+        do {
+          try FileManager.default.removeItem(at: stateURL)
+          result(nil)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+          result(nil)
+        } catch {
+          result(FlutterError(code: "PUSH_STATE_CLEAR_FAILED", message: error.localizedDescription, details: nil))
         }
+      case "voipToken":
+        result(self.voipToken)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -292,6 +362,7 @@ import CryptoKit
       DispatchQueue.main.async {
         if let error {
           self.callIDs.removeValue(forKey: callID)
+          self.releaseCall(uuid, callID: callID)
           result(FlutterError(code: "CALLKIT_INCOMING_FAILED", message: error.localizedDescription, details: nil))
         } else {
           result(nil)
@@ -301,20 +372,25 @@ import CryptoKit
   }
 
   private func endSystemCall(callID: String, result: @escaping FlutterResult) {
-    guard let uuid = callIDs[callID] else {
-      result(nil)
-      return
+    queuedActions.removeValue(forKey: callID)
+    if let uuid = callIDs.removeValue(forKey: callID) {
+      callProvider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded)
+      releaseCall(uuid, callID: callID)
     }
-    let transaction = CXTransaction(action: CXEndCallAction(call: uuid))
-    callController.request(transaction) { error in
-      DispatchQueue.main.async {
-        if let error {
-          result(FlutterError(code: "CALLKIT_END_FAILED", message: error.localizedDescription, details: nil))
-        } else {
-          result(nil)
-        }
-      }
-    }
+    result(nil)
+  }
+
+  private func releaseCall(_ uuid: UUID, callID: String) {
+    answerActions.removeValue(forKey: uuid)?.fail()
+    pendingCallActions.removeValue(forKey: uuid)
+    callDetails.removeValue(forKey: callID)
+    callAccounts.removeValue(forKey: uuid)
+    activeCalls.remove(uuid)
+    if activeCalls.isEmpty && answerActions.isEmpty { externalAudio = false; reportCallAudio() }
+  }
+
+  private func reportCallAudio() {
+    systemCallChannel?.invokeMethod("audio", arguments: ["external": externalAudio, "active": callAudioActive])
   }
 }
 
@@ -327,9 +403,9 @@ extension AppDelegate: PKPushRegistryDelegate {
     guard type == .voIP else { return }
     recordDebugEvent("voip_token_received")
     let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
+    let changed = voipToken != token
     voipToken = token
-    pendingVoipTokenResult?(token)
-    pendingVoipTokenResult = nil
+    if changed { pushStateChannel?.invokeMethod("voipTokenChanged", arguments: nil) }
   }
 
   func pushRegistry(
@@ -338,6 +414,7 @@ extension AppDelegate: PKPushRegistryDelegate {
   ) {
     guard type == .voIP else { return }
     voipToken = nil
+    pushStateChannel?.invokeMethod("voipTokenChanged", arguments: nil)
   }
 
   func pushRegistry(
@@ -347,33 +424,45 @@ extension AppDelegate: PKPushRegistryDelegate {
     completion: @escaping () -> Void
   ) {
     recordDebugEvent("voip_push_received")
-    guard type == .voIP,
-          let wake = VoipWake(payload.dictionaryPayload),
+    guard type == .voIP else { completion(); return }
+    guard let wake = VoipWake(payload.dictionaryPayload),
           let state = nativeRelayState(),
           wake.routeID == state.voipRouteID,
           authenticate(wake: wake, secret: state.voipWakeSecret) else {
       recordDebugEvent("voip_wake_rejected")
-      completion()
+      let uuid = UUID()
+      let update = CXCallUpdate()
+      update.remoteHandle = CXHandle(type: .generic, value: "Kaede")
+      callProvider.reportNewIncomingCall(with: uuid, update: update) { error in
+        if error == nil {
+          self.callProvider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+        }
+        completion()
+      }
       return
     }
     let uuid = UUID()
     callIDs[wake.deliveryID] = uuid
+    callAccounts[uuid] = state.accountKey
     let update = CXCallUpdate()
     update.remoteHandle = CXHandle(type: .generic, value: "Kaede caller")
     update.localizedCallerName = "Kaede caller"
     update.hasVideo = true
     callProvider.reportNewIncomingCall(with: uuid, update: update) { error in
       completion()
-      if let error {
-        self.recordDebugEvent("voip_callkit_failed code=\((error as NSError).code)")
-      } else {
-        self.recordDebugEvent("voip_callkit_reported")
+      DispatchQueue.main.async {
+        if let error {
+          self.recordDebugEvent("voip_callkit_failed code=\((error as NSError).code)")
+        } else {
+          self.recordDebugEvent("voip_callkit_reported")
+        }
+        guard error == nil else {
+          self.callIDs.removeValue(forKey: wake.deliveryID)
+          self.releaseCall(uuid, callID: wake.deliveryID)
+          return
+        }
+        self.redeemVoipWake(wake, state: state, uuid: uuid)
       }
-      guard error == nil else {
-        self.callIDs.removeValue(forKey: wake.deliveryID)
-        return
-      }
-      self.redeemVoipWake(wake, state: state, uuid: uuid)
     }
   }
 
@@ -394,18 +483,30 @@ extension AppDelegate: PKPushRegistryDelegate {
     ])
     URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
       DispatchQueue.main.async {
-        guard let self, let response = response as? HTTPURLResponse,
+        guard let self, self.callIDs[wake.deliveryID] == uuid, self.nativeRelayState()?.voipRouteID == wake.routeID,
+              let response = response as? HTTPURLResponse,
               response.statusCode == 200, let data,
               let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               result["kind"] as? String == "call",
               let callID = result["event_ref"] as? String,
               let channel = result["channel_ref"] as? String,
               let caller = result["title"] as? String else {
+          self?.callIDs.removeValue(forKey: wake.deliveryID)
+          self?.releaseCall(uuid, callID: wake.deliveryID)
           self?.recordDebugEvent("voip_redemption_failed status=\((response as? HTTPURLResponse)?.statusCode ?? 0)")
           self?.callProvider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
           return
         }
         self.callIDs.removeValue(forKey: wake.deliveryID)
+        if let previous = self.callIDs[callID], previous != uuid {
+          if self.activeCalls.contains(previous) || self.pendingCallActions[uuid] == nil {
+            self.callProvider.reportCall(with: uuid, endedAt: Date(), reason: .answeredElsewhere)
+            self.releaseCall(uuid, callID: wake.deliveryID)
+            return
+          }
+          self.callProvider.reportCall(with: previous, endedAt: Date(), reason: .answeredElsewhere)
+          self.releaseCall(previous, callID: callID)
+        }
         self.callIDs[callID] = uuid
         self.callDetails[callID] = (channel, caller)
         let update = CXCallUpdate()
@@ -415,6 +516,10 @@ extension AppDelegate: PKPushRegistryDelegate {
         self.callProvider.reportCall(with: uuid, updated: update)
         if let action = self.pendingCallActions.removeValue(forKey: uuid) {
           self.emitCallAction(action, callID: callID)
+          if action != "answer" {
+            self.callIDs.removeValue(forKey: callID)
+            self.releaseCall(uuid, callID: callID)
+          }
         }
       }
     }.resume()
@@ -426,11 +531,35 @@ extension AppDelegate: PKPushRegistryDelegate {
       arguments["channelRef"] = details.channel
       arguments["callerName"] = details.caller
     }
-    systemCallChannel?.invokeMethod(action, arguments: arguments)
+    if let uuid = callIDs[callID] { arguments["accountKey"] = callAccounts[uuid] }
+    queuedActions[callID] = (action, arguments)
+    deliverCallAction(callID)
+  }
+
+  private func deliverCallAction(_ callID: String) {
+    guard let account = callAccount, let event = queuedActions[callID], let channel = systemCallChannel,
+          !delivering.contains(callID) else { return }
+    if let owner = event.arguments["accountKey"], !owner.isEmpty, owner != account {
+      queuedActions.removeValue(forKey: callID)
+      endSystemCall(callID: callID) { _ in }
+      return
+    }
+    delivering.insert(callID)
+    channel.invokeMethod(event.action, arguments: event.arguments) { [weak self] reply in
+      guard let self else { return }
+      self.delivering.remove(callID)
+      if reply as? Bool == false && event.action == "answer" {
+        UIApplication.shared.requestSceneSessionActivation(nil, userActivity: nil, options: nil, errorHandler: nil)
+      }
+      if reply as? Bool == true {
+        if self.queuedActions[callID]?.action == event.action { self.queuedActions.removeValue(forKey: callID) }
+        else { self.deliverCallAction(callID) }
+      }
+    }
   }
 
   private func nativeRelayState() -> NativeRelayState? {
-    guard let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup),
+    guard !nativeRelayDisabled, let directory = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup),
           let data = try? Data(contentsOf: directory.appendingPathComponent("push-state.json")) else { return nil }
     return try? JSONDecoder().decode(NativeRelayState.self, from: data)
   }
@@ -446,9 +575,14 @@ extension AppDelegate: PKPushRegistryDelegate {
 
 extension AppDelegate: CXProviderDelegate {
   func providerDidReset(_ provider: CXProvider) {
-    let ended = Array(callIDs.keys)
+    for (id, uuid) in Array(callIDs) {
+      if callDetails[id] != nil { emitCallAction(activeCalls.contains(uuid) ? "ended" : "decline", callID: id) }
+      releaseCall(uuid, callID: id)
+    }
     callIDs.removeAll()
-    ended.forEach { systemCallChannel?.invokeMethod("ended", arguments: ["callId": $0]) }
+    callAudioActive = false
+    externalAudio = false
+    reportCallAudio()
   }
 
   func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
@@ -456,33 +590,52 @@ extension AppDelegate: CXProviderDelegate {
       action.fail()
       return
     }
-    if callID.contains("@") {
-      emitCallAction("answer", callID: callID)
-    } else {
-      pendingCallActions[action.callUUID] = "answer"
+    externalAudio = true
+    reportCallAudio()
+    if activeCalls.contains(action.callUUID) { action.fulfill(withDateConnected: Date()); return }
+    answerActions[action.callUUID] = action
+    if callDetails[callID] != nil { emitCallAction("answer", callID: callID) }
+    else { pendingCallActions[action.callUUID] = "answer" }
+    if callAccount == nil {
+      UIApplication.shared.requestSceneSessionActivation(nil, userActivity: nil, options: nil, errorHandler: nil)
     }
-    action.fulfill()
+  }
+
+  func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+    guard let answer = action as? CXAnswerCallAction,
+          let callID = callIDs.first(where: { $0.value == answer.callUUID })?.key else { return }
+    queuedActions.removeValue(forKey: callID)
+    endSystemCall(callID: callID) { _ in }
   }
 
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-    guard let entry = callIDs.first(where: { $0.value == action.callUUID }) else {
-      action.fulfill()
-      return
-    }
-    callIDs.removeValue(forKey: entry.key)
-    if entry.key.contains("@") {
-      emitCallAction("decline", callID: entry.key)
+    guard let entry = callIDs.first(where: { $0.value == action.callUUID }) else { action.fulfill(); return }
+    let kind = activeCalls.contains(action.callUUID) ? "ended" : "decline"
+    if callDetails[entry.key] != nil {
+      emitCallAction(kind, callID: entry.key)
+      callIDs.removeValue(forKey: entry.key)
+      releaseCall(action.callUUID, callID: entry.key)
     } else {
-      pendingCallActions[action.callUUID] = "decline"
+      pendingCallActions[action.callUUID] = kind
+    }
+    if callAccount == nil {
+      UIApplication.shared.requestSceneSessionActivation(nil, userActivity: nil, options: nil, errorHandler: nil)
     }
     action.fulfill()
   }
 
-  func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {}
-  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {}
+  func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+    callAudioActive = true
+    reportCallAudio()
+  }
+  func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+    callAudioActive = false
+    reportCallAudio()
+  }
 }
 
 private struct NativeRelayState: Decodable {
+  let accountKey: String?
   let home: String
   let installationID: String
   let voipRouteID: String
@@ -490,6 +643,7 @@ private struct NativeRelayState: Decodable {
 
   enum CodingKeys: String, CodingKey {
     case home
+    case accountKey = "account_key"
     case installationID = "installation_id"
     case voipRouteID = "voip_route_id"
     case voipWakeSecret = "voip_wake_secret"

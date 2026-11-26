@@ -29,6 +29,7 @@ from app.core.federation import (
     authority_attested_media_delete_ref,
     authority_attested_terminal_guild_actor,
     canonical_json,
+    deletion_control_envelope,
     durable_guild_media_delete_request,
     durable_terminal_room_event,
     federation_policy_holds_event,
@@ -832,11 +833,10 @@ async def queue_event(
             raise ValueError("interaction response event expiry is invalid")
     if event_origin != settings.domain and event_type != "media.delete":
         raise ValueError("only origin-signed media tombstones may be relayed")
-    deletion_control = event_type == "media.delete" or durable_room_delete or durable_media_request
     durable_projection = event_type in DURABLE_LATEST_STATE_EVENTS
     policy_held = (
         block is not None
-        and not deletion_control
+        and not deletion_control_envelope(envelope)
         and federation_policy_holds_event(
             block.level,
             event_type,

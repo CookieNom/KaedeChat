@@ -6,8 +6,11 @@ import { userDisplayName } from '$lib/chat/users';
 import { assetUrl } from '$lib/media/assets';
 import { directMessagePath, guildChannelPath } from '$lib/navigation/routes';
 import { chatEntities } from '$lib/stores/entities.svelte';
+import { presenceControl } from '$lib/stores/presence.svelte';
 import { isNativeDesktop, nativeError, nativeInvoke } from '$lib/platform/native';
 import { SvelteMap, SvelteSet, SvelteURL } from 'svelte/reactivity';
+
+import { ringtoneFromSetting } from '$lib/voice/call-sounds';
 
 export type GuildNotificationLevel = 'all' | 'mentions' | 'none';
 
@@ -95,6 +98,7 @@ export function notificationAuthorName(author: UserSummary | null | undefined): 
 export class BrowserNotifications {
   enabled = $state(false);
   configured = $state(false);
+  ringtone = $state<ReturnType<typeof ringtoneFromSetting>>('chime');
   permission = $state<NotificationPermission>('default');
   permissionError = $state('');
   promptHandled = $state(false);
@@ -115,6 +119,7 @@ export class BrowserNotifications {
   }
 
   apply(settings: Record<string, unknown>): void {
+    this.ringtone = ringtoneFromSetting(settings.call_ringtone);
     this.configured = browserNotificationsConfigured(settings);
     this.enabled = browserNotificationsFromSettings(settings);
     this.#settingsLoaded = true;
@@ -343,13 +348,11 @@ export class BrowserNotifications {
     }
     if (!this.enabled) return true;
     const projectedPresence = chatEntities.presenceFor(currentUser);
-    let storedPresence: string | null = null;
-    try {
-      storedPresence = window.localStorage.getItem('kaede.presence');
-    } catch {
-      // The live presence projection remains authoritative when storage is unavailable.
-    }
-    const currentPresence = resolveNotificationPresence(storedPresence, projectedPresence);
+    if (presenceControl.state?.suppress_notifications) return true;
+    const currentPresence = resolveNotificationPresence(
+      presenceControl.state?.effective_status ?? null,
+      projectedPresence
+    );
     this.#healthIssues.delete('entities');
     const isDirectMessage = channel.guild_id === null;
     const guildLevel =

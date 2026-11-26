@@ -1464,19 +1464,23 @@ async def _reconcile_bot_e2ee_participations(
     owner_field: Literal["installation_id", "dm_grant_id"],
     owner_id: int,
     consent_generation: int | None = None,
-) -> None:
+) -> bool:
     """Reconcile one channel's device rows for guild and DM bot grants."""
 
     accepted_ids = {device.id for device in devices}
     by_device = {participation.device_id: participation for participation in existing}
+    needs_rekey = False
     now = datetime.now(UTC)
     for participation in existing:
         if participation.device_id not in accepted_ids and participation.status != "revoked":
+            needs_rekey = True
             participation.status = "revoked"
             participation.revoked_at = now
             participation.consent_generation += 1
     for device in devices:
         current = by_device.get(device.id)
+        if current is None or current.status != "active":
+            needs_rekey = True
         if current is None:
             session.add(
                 BotE2EEParticipation(
@@ -1511,6 +1515,7 @@ async def _reconcile_bot_e2ee_participations(
             current.history_floor_message_domain = channel.last_message_domain
             current.consenting_actor_id = actor.id
             current.consenting_actor_domain = actor.origin_domain
+    return needs_rekey
 
 
 async def _grant_dm_bot_e2ee(
@@ -1660,6 +1665,12 @@ async def _grant_dm_bot_e2ee(
         BotDMGrantConsent,
         (grant.id, actor.id, actor.origin_domain),
     )
+    consent_changed = (
+        consent is None
+        or consent.consent_generation != grant.consent_generation
+        or consent.status != "active"
+        or consent.revoked_at is not None
+    )
     if consent is None:
         session.add(
             BotDMGrantConsent(
@@ -1690,9 +1701,11 @@ async def _grant_dm_bot_e2ee(
     )
     participant_refs = {(item.id, item.origin_domain) for item in participants}
     if participant_refs <= active_consents:
+        newly_approved = consent_changed or grant.consent_state != "active"
         grant.consent_state = "active"
-        grant.history_floor_message_id = channel.last_message_id
-        grant.history_floor_message_domain = channel.last_message_domain
+        if newly_approved:
+            grant.history_floor_message_id = channel.last_message_id
+            grant.history_floor_message_domain = channel.last_message_domain
         existing = list(
             await session.scalars(
                 select(BotE2EEParticipation)
@@ -1700,7 +1713,7 @@ async def _grant_dm_bot_e2ee(
                 .with_for_update()
             )
         )
-        await _reconcile_bot_e2ee_participations(
+        needs_rekey = await _reconcile_bot_e2ee_participations(
             session,
             snowflake,
             existing=existing,
@@ -1711,7 +1724,8 @@ async def _grant_dm_bot_e2ee(
             owner_id=grant.id,
             consent_generation=grant.consent_generation,
         )
-        await _pause_dm_bot_participation(session, channel)
+        if newly_approved or needs_rekey or application.origin_domain != settings.domain:
+            await _pause_dm_bot_participation(session, channel)
     await session.commit()
     await publish_e2ee_policy_updates(session, redis, settings, [channel])
     return await _dm_grant_state(session, grant, channel, participants)
@@ -2081,7 +2095,7 @@ async def _grant_bot_e2ee_participation(
             .with_for_update()
         )
     )
-    await _reconcile_bot_e2ee_participations(
+    needs_rekey = await _reconcile_bot_e2ee_participations(
         session,
         snowflake,
         existing=existing,
@@ -2091,6 +2105,12 @@ async def _grant_bot_e2ee_participation(
         owner_field="installation_id",
         owner_id=installation.id,
     )
+    if not needs_rekey and application.origin_domain == settings.domain:
+        await session.commit()
+        await publish_committed_dispatches(session, redis)
+        return await _list_bot_e2ee_participation(
+            session, redis, settings, guild, channel_ref, application_ref, actor
+        )
     await _sync_bot_participation_policy(
         session,
         redis,

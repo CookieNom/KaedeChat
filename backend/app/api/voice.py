@@ -4,7 +4,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -85,6 +85,7 @@ from app.voice.service import (
     parse_minted_metadata,
     priority_speaking_granted,
     publish_bot_voice_session_update,
+    require_media_key_support,
     require_voice_enabled,
     update_authoritative_occupant_grant,
     update_authoritative_occupant_self_state,
@@ -484,6 +485,7 @@ async def channel_voice_token(
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
     payload: VoiceTokenRequest | None = None,
+    media_key_bits: Annotated[str | None, Header(alias="X-Kaede-Media-Key-Bits")] = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     channel_id, channel_domain = channel_ref.resolve(settings.domain)
@@ -500,6 +502,7 @@ async def channel_voice_token(
                 "permissions": str(int(Permission.CONNECT)),
             },
         )
+    require_media_key_support(channel, media_key_bits == "256")
     identity = participant_identity(auth.user.id, auth.user.origin_domain)
     sender_device_id = payload.sender_device_id if payload is not None else None
     connection_id = (
@@ -535,6 +538,7 @@ async def channel_voice_token(
         guild=guild,
         actor=auth.user,
         sender_device_id=sender_device_id,
+        supports_aes256=media_key_bits == "256",
         connection_id=connection_id,
         takeover=takeover,
         client_kind=client_kind,
@@ -549,6 +553,7 @@ async def federation_voice_token(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    media_key_bits: str | None = None,
 ) -> VoiceTokenResponse:
     require_voice_enabled(settings)
     require_guild_federation_access(principal)
@@ -566,6 +571,7 @@ async def federation_voice_token(
     if actor.account_type != "human":
         raise HTTPException(status_code=403, detail={"code": "VOICE_DENIED"})
     await require_remote_user_creation_allowed(session, actor)
+    require_media_key_support(channel, media_key_bits == "256")
     return await authoritative_guild_token(
         session,
         redis,
@@ -770,6 +776,9 @@ async def update_member_voice_moderation(
             "VOICE_STATE_UPDATE",
             {
                 "guild_id": str(guild.id),
+                "room": room,
+                "channel_id": str(room_channel_id),
+                "channel_domain": guild.origin_domain,
                 "user_id": str(user_id),
                 "user_domain": user_domain,
                 "server_mute": bool(flags & VOICE_SERVER_MUTE),
@@ -1588,13 +1597,11 @@ async def process_livekit_event(
                 or str(metadata.get("channel_domain")) != str(call.get("channel_domain"))
             ):
                 return await revoke_current_join(connection_id, str(metadata["client_kind"]))
-            dm_channel = await session.get(
-                Channel,
-                (scope_id, str(call["channel_domain"])),
+            from app.api.calls import active_dm_voice_participant
+
+            actor = await active_dm_voice_participant(
+                session, settings, call, (user_id, user_domain), room, metadata
             )
-            if dm_channel is None or not voice_metadata_matches_policy(dm_channel, room, metadata):
-                return await revoke_current_join(connection_id, str(metadata["client_kind"]))
-            actor = await session.get(User, (user_id, user_domain))
             if actor is None:
                 return await revoke_current_join(connection_id, str(metadata["client_kind"]))
             if actor.account_type == "bot":

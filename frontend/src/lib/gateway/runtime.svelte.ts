@@ -1,4 +1,5 @@
 import { entityKey } from '$lib/chat/refs';
+import { mergeMessageUpdate } from '$lib/chat/reconcile';
 import {
   applyContentSafetyUpdate,
   contentSafety,
@@ -43,6 +44,11 @@ import {
   type ReadStateDispatch
 } from '$lib/notifications/read-state';
 import { chatEntities } from '$lib/stores/entities.svelte';
+import {
+  isPresenceStatePayload,
+  presenceControl,
+  type PresenceStatePayload
+} from '$lib/stores/presence.svelte';
 import { guildNavigation } from '$lib/stores/guild-navigation.svelte';
 import {
   interactionResponses,
@@ -63,6 +69,7 @@ type ReadyPayload = {
   }>;
   read_states: ReadStateStatus[];
   presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
+  presence_state?: PresenceStatePayload;
 };
 
 const guildProjectionRefreshGenerations = new SvelteMap<string, number>();
@@ -118,21 +125,28 @@ function cancelGuildProjectionRefresh(guildId?: string, guildDomain?: string): v
 }
 
 function applyOwnPresencePreference(
-  preference: 'online' | 'idle' | 'dnd' | 'invisible' | undefined
+  preference: 'online' | 'idle' | 'dnd' | 'invisible' | undefined,
+  state?: PresenceStatePayload | null
 ): void {
-  if (!preference) return;
-  authenticatedGateway.client.rememberPresence(preference);
+  const effective = state?.effective_status ?? preference;
+  if (!effective) return;
+  authenticatedGateway.client.rememberPresence(effective);
   if (chatEntities.currentUser) {
     chatEntities.setPresence(
       chatEntities.currentUser,
-      preference === 'invisible' ? 'offline' : preference
+      effective === 'invisible' ? 'offline' : effective
     );
   }
-  try {
-    globalThis.localStorage?.setItem('kaede.presence', preference);
-  } catch {
-    // Live state still updates when persistent storage is unavailable.
+  if (state && isPresenceStatePayload(state)) {
+    presenceControl.apply(state);
+  } else {
+    presenceControl.applyFallbackPreference(effective);
   }
+}
+
+function storeMessageDispatch(message: Message): void {
+  const current = chatEntities.messages.get(entityKey(message));
+  chatEntities.messages.upsert(mergeMessageUpdate(current ?? message, message));
 }
 
 function applyEntityDispatch(dispatch: Dispatch): void {
@@ -176,6 +190,13 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       // indefinitely leaving—an empty member list. Account changes still clear
       // all member data before the new READY is applied. Likewise, preserve
       // history that HTTP may have loaded before the initial READY arrives.
+      if (
+        chatEntities.currentUser &&
+        entityKey(chatEntities.currentUser) !== entityKey(ready.user)
+      ) {
+        authenticatedGateway.joinedDmCall = null;
+        presenceControl.reset();
+      }
       chatEntities.beginGatewaySession(ready.user);
       authenticatedGateway.applyRelationships(ready.relationships);
       void authenticatedGateway.retryContentSafety();
@@ -183,7 +204,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       chatEntities.ingestDirectMessages(ready.dm_channels);
       chatEntities.ingestPresences(ready.presences ?? []);
       chatEntities.readStates.upsertMany(ready.read_states);
-      applyOwnPresencePreference(ready.presence_preference);
+      applyOwnPresencePreference(ready.presence_preference, ready.presence_state);
       return;
     }
     case 'RESUMED': {
@@ -191,6 +212,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
       void authenticatedGateway.retryContentSafety();
       const resumed = dispatch.d as {
         presence_preference?: 'online' | 'idle' | 'dnd' | 'invisible';
+        presence_state?: PresenceStatePayload;
         presences?: Array<{
           user_id: string;
           user_domain: string;
@@ -198,14 +220,14 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         }>;
       };
       chatEntities.ingestPresences(resumed.presences ?? []);
-      applyOwnPresencePreference(resumed.presence_preference);
+      applyOwnPresencePreference(resumed.presence_preference, resumed.presence_state);
       return;
     }
     case 'MESSAGE_CREATE': {
       const message = dispatch.d as Message;
       // The channel publishes encrypted messages after decryption. Inserting the
       // raw echo here briefly displays a failure beside the readable local draft.
-      if (!message.e2ee) chatEntities.messages.upsert(message);
+      if (!message.e2ee) storeMessageDispatch(message);
       const channel = chatEntities.channels.get(`${message.channel_id}@${message.channel_domain}`);
       if (channel?.guild_id === null) chatEntities.channels.upsert(channel, { append: false });
       chatEntities.readStates.replace(
@@ -248,7 +270,7 @@ function applyEntityDispatch(dispatch: Dispatch): void {
           );
         }
       } else {
-        chatEntities.messages.upsert(message);
+        storeMessageDispatch(message);
       }
       return;
     }
@@ -604,17 +626,18 @@ function applyEntityDispatch(dispatch: Dispatch): void {
         user_domain: string;
         status: PresenceStatus;
         preference?: 'online' | 'idle' | 'dnd' | 'invisible';
+        presence_state?: PresenceStatePayload;
       };
       chatEntities.setPresence(
         { id: presence.user_id, origin_domain: presence.user_domain },
         presence.status
       );
       if (
-        presence.preference &&
+        (presence.preference || presence.presence_state) &&
         chatEntities.currentUser?.id === presence.user_id &&
         chatEntities.currentUser.origin_domain === presence.user_domain
       ) {
-        applyOwnPresencePreference(presence.preference);
+        applyOwnPresencePreference(presence.preference, presence.presence_state);
       }
       return;
     }
@@ -658,6 +681,8 @@ function applyEntityDispatch(dispatch: Dispatch): void {
 
 class AuthenticatedGatewayRuntime {
   readonly client = new GatewayClient();
+  // Joining is an explicit choice in this tab and login, independent of server call membership.
+  joinedDmCall: { owner: string; id: string; authority: string } | null = null;
   status = $state<GatewayStatus>({ state: 'connecting', message: '' });
   #started = false;
   #safetyBootstrap: Promise<void> | null = null;
@@ -676,13 +701,27 @@ class AuthenticatedGatewayRuntime {
         browserNotifications.notifyMessage(dispatch.d as Message);
       }
     }
-    if (dispatch.t === 'READ_STATE_UPDATE') this.#readStateSync?.postMessage(dispatch.d);
+    if (dispatch.t === 'READ_STATE_UPDATE' && chatEntities.currentUser) {
+      this.#readStateSync?.postMessage({
+        account: entityKey(chatEntities.currentUser),
+        update: dispatch.d
+      });
+    }
   };
   #receiveReadState = (event: MessageEvent<unknown>) => {
-    const value = event.data as Partial<ReadStateStatus> | null;
-    if (value && typeof value.channel_id === 'string' && typeof value.channel_domain === 'string') {
-      chatEntities.readStates.upsert(value as ReadStateStatus);
-    }
+    const message = event.data as { account?: string; update?: ReadStateDispatch } | null;
+    const user = chatEntities.currentUser;
+    const update = message?.update;
+    if (
+      !user ||
+      message?.account !== entityKey(user) ||
+      !update ||
+      typeof update.channel_id !== 'string' ||
+      typeof update.channel_domain !== 'string' ||
+      typeof update.mention_count !== 'number'
+    )
+      return;
+    chatEntities.readStates.replace(applyReadStateDispatch(chatEntities.readStates.values, update));
   };
   #updateStatus = (event: Event) => {
     this.status = (event as CustomEvent<GatewayStatus>).detail;
@@ -757,7 +796,7 @@ class AuthenticatedGatewayRuntime {
     this.client.addEventListener('dispatch', this.#reduce);
     this.client.addEventListener(GATEWAY_STATUS_EVENT, this.#updateStatus);
     if (typeof BroadcastChannel !== 'undefined') {
-      this.#readStateSync = new BroadcastChannel('kaede-read-states');
+      this.#readStateSync = new BroadcastChannel('kaede-read-states-v2');
       this.#readStateSync.addEventListener('message', this.#receiveReadState);
     }
     this.client.connect();
@@ -782,6 +821,8 @@ class AuthenticatedGatewayRuntime {
     this.status = { state: 'connecting', message: '' };
     guildProjectionSession += 1;
     guildProjectionRefreshGenerations.clear();
+    this.joinedDmCall = null;
+    presenceControl.reset();
     chatEntities.clearSession();
     interactionResponses.reset();
   }

@@ -5507,6 +5507,7 @@
   },
   "encryption_component_unavailable": "このバージョンのKaedeではエンドツーエンド暗号化を使用できません。暗号化されたメッセージと通話を利用するには、アプリを更新してください。",
   "encrypted_voice_setup_failed": "この通話の暗号鍵を開けませんでした。暗号化された会話を開いて、もう一度通話に参加してください。",
+  "voice_encryption_changed": "通話の暗号化設定が変更されました。もう一度参加してください。",
   "ui_voice_connection_interrupted_reconnecting_6458068c": "音声接続が中断されました。再接続中…",
   "@ui_voice_connection_interrupted_reconnecting_6458068c": {
     "description": "Interface text in lib/src/features/voice/voice_session.dart"

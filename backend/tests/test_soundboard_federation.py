@@ -57,6 +57,95 @@ def request_payload(
     )
 
 
+def test_fractional_play_roundtrips_through_signed_json_and_renders_numeric_volume():
+    from app.core.federation import canonical_json
+    from app.core.json_limits import strict_json_loads
+
+    original = play_payload()
+    wire = original.model_dump(mode="json", context={"federation": True})
+    assert wire["request"]["volume"] == "0.75"
+    decoded = SoundboardFederationPlay.model_validate(strict_json_loads(canonical_json(wire)))
+    assert decoded == original
+    assert decoded.capability.model_dump(mode="json")["effective_volume"] == 0.6
+
+
+@pytest.mark.asyncio
+async def test_fractional_sound_changes_advance_legacy_and_current_guild_feeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    from app.api import federation
+    from app.chat import guild_revision
+
+    settings = SimpleNamespace(domain="authority.example")
+    guild = Guild(id=10, origin_domain=settings.domain, snapshot_generation=1, next_event_seq=3)
+    actor = User(id=20, origin_domain=settings.domain)
+    legacy, current = "legacy.example", "current.example"
+    session = SimpleNamespace(
+        scalars=AsyncMock(return_value=[current]),
+        scalar=AsyncMock(return_value=True),
+        commit=AsyncMock(),
+        get=AsyncMock(return_value=guild),
+    )
+    queued, stored = AsyncMock(), Mock()
+
+    async def envelope(_session, _settings, _guild, event_type, _signer, content, *, context):
+        return {"event_id": "test", "type": event_type, "content": content, "context": context}
+
+    for mod in (guild_revision, federation):
+        monkeypatch.setattr(mod, "build_guild_authority_envelope", envelope)
+        monkeypatch.setattr(mod, "guild_authority_owner", AsyncMock(return_value=actor))
+    monkeypatch.setattr(guild_revision, "lock_current_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(guild_revision, "guild_mutation_signer", AsyncMock(return_value=actor))
+    monkeypatch.setattr(
+        guild_revision, "remote_guild_destinations", AsyncMock(return_value={legacy, current})
+    )
+    monkeypatch.setattr(guild_revision, "assign_guild_sequence", AsyncMock(side_effect=[1, 2]))
+    monkeypatch.setattr(guild_revision, "queue_event", queued)
+    monkeypatch.setattr(guild_revision, "store_guild_event", stored)
+    for event_type, content in [
+        ("guild.soundboard.sound.update", {"sound": {"volume": "0.75"}}),
+        ("guild.soundboard.sounds.update", {"soundboard_sounds": [{"volume": 1}]}),
+    ]:
+        await guild_revision.queue_guild_mutation(
+            session, settings, guild, actor, event_type, content
+        )
+    by_destination = {
+        peer: [call.args[3] for call in queued.await_args_list if call.args[2] == peer]
+        for peer in (legacy, current)
+    }
+    assert [event["type"] for event in by_destination[legacy]] == [
+        "guild.event.redacted",
+        "guild.soundboard.sounds.update",
+    ]
+    assert by_destination[current][0]["content"]["sound"]["volume"] == "0.75"
+    retained = [
+        SimpleNamespace(seq=call.args[2], envelope=call.args[-1]) for call in stored.call_args_list
+    ]
+    session.scalars.return_value = retained
+    monkeypatch.setattr(federation, "home_guild", AsyncMock(return_value=guild))
+    monkeypatch.setattr(federation, "require_origin_guild_member", AsyncMock())
+    monkeypatch.setattr(federation, "enforce_federation_route_rate_limit", AsyncMock())
+    monkeypatch.setattr(federation, "visible_guild_channels_for_origin", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        federation,
+        "record_disclosed_attachment_recipients",
+        AsyncMock(return_value=(False, set(), set())),
+    )
+    for peer in (legacy, current):
+        monkeypatch.setattr(federation, "peer_advertises", AsyncMock(return_value=peer == current))
+        result = await federation.federation_guild_events(
+            10, 0, FederationPrincipal(peer, "key"), session, object(), settings
+        )
+        for live, pulled in zip(by_destination[peer], result["events"], strict=True):
+            assert (live["type"], live["content"], live["context"]["seq"]) == (
+                pulled["type"],
+                pulled["content"],
+                pulled["context"]["seq"],
+            )
+
+
 @pytest.mark.parametrize("field", ["issued_at", "deadline"])
 def test_soundboard_federation_timestamps_reject_boolean_coercion(field: str) -> None:
     payload = request_payload().model_dump(mode="json")

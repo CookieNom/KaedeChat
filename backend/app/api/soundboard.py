@@ -51,7 +51,7 @@ from app.chat.guild_revision import (
     queue_guild_mutation,
     wake_queued_guild_federation,
 )
-from app.chat.payloads import soundboard_sound_payload, user_payload
+from app.chat.payloads import federation_sound_payload, soundboard_sound_payload, user_payload
 from app.chat.permissions import (
     get_permissions,
     require_can_manage_expression,
@@ -87,6 +87,7 @@ from app.federation.guild_management import (
     proxy_remote_guild_management,
 )
 from app.federation.network import FederationNetworkError, decode_federation_response_json
+from app.federation.numbers import WireUnitFraction
 from app.federation.replication import client_user_payload_from_profile, profile_from_user
 from app.federation.schemas import FederationDomain, RemoteUserProfile, SnowflakeString
 from app.federation.security import (
@@ -186,7 +187,7 @@ class SoundboardFederationRequest(StrictSoundboardModel):
     source_guild: SoundboardFederationRef | None = None
     channel: SoundboardFederationRef | None = None
     sound_version: SnowflakeString | None = None
-    volume: float | None = Field(default=None, ge=0, le=1)
+    volume: WireUnitFraction | None = None
     actor_intent: dict[str, object] | None = None
 
     @model_validator(mode="after")
@@ -235,7 +236,7 @@ class FederatedSoundboardSound(StrictSoundboardModel):
     name: str = Field(min_length=2, max_length=32)
     media_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     content_type: Literal["audio/mpeg", "audio/ogg"]
-    volume: float = Field(ge=0, le=1)
+    volume: WireUnitFraction
     emoji_id: SnowflakeString | None = None
     emoji_domain: FederationDomain | None = None
     emoji_name: str | None = Field(default=None, min_length=1, max_length=64)
@@ -289,7 +290,7 @@ class SoundboardFederationCapability(StrictSoundboardModel):
     # It is covered by the authority signature together with ``download_url``;
     # clients compare the two before making any unauthenticated request.
     media_origin: str = Field(min_length=8, max_length=2048)
-    effective_volume: float = Field(ge=0, le=1)
+    effective_volume: WireUnitFraction
     expires_in: int = Field(ge=1, le=60)
 
 
@@ -308,7 +309,7 @@ class SoundboardSourceCapabilityRequest(StrictSoundboardModel):
     request_id: str = Field(pattern=r"^kasc_[A-Za-z0-9_-]{32}$")
     issued_at: int = Field(ge=0)
     deadline: int = Field(ge=1)
-    volume: float | None = Field(default=None, ge=0, le=1)
+    volume: WireUnitFraction | None = None
     target_installation_revision: SnowflakeString | None = None
     actor_intent: dict[str, object]
 
@@ -841,7 +842,7 @@ async def _request_remote_soundboard(
             "POST",
             request.guild.domain,
             path,
-            payload=request.model_dump(mode="json"),
+            payload=request.model_dump(mode="json", context={"federation": True}),
             request_timeout=SOUNDBOARD_FEDERATION_DEADLINE_SECONDS,
             max_response_bytes=SOUNDBOARD_FEDERATION_MAX_RESPONSE_BYTES,
         )
@@ -946,7 +947,7 @@ async def _request_remote_sound_capability(
             "POST",
             request.source_guild.domain,
             f"/_kaede/v1/guilds/{request.source_guild.id}/soundboard/capability",
-            payload=request.model_dump(mode="json"),
+            payload=request.model_dump(mode="json", context={"federation": True}),
             request_timeout=SOUNDBOARD_FEDERATION_DEADLINE_SECONDS,
             max_response_bytes=SOUNDBOARD_FEDERATION_MAX_RESPONSE_BYTES,
         )
@@ -1774,7 +1775,7 @@ async def federation_soundboard_query(
         guild,
         SOUNDBOARD_FEDERATION_QUERY_EVENT,
         signer,
-        page.model_dump(mode="json"),
+        page.model_dump(mode="json", context={"federation": True}),
         context={"guild_id": str(guild.id), "guild_domain": guild.origin_domain},
     )
 
@@ -1907,7 +1908,7 @@ async def federation_soundboard_source_capability(
         guild,
         SOUNDBOARD_SOURCE_CAPABILITY_EVENT,
         signer,
-        proof.model_dump(mode="json"),
+        proof.model_dump(mode="json", context={"federation": True}),
         context={
             "guild_id": payload.source_guild.id,
             "guild_domain": payload.source_guild.domain,
@@ -1933,7 +1934,7 @@ async def _queue_soundboard_mutations(
         guild,
         actor,
         f"guild.soundboard.sound.{operation}",
-        {"sound": rendered},
+        {"sound": federation_sound_payload(rendered)},
     )
     sounds = list(
         await session.scalars(
@@ -1954,7 +1955,9 @@ async def _queue_soundboard_mutations(
         {
             "guild_id": str(guild.id),
             "guild_domain": guild.origin_domain,
-            "soundboard_sounds": [soundboard_sound_payload(item) for item in sounds],
+            "soundboard_sounds": [
+                federation_sound_payload(soundboard_sound_payload(item)) for item in sounds
+            ],
         },
     )
 
@@ -2989,7 +2992,7 @@ async def _authoritative_soundboard_play_envelope(
         guild,
         SOUNDBOARD_FEDERATION_PLAY_EVENT,
         signer,
-        play.model_dump(mode="json"),
+        play.model_dump(mode="json", context={"federation": True}),
         context={
             "guild_id": play.guild.id,
             "guild_domain": play.guild.domain,

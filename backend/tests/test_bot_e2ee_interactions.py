@@ -179,7 +179,7 @@ async def test_reconciled_bot_participation_materializes_exact_consent_lineage(
     )
     actor = SimpleNamespace(id=70, origin_domain="user.example")
 
-    await bot_e2ee_api._reconcile_bot_e2ee_participations(
+    assert await bot_e2ee_api._reconcile_bot_e2ee_participations(
         cast(Any, session),
         cast(Any, snowflake),
         existing=[],
@@ -192,6 +192,17 @@ async def test_reconciled_bot_participation_materializes_exact_consent_lineage(
 
     assert len(added) == 1
     participation = added[0]
+    participation.status = "active"
+    assert not await bot_e2ee_api._reconcile_bot_e2ee_participations(
+        cast(Any, session),
+        cast(Any, snowflake),
+        existing=[participation],
+        devices=[cast(Any, device)],
+        channel=cast(Any, channel),
+        actor=cast(Any, actor),
+        owner_field=cast(Any, owner_field),
+        owner_id=owner_id,
+    )
     assert getattr(participation, owner_field) == owner_id
     assert (participation.application_id, participation.application_domain) == (
         device.application_id,

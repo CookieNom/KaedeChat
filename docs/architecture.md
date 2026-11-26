@@ -1,408 +1,297 @@
 # Kaede Chat architecture
 
-This guide explains data ownership and the server/client design. For wire
-formats, use the [federation contract](kaede-fed-v1.md) and
+This guide covers data ownership and the server/client design. For wire
+formats, see the [federation contract](kaede-fed-v1.md) and the
 [bot API reference](bots-and-automations.md).
 
 ## Product boundary
 
 Kaede Chat is a self-hosted chat system. Identities are immutable
 `username@domain` handles, and a user's home instance owns authentication and
-user identity. Direct messages are retained by both participants' instances.
-A guild has exactly one home instance; that home orders its changes and
-replicates them to instances with participating members.
+identity. Both participants' instances retain a direct message. A guild has
+exactly one home instance, which orders its changes and replicates them to
+instances with participating members.
 
 The v1 client is a SvelteKit static SPA. FastAPI serves REST, federation, media
-authorization, and LiveKit webhooks, while a separate FastAPI gateway service
-owns long-lived WebSockets. PostgreSQL holds durable state. Dragonfly holds
+authorization, and LiveKit webhooks. A separate FastAPI gateway service owns
+long-lived WebSockets. PostgreSQL holds durable state, and Dragonfly holds
 ephemeral state and carries tasks. Media lives in an S3-compatible store
-(Garage by default), and LiveKit provides media sessions.
+(Garage by default), and LiveKit runs media sessions. The Android and iOS
+clients use the same home-instance API and gateway as web and desktop. They
+never call peer federation endpoints directly.
+
+The v1 production scope covers identity and authentication, single-instance
+chat, federation, media and webhooks, voice/video/screen sharing, mobile
+clients, task tracker channels, message search, group DMs, and the operational
+controls for them. Public, private, and announcement threads and forum posts
+share the channel and message APIs. Compressed gateway encoding isn't
+implemented. MLS 1.0 messaging, encrypted attachments, recovery, and LiveKit
+frame encryption ship enabled by default.
 
 ## Binding conventions
 
-- Snowflakes use the specified 10 leased worker bits and 12 sequence bits after
-  a 2026-01-01 UTC epoch. PostgreSQL `BIGINT` is signed, so v1 deliberately
-  reserves the sign bit and permits 41 positive timestamp bits. Generation fails
-  closed before that range is exhausted. JSON always encodes identifiers as
-  decimal strings. Using the nominal 42nd timestamp bit would require a future
-  storage and API version rather than producing negative identifiers.
+- Snowflakes use 10 leased worker bits and 12 sequence bits after a
+  2026-01-01 UTC epoch. PostgreSQL `BIGINT` is signed, so v1 reserves the sign
+  bit and allows 41 positive timestamp bits. Generation fails closed before
+  that range runs out; using a 42nd bit would need a new storage and API
+  version. JSON encodes identifiers as decimal strings.
 - Every federated row is identified by `(id, origin_domain)`. References carry
-  both components, and Dragonfly keys include the domain.
-- `instances.is_self` has a unique partial index. Internal `is_local` values are
-  bound to it with composite foreign keys, so reusable migrations can enforce
-  locality without embedding a deployment domain in a `CHECK` constraint.
-- Application authentication tokens are opaque and prefix-scannable (`kc1_at_`,
-  `kc1_rt_`, `kc1_mfa_`), never JWTs. LiveKit connection grants use LiveKit's
-  own room-scoped HS256 JWT format; they are not Kaede authentication
-  credentials.
-- Python owns gateway opcodes, close codes, event names, and permissions.
-  Generated TypeScript is committed and checked for drift.
+  both parts, and Dragonfly keys include the domain.
+- `instances.is_self` has a unique partial index. Internal `is_local` values
+  bind to it through composite foreign keys, so migrations enforce locality
+  without hard-coding a deployment domain.
+- Authentication tokens are opaque and prefix-scannable (`kc1_at_`,
+  `kc1_rt_`, `kc1_mfa_`), never JWTs. LiveKit grants use LiveKit's own
+  room-scoped HS256 JWTs and aren't Kaede credentials.
+- Python owns gateway opcodes, close codes, event names, and permissions. The
+  generated TypeScript is committed and checked for drift.
 
 ## Runtime topology
 
-Host nginx owns public ports 80/443 and terminates TLS. It forwards the main
-virtual host — plus the media virtual host when Garage is selected — to an
-internal edge on a loopback-only high port. Caddy provides that internal
-routing layer. The setup wizard can separately render the TLS proxy
-configuration for the host-level nginx service.
+Host nginx owns ports 80/443 and terminates TLS. It forwards the main virtual
+host, plus the media host when Garage is selected, to a Caddy edge on a
+loopback-only high port. The setup wizard can render the host nginx
+configuration.
 
-The internal edge routes REST, media authorization, federation, and well-known
-requests to the API, and `/gateway` to gateway replicas. Everything else goes
-to an atomically switched static-SPA release. `/livekit` returns 404 unless the
-operator sets `KAEDE_VOICE_ENABLED=true`. Once it is, the edge proxies the route
-to the host-networked LiveKit service. The immediately
-previous SPA release is retained so already-loaded pages can still fetch their
-hashed chunks during a rollout. Garage objects are reachable only through
-presigned requests on `media.<domain>`. Before a read reaches Garage, the edge
-asks the API to recheck that object against current safety state, and it
-returns 404 for any `evidence/` path. Read responses are marked
-`private, no-store`. External S3 mode redirects to signed URLs at the
-configured HTTPS provider origin, so those reads don't pass through the edge
-check. Kubernetes NetworkPolicy keeps PostgreSQL and password-protected
-Dragonfly private and limits outbound traffic to the services that need it.
+The edge sends REST, media authorization, federation, and well-known requests
+to the API, and `/gateway` to gateway replicas. Everything else goes to an
+atomically switched SPA release. The previous release is kept so loaded pages
+can still fetch their hashed chunks during a rollout. `/livekit` returns 404
+unless `KAEDE_VOICE_ENABLED=true`, in which case the edge proxies it to the
+host-networked LiveKit service.
 
-The static frontend carries a SvelteKit-generated hash CSP for its
-build-specific inline bootstrap. The edge keeps header-only protections such as
-`frame-ancestors` without imposing a second `script-src` policy that would
-override the generated hash. The frontend check hashes every inline script in
-the built fallback and rejects CSP drift.
+Garage objects are reachable only through presigned requests on
+`media.<domain>`. Before a read reaches Garage, the edge asks the API to
+recheck the object against current safety state. It returns 404 for any
+`evidence/` path and marks reads `private, no-store`. External S3 mode
+redirects to signed URLs at the provider's HTTPS origin, so those reads skip
+the edge check. Kubernetes NetworkPolicy keeps PostgreSQL and
+password-protected Dragonfly private and limits outbound traffic to the
+services that need it.
 
-API processes lease worker IDs from Dragonfly rather than receiving a static
-ID. Lease ownership is process-specific. It is renewed by a compare-and-expire
-Lua script on every mint and by the heartbeat. A newly unclaimed worker slot
-sits in a non-minting quarantine for one full 60-second former-lease lifetime
-before activation, so a Dragonfly flush cannot overlap old and replacement
-generators. This has two costs: a cold API process can take about 60 seconds to
-become ready, and each mint incurs one Dragonfly round trip. Losing the lease,
-or being unable to prove it, stops further ID minting. Dragonfly snapshotting
-prevents a total session/cache loss from causing an identify stampede. The
-production API health check therefore uses readiness with a quarantine-aware
-start period, and Caddy does not enter service until that readiness check
-passes.
+The SPA carries a SvelteKit-generated hash CSP for its inline bootstrap. The
+edge adds header-only protections such as `frame-ancestors` but no second
+`script-src` that would override the hash. The frontend check hashes every
+inline script in the built fallback and rejects CSP drift.
 
-Secrets are split by process. Gateway processes receive a distinct,
-non-authoritative configuration key rather than `KAEDE_SECRET_KEY`, so a
-gateway-only compromise cannot decrypt the instance federation signing key or
-encrypted TOTP material. Gateway, API, scheduler, and migration processes get
-no email delivery credentials; only the email-capable worker and the
-configuration preflight do. The scheduler receives only the Dragonfly
-task-broker URL and log level — not the master key, database URL, or proxy
-secret. In the production Kubernetes topology the gateway also receives no
-administrator credential.
+### Worker ID leases
 
-Incomplete WebSocket handshakes are bounded twice. Host nginx limits concurrent
-and burst upgrades per source address on the exact `/gateway` route, and each
-gateway process admits at most 128 pre-authentication connections. The
-process-local admission is fail-fast, happens before the WebSocket accept/HELLO,
-and is released as soon as a structurally valid IDENTIFY or RESUME passes the
-existing Dragonfly admission check. Slow handshakes therefore cannot consume an
-unbounded number of gateway tasks or file descriptors, while established
-authenticated sockets stay outside the pre-authentication pool.
+API processes lease worker IDs from Dragonfly instead of using a static ID.
+A compare-and-expire Lua script renews the process-specific lease on every
+mint and on each heartbeat. A newly unclaimed slot waits in a non-minting
+quarantine for one full 60-second lease lifetime, so a Dragonfly flush can't
+put old and new generators on the same slot. The cost is a cold start of about
+60 seconds and one Dragonfly round trip per mint. A process that loses its
+lease, or can't prove it, stops minting. The production health check uses
+readiness with a quarantine-aware start period, and Caddy waits for it.
+Dragonfly snapshotting keeps a total session loss from causing an identify
+stampede.
 
-Argon2id retains its 64 MiB memory cost, but API routes execute it off the
-event loop through a dedicated AnyIO capacity limiter. Each API process runs at
-most one password hash or verification at once. That bounds Argon2 memory
-amplification without letting password work stall unrelated async requests in
-the process. Synchronous primitives remain available to offline verification
-tools.
+### Process secrets
 
-Background work runs on Taskiq workers over Redis Streams. They handle email
-delivery, federation draining, and media scanning/derivation, plus the periodic
-cleanup jobs: account and federation retention, unverified-account cleanup,
-partition creation, message cursor and mention projections, upload-orphan
-cleanup, remote-cache eviction, media retention, and deletion purge. Three
-safety jobs run alongside them. Every minute, one copies buffered child-safety
-evidence into storage and another retries removal for confirmed cases. A daily
-job disposes of evidence once a closed case is past retention and has no
-active hold. Cache warmup isn't scheduled; gateway processes run it at startup
-and again whenever the cache stops being ready. A leader-elected API coordinator runs the fast loops: voice permission
-enforcement every five seconds, federation heartbeats every 30 seconds, and
-LiveKit reconciliation every 60 seconds. Scheduled Taskiq jobs remain separate
-from workers.
+Gateway processes get a separate, non-authoritative configuration key instead
+of `KAEDE_SECRET_KEY`, so a gateway compromise can't decrypt the federation
+signing key or TOTP material. In production Kubernetes the gateway also has no
+administrator credential. Only the email worker and the configuration
+preflight receive email delivery credentials. The scheduler gets just the
+Dragonfly broker URL and log level.
 
-One-time-token email uses a transactional PostgreSQL outbox. Token creation and
-an AES-GCM-encrypted recipient/subject/body commit together; the Redis task
-carries only a wake signal, never the address or bearer link. Workers claim due
+### Load bounds
+
+Host nginx limits concurrent and burst upgrades per source address on
+`/gateway`. Each gateway process also admits at most 128 unauthenticated
+connections, checked before the WebSocket accept. A slot is released once a
+valid IDENTIFY or RESUME passes Dragonfly admission, so slow handshakes can't
+exhaust tasks or file descriptors.
+
+Expensive client mutations pass through per-user, domain-qualified Dragonfly
+token buckets with consistent retry headers. Gateway IDENTIFY has separate
+global and per-source buckets. After a Dragonfly flush, IDENTIFY stays closed
+until an elected worker finishes the durable cache warmup. A sentinel in the
+five-minute Dragonfly snapshots lets a runtime guard detect a later flush and
+repeat warmup.
+
+Each API process runs at most one Argon2id hash or verification at a time, off
+the event loop through an AnyIO capacity limiter, so password work can't
+exhaust memory or stall other requests.
+
+### Background work
+
+Taskiq workers over Redis Streams handle email, federation draining, media
+scanning and derivation, and periodic cleanup: account and federation
+retention, unverified accounts, partition creation, message cursor and mention
+projections, upload orphans, remote-cache eviction, media retention, and
+deletion purge. Two safety jobs run every minute, one copying buffered
+child-safety evidence into storage and one retrying confirmed removals. A daily
+job disposes of evidence for closed cases past retention with no active hold.
+Gateway processes run cache warmup at startup and whenever the cache stops
+being ready.
+
+A leader-elected API coordinator runs the fast loops: voice permission
+enforcement every 5 seconds, federation heartbeats every 30 seconds, and
+LiveKit reconciliation every 60 seconds.
+
+One-time-token email goes through a PostgreSQL outbox. The token and the
+AES-GCM-encrypted recipient, subject, and body commit together. The Redis task
+is only a wake signal and never carries the address or link. Workers claim due
 rows with `FOR UPDATE SKIP LOCKED`, reclaim abandoned claims after ten minutes,
-and retry with bounded backoff until the associated token expires. A minute
-scheduler sweep guarantees eventual attempts when the post-commit Redis wake
-fails. Terminal delivery metadata is kept no longer than seven days, and can
-disappear earlier when its expired one-time-token row is pruned. Provider
-delivery is at-least-once: if a process fails after an SMTP/API provider
-accepts a message but before the SQL success update, a duplicate can go out,
-because those providers do not share the database transaction. Links remain
-one-time credentials, so a duplicate does not create a second usable token.
+and retry with bounded backoff until the token expires. A per-minute sweep
+covers lost wake-ups. Delivery metadata is kept at most seven days. Delivery is
+at-least-once, so a crash after the provider accepts a message can send a
+duplicate, but the link still works only once.
 
-## Federation runtime
+### Observability
 
-Federation discovery and key retrieval use fixed `kaede-fed/1` paths.
-Production DNS results are checked for private, loopback, link-local, reserved,
-multicast, and metadata ranges. The HTTP transport connects to the checked
-address while retaining the original TLS server name. Development-only
-`.localhost` overrides let the isolated Alpha/Beta topology use internal
-service names.
-
-Every implemented server-to-server mutation has a canonical HTTP signature and
-an independently signed event envelope. The inbox authenticates the transport
-before parsing events, enforces actor-origin ownership, and deduplicates on
-`(origin,event_id)`. Per-destination outbox drainers batch up to 100 events and
-1 MiB, use bounded jittered backoff, open a circuit after 24 hours, and retain
-write state across restarts. A pooled, signed `kaede-fed.1` WebSocket carries
-the same batches with correlated results. It reconnects for periodic
-reauthentication and falls back to the signed HTTP inbox on connection or
-protocol failure.
-
-The lower participant domain mints a two-party DM conversation. The creator's
-home mints a group DM and stays authoritative for its name, owner, membership,
-and monotonic state version. Every invitee's home confirms an accepted
-friendship before the authority adds that person. Signed full-state updates
-let every participating home deliver messages and calls directly while
-rejecting stale or conflicting membership changes. A direct-message recipient
-authorizes its privacy policy and rechecks it on message ingestion.
-Guild homes mint message snowflakes and assign transactional event sequences
-for the registered guild mutation set. Replicas apply signed structural
-snapshots and ordered guild/channel/role/member/moderation/message/reaction/pin
-events. Permission-sensitive changes fence on a filtered snapshot, and hidden
-channel changes use signed redactions. On a sequence discontinuity, a replica
-pulls the retained guild event log before live application continues. Offline
-remote message writes stay visibly queued and receive a later commit or a
-stable rejection.
-
-## Media runtime
-
-The selected S3-compatible backend owns three private buckets. A transactional
-upload ticket reserves quota and yields a 15-minute PUT whose signature
-includes the exact content length and media type. Message or asset commit
-verifies object metadata and moves the reservation from pending to used bytes.
-Workers distrust declared MIME. They scan magic-validated bytes with ClamAV and
-produce safe WebP image variants, blurhash/phash metadata, and video posters.
-Originals stay unavailable until clean; infected and deleted objects are
-removed and their accounting released.
-
-Local message reads authorize against current channel access before issuing a
-`private, no-store` redirect to a 60-second signed link. Immutable
-profile/guild/emoji assets are addressed by clean content hash. Their
-redirects may be cached publicly for 60 seconds and point to a five-minute
-signed link. Remote reads reconstruct one fixed federation path through the
-DNS-pinning client, authorize the requesting peer at the origin, and re-scan at the consuming instance before a bounded local S3 cache
-insert. LRU/TTL jobs and origin-authenticated `media.delete` tombstones bound
-and invalidate that cache.
-
-Incoming webhook secrets are random `kwh_` tokens stored only as SHA-256
-digests. Execution is home-only and rate-limited, and the webhook is attributed
-in both local and federated message payloads. The creator identity remains an
-audit/FK principal, not the displayed sender.
-
-## Release hardening runtime
-
-Expensive client mutations pass through domain-qualified, per-user Dragonfly
-token buckets and expose consistent retry headers. Gateway IDENTIFY has
-separate global and source buckets. After a Dragonfly flush it stays closed
-until one elected worker has completed the durable cache warmup fence. A
-persistent sentinel is included in five-minute Dragonfly snapshots, and a
-runtime guard detects a later flush and repeats warmup.
-
-Operational state is observable without a Docker socket. The internal metrics
-endpoint derives active gateway leases from Dragonfly, federation queues from
-PostgreSQL, and delivery/task counters from Dragonfly. Prometheus rules and the
-provisioned Grafana dashboard remain on internal or loopback-only interfaces.
-The release smoke gate verifies shared-stream fanout and the
-one-envelope/slim-outbox federation amplification model against disposable real
-services.
+The internal metrics endpoint works without a Docker socket. It derives gateway
+leases and task counters from Dragonfly and federation queues from PostgreSQL.
+Prometheus rules and the Grafana dashboard stay on internal or loopback
+interfaces. The release smoke gate checks shared-stream fanout and the
+one-envelope federation amplification model against real disposable services.
 
 ## Data ownership
 
-The v1 ownership model permits replicated users, guilds, guild members, roles,
-channels, overwrites, messages, attachments, reactions, pins, emojis, and DM
-conversations. Federation replicates profiles, structural guild snapshots, the
-registered granular guild mutation stream, and direct/group DM conversations
-and messages. Media federation replicates attachment metadata and authenticated
-access while objects stay at their origin. Voice federation adds call and
-occupancy state.
+Users, guilds, members, roles, channels, overwrites, messages, attachments,
+reactions, pins, emojis, and DM conversations can be replicated. Federation
+carries profiles, structural guild snapshots, the guild mutation stream, and
+direct and group DM conversations and messages. Media federation shares
+attachment metadata and authenticated access; objects stay at their origin.
+Voice federation adds call and occupancy state.
 
-Some data never replicates. Auth, settings, authoritative per-user relationship
-rows, audit, federation delivery state, remote media cache, instance blocks,
-and storage accounting remain local. Signed relationship events synchronize the
-two independently owned rows; no remote instance can retain local friendship
-privileges after local removal or blocking.
+Auth, settings, per-user relationship rows, audit, federation delivery state,
+remote media cache, instance blocks, and storage accounting stay local. Signed
+relationship events sync the two independently owned friendship rows, and no
+remote instance keeps friendship privileges after a local removal or block.
 
-Task tracker boards, lanes, tasks, and creation nonces are normalized local
-guild-authority data. They cascade with their type-17 channel. Replicas serve a
-bounded cache hydrated from signed snapshots, and human writes route to the guild
-home. The API and storage contract is documented in
+Task tracker boards are local guild-authority data that cascade with their
+type-17 channel. Replicas serve a bounded cache built from signed snapshots,
+and human writes route to the guild home. See
 [Task tracker channels](task-tracker.md).
 
-Messages use monthly range partitions keyed by the timestamp-bearing snowflake.
-History reads include a lower ID floor so PostgreSQL can prune partitions even
-without a cursor. Presence, typing, and live voice occupancy never enter SQL;
-only server mute/deafen flags persist.
+Messages use monthly range partitions keyed by snowflake. History reads include
+a lower ID floor so PostgreSQL can prune partitions without a cursor.
+Presence, typing, and live voice occupancy never enter SQL; only server
+mute/deafen flags persist.
 
-## Message search
+## Federation runtime
 
-PostgreSQL remains authoritative for messages and permissions. A durable SQL
-desired-state queue projects only eligible plaintext messages into a private
-Meilisearch index on the same deployment network. Message, attachment,
-reaction, pin, and channel-encryption changes enqueue replacement or deletion
-work. Search treats the engine as an untrusted, rebuildable candidate
-generator: every hit is loaded from SQL, and its current channel access is
-checked again before it reaches a client. Search outages never block message delivery. A replaced index
-can be repopulated online with `make search-rebuild`.
+Discovery and key retrieval use fixed `kaede-fed/1` paths. All outbound
+federation and remote-media traffic goes through one DNS-pinning SSRF guard:
+public addresses only, port 443, and the original TLS server name. Private,
+loopback, link-local, reserved, multicast, and metadata ranges are rejected.
+Development-only `.localhost` overrides let the Alpha/Beta topology use
+internal service names.
 
-Federated search never joins Meilisearch clusters or shares a master key. A
-user home sends a signed, bounded query to the authoritative guild or DM
-instance, and only when that instance advertises `message-search/1`. The
-authority applies its own permissions and returns a minimal bounded result
-projection. The user home validates and re-authorizes each result against local
-channel state before showing it. Unavailable authorities are reported explicitly
-rather than replaced with cached partial history.
+Every server-to-server mutation has an HTTP signature and a separately signed
+event envelope. The inbox authenticates transport before parsing, checks that
+the actor belongs to the sending origin, and deduplicates on
+`(origin,event_id)`. Per-destination drainers batch up to 100 events and
+1 MiB, back off with jitter, open a circuit after 24 hours, and survive
+restarts. A pooled, signed `kaede-fed.1` WebSocket carries the same batches.
+It reconnects to reauthenticate and falls back to the HTTP inbox on failure.
 
-A channel-scoped DM search contacts that conversation's deterministic
-authority. Account-wide DM search snapshots the user's active conversation
-authorities, fans out concurrently with independent signed authorization and
-timeouts, and merges each authority's opaque pagination deterministically. A
-short-lived actor-and-query-bound server-side cursor prevents the client token
-from growing with the number of authorities. The fan-out is capped at 256
-active authorities and fails explicitly if that safety bound is exceeded.
+The lower participant domain mints a two-party DM. A group DM's creator home
+mints it and stays authoritative (see [group DMs](#group-direct-messages)). A
+DM recipient applies its privacy policy and rechecks it on ingestion.
 
-Channels marked `e2ee` are excluded at indexing, query, SQL hydration, and
-federation boundaries. The UI explains why search is disabled. A later E2EE
-extension may define a separate opt-in client-side or privacy-preserving search
-design, but server plaintext indexing is not re-enabled for encrypted
-rooms.
-
-## Optional end-to-end encryption
-
-Message storage and every local, gateway, federation, retained-history, and DM
-replication path accept a bounded, versioned `e2ee` envelope instead of
-plaintext. Plaintext and encrypted bodies are mutually exclusive, and deleted
-messages discard either representation. Version 2 is the Kaede MLS 1.0
-application envelope; version 1 remains legacy opaque transport and is never
-presented as MLS encryption. Instances advertise the MLS and encrypted-media
-extensions as `e2ee-mls/1` and `e2ee-media/1`.
-
-Each account has one active proof-of-possession encryption identity and one-use
-MLS KeyPackages. MLS
-authenticated data canonically binds: the composite channel reference and
-group, the policy generation and epoch, the sender device, the operation and
-edit target, and the encrypted attachment manifest digest. The MLS credential
-binds the author account. Federation's instance-level Ed25519 signatures
-authenticate transport between servers; clients still verify MLS credentials
-and authenticated data.
-
-Enabling encryption creates a monotonic room-policy generation, and membership
-and device changes pause writes until a fresh group excludes removed devices.
-Clients reject plaintext or stale epochs after the policy is enabled, and
-authorities and replicas must reject writes that do not match the current
-policy. Optional encryption must never be negotiated from an unauthenticated
-boolean or from the presence of an opaque envelope alone.
-
-Encrypted rooms trade away server-side content search, link previews, content
-moderation, and plaintext mention extraction, unless clients provide a
-separately designed privacy-preserving projection. None of those server
-features is a prerequisite for accepting an opaque envelope, so the present
-architecture does not force future encrypted rooms to reveal content.
-Notification text, link metadata, thumbnails, filenames,
-and attachment dimensions are projections too. Encrypted-room clients omit or
-encrypt them unless the user chooses to disclose selected content. Servers
-still learn routing metadata: the participating instances, composite room and
-sender references, timestamps, ciphertext sizes, and delivery activity. They also
-see mention recipients, reply references, sticker and custom-emoji references,
-reactions and who reacted, and poll answer IDs, counts, and voters. Padding
-and traffic analysis resistance are outside the current transport capability.
-
-## Security invariants
-
-- Bootstrap creates one durable self identity. The configured domain must
-  always match it. The Ed25519 private key is AES-256-GCM encrypted with the
-  instance secret.
-- The home instance authoritatively rechecks permissions for every federated
-  write.
-- A verified federation origin may assert actions only for users on that
-  origin.
-- All outbound federation and remote-media traffic uses one DNS-pinning SSRF
-  guard, fixed protocol paths, public addresses, and port 443 (with
-  `.localhost` dev override).
-- Key rotation retains old verification keys, and event envelopes are
-  independently signed, so stored events remain auditable.
-- Originals are private, uploads are exact-length scoped, and neither local nor
-  remote plaintext bytes are served before local magic validation and malware
-  scanning. E2EE ciphertext is served unscanned.
-
-## Version 1 scope
-
-The production scope covers identity and authentication, single-instance chat,
-federation, media and webhooks, voice/video/screen sharing, Android and iOS
-clients, task tracker channels, message search, group DMs, and the associated
-operational controls.
-Public, private, and announcement threads and forum posts share the channel
-and message APIs. Compressed gateway encoding is not currently implemented. MLS 1.0
-messaging, encrypted attachments, recovery, and LiveKit frame encryption ship
-enabled by default. Operators can block new activations with
-`KAEDE_E2EE_ACTIVATION_ENABLED=false`, as `docs/e2ee.md` describes.
-The mobile clients use the same home-instance API and gateway boundary as the
-web and desktop clients; they never call peer federation endpoints directly.
+Guild homes mint message snowflakes and assign event sequences. Replicas apply
+signed structural snapshots and ordered guild, channel, role, member,
+moderation, message, reaction, and pin events. Permission-sensitive changes
+fence on a filtered snapshot, and hidden channel changes use signed
+redactions. On a sequence gap, a replica pulls the retained event log before
+continuing. Offline remote writes stay visibly queued until committed or
+rejected.
 
 ## Identity and sessions
 
-Handles are immutable `username@home-domain` identifiers. Email and password
-credentials stay on the home instance. Email-enabled deployments provide
-verification and password recovery; email-disabled deployments use username
-and password and cannot send recovery links. Passwords use Argon2id with
-64 MiB memory, three iterations, and one lane; hashing runs off the async loop
-with one admitted operation per API process.
+Email and password credentials stay on the home instance. Email-enabled
+deployments offer verification and password recovery. Email-disabled ones use
+username and password only and can't send recovery links. Passwords use
+Argon2id with 64 MiB memory, three iterations, and one lane.
 
-Browser sessions use HttpOnly `kc_access` and `kc_refresh` cookies. Cookie-based
-writes require `X-Kaede-Client: web`. Native clients receive body tokens and
-send `Authorization: Bearer`; an explicit bearer takes precedence over cookies.
-Refresh tokens rotate. Reusing a superseded token after a short grace window (60
-seconds by default) revokes that session's access tokens. MFA uses
-TOTP and single-use recovery codes. MFA changes require reauthentication and
-revoke other sessions. Email messages use an encrypted transactional outbox;
-the console email backend is development-only.
+Browser sessions use HttpOnly `kc_access` and `kc_refresh` cookies, and
+cookie-based writes require `X-Kaede-Client: web`. Native clients get tokens in
+the response body and send `Authorization: Bearer`, which wins over cookies.
+Refresh tokens rotate. Reusing a superseded token after the grace window
+(60 seconds by default) revokes that session's access tokens. MFA uses TOTP
+and single-use recovery codes; changing it requires reauthentication and
+revokes other sessions. The console email backend is for development only.
 
 ## Chat and permissions
 
-Guild creation also creates the owner membership, `@everyone`, and `general`.
-Permission checks apply ownership, roles, administrator access, everyone/role/
-member channel overrides, implicit channel restrictions, and timeouts in order.
-Role and moderation actions enforce hierarchy and protect the owner. Guild
-ownership can transfer only to a member homed on the guild's instance.
+Creating a guild also creates the owner membership, `@everyone`, and `general`.
+Permission checks apply ownership, roles, administrator access,
+everyone/role/member channel overrides, implicit channel restrictions, and
+timeouts, in that order. Role and moderation actions respect hierarchy and
+protect the owner. Ownership can transfer only to a member homed on the
+guild's instance.
 
-Messages use client nonces to reconcile retries, cursor-paged history,
-soft deletion, reactions, and pins. Pins are newest-first, at most 250 per
-channel, with pages of 50. Message writes queue batched unread and mention
-projections instead of updating every recipient synchronously. Permission
-cache keys use guild generation and member version; message creation does not
-invalidate them.
+Messages support client nonces for retries, cursor-paged history, soft
+deletion, reactions, and pins. Pins are newest-first, capped at 250 per
+channel, in pages of 50. Message writes queue batched unread and mention
+projections. Permission cache keys use the guild generation and member
+version, and message creation doesn't invalidate them.
 
-Human Gateway sessions resume from shared per-topic streams. Each connection
-has a bounded queue; overflow invalidates the session instead of silently
-losing events. Presence, typing, and voice occupancy are ephemeral. The bot
-Gateway has a different reconnect contract: a fresh Identify with saved topic
-cursors, described in [the bot reference](bots-and-automations.md#bot-gateway).
+Human gateway sessions resume from shared per-topic streams. Each connection
+has a bounded queue, and overflow invalidates the session rather than dropping
+events. The bot gateway reconnects with a fresh Identify and saved topic
+cursors; see [the bot reference](bots-and-automations.md#bot-gateway).
 
-Forums contain child threads with starter messages, tags, sorting, pagination,
-and archive/lock controls. Encrypted child threads have independent MLS groups;
-a parent's encryption does not admit a device to its children. See
-[E2EE](e2ee.md), [group DMs](#group-direct-messages), and
-[task boards](task-tracker.md) for their separate access and storage rules.
+Forums hold child threads with starter messages, tags, sorting, pagination, and
+archive/lock controls. Encrypted child threads have their own MLS groups, and a
+parent's encryption doesn't admit a device to its children.
+
+### Read positions
+
+Web, desktop, Android, and iOS open an unread channel or DM around the saved
+read cursor, or at the first retained unread message if there is none.
+**Jump to where you left off** returns to the cursor as it was when the visit
+began, where the new-message divider stays. **Jump to latest** (**Jump to
+present** on mobile) loads the newest page directly, and mobile's **Load newer
+messages** pages forward. In the message area, Shift+PageUp jumps to the saved
+position and Ctrl+End to latest. Jumps keep the composer draft, and a deleted
+saved message falls back to the nearest retained history.
+
+Only messages actually on screen acknowledge: the document must be visible
+and focused (after a 250 ms scroll debounce), or on mobile the chat screen
+must be resumed and visible. Background apps, covered screens, loading
+history, and open inbox dialogs don't count. The bottom of an older history
+page never acknowledges unloaded newer messages. The cursor never moves
+backward from a stale device, and a partial acknowledgement keeps later
+mentions unread.
+
+**Mark unread** in the message menu moves the cursor to the previous message,
+increments `read_version`, and pauses automatic acknowledgement until the user
+navigates or jumps. Each automatic acknowledgement carries the version it was
+queued under, and a stale one gets 409 and a state refresh instead of undoing
+the rewind. **Mark as read** works per conversation, server, or globally, and
+acknowledges a snapshot of each conversation's latest message; anything newer
+stays unread.
+
+The inbox (server rail on web, conversation browser on mobile) lists unread
+conversations and recent mentions, with server and mention-type filters. Muted
+servers are hidden from Unreads unless **Show muted servers** is on. Mention
+dismissal is stored per account, separate from the cursor. Mentions are
+paginated and limited to seven days. Inbox metadata never contains decrypted
+message bodies, and opening an item goes through the normal authorized history
+and decryption path.
 
 ### Group direct messages
 
 Group DMs contain 3–10 people. Any member may rename the group or add an
-existing friend; both homes must confirm the friendship. Only the owner may
+existing friend, and both homes must confirm the friendship. Only the owner may
 remove another member. Leaving transfers ownership to the earliest remaining
-member, and the conversation closes when its last member leaves. Removal ends
-access immediately but does not erase previously delivered messages.
+member, and the conversation closes when the last member leaves. Removal ends
+access immediately but doesn't erase messages already delivered.
 
-The creator's home owns the group identity, membership, name, and state version.
-Other homes route mutations there and accept only newer signed full-state
-updates; equal-version conflicts are rejected. Messages travel directly between
-members' homes, which verify current membership. History and attachments remain
-requester-bound. One active call may ring the current members; call actions and
-media tokens recheck membership. Bots cannot start or join group-DM calls.
+The creator's home owns the group identity, membership, name, and a monotonic
+state version. Other homes route mutations there and accept only newer signed
+full-state updates; equal-version conflicts are rejected. Messages and calls
+travel directly between members' homes, which verify current membership.
+History and attachments stay requester-bound. One active call may ring the
+current members, and call actions and media tokens recheck membership. Bots
+can't start or join group-DM calls.
 
-The authenticated client routes use composite channel and user references:
+The client routes use composite channel and user references:
 
 ```text
 POST   /api/v1/users/@me/channels/group
@@ -412,59 +301,127 @@ DELETE /api/v1/users/@me/channels/{channel_ref}/group/recipients/{user_ref}
 POST   /api/v1/users/@me/channels/{channel_ref}/group/leave
 ```
 
-Creation accepts 2–9 unique friend handles and an optional name. Group channels
+Creation takes 2–9 unique friend handles and an optional name. Group channels
 have `conversation_type: "group"`, `owner_id`, `owner_domain`, and `recipients`
-(the other current members). Compare both owner fields. Existing message,
-search, attachment, reaction, and call APIs operate on the group channel.
+(the other current members). Compare both owner fields. The usual message,
+search, attachment, reaction, and call APIs work on the group channel.
+
+## Message search
+
+PostgreSQL stays authoritative for messages and permissions. A durable SQL
+queue projects eligible plaintext messages into a private Meilisearch index on
+the deployment network. Message, attachment, reaction, pin, and
+channel-encryption changes enqueue replacement or deletion. Meilisearch is
+treated as an untrusted, rebuildable candidate source: every hit is loaded from
+SQL and its channel access rechecked before it reaches a client. Search
+outages never block delivery. Rebuild a replaced index online with
+`make search-rebuild`.
+
+Federated search never shares a Meilisearch cluster or key. The user's home
+sends a signed, bounded query to the authoritative guild or DM instance, but
+only if it advertises `message-search/1`. The authority applies its own
+permissions and returns a minimal result set, which the home re-authorizes
+against local channel state. Unreachable authorities are reported, not papered
+over with cached results.
+
+A DM search scoped to one channel goes to that conversation's authority.
+Account-wide DM search fans out to the user's active conversation authorities
+concurrently, each with its own signed authorization and timeout, and merges
+their pagination deterministically. A short-lived server-side cursor bound to
+the actor and query keeps the client token small. Fan-out is capped at 256
+authorities and fails if that is exceeded.
+
+`e2ee` channels are excluded at indexing, query, SQL hydration, and federation.
+The UI explains why search is off. Encrypted DMs offer on-device search instead
+([E2EE](e2ee.md#product-disclosures)). Server plaintext indexing is never
+re-enabled for encrypted rooms.
+
+## Optional end-to-end encryption
+
+Every message path, including local, gateway, federation, retained history, and
+DM replication, accepts a bounded, versioned `e2ee` envelope in place of
+plaintext. A message has one or the other, and deletion discards both. Version
+2 is the Kaede MLS 1.0 envelope. Version 1 is legacy opaque transport and is
+never presented as MLS. Instances advertise `e2ee-mls/1` and `e2ee-media/1`.
+Federation's instance Ed25519 signatures authenticate servers only; clients
+verify MLS credentials and authenticated data themselves.
+
+Encryption must never be negotiated from an unauthenticated boolean or from
+the mere presence of an envelope. Encrypted rooms give up server search, link
+previews, content moderation, and plaintext mention extraction. Operators can
+block new activations with `KAEDE_E2EE_ACTIVATION_ENABLED=false`. The
+[E2EE protocol](e2ee.md) covers identities, room policy, the envelope's
+bindings, files, calls, and what metadata servers still see.
 
 ## Media storage and processing
 
 Three private S3 buckets hold attachments, derivatives, and remote cache.
-Garage initializes them for bundled deployments; external storage needs the
-bucket and CORS configuration in the [setup guide](deployment-wizard.md).
-Clients receive scoped presigned URLs, never object-store credentials.
+Garage creates them in bundled deployments; external storage needs the bucket
+and CORS setup in the [setup guide](deployment-wizard.md). Clients get scoped
+presigned URLs, never object-store credentials.
 
-Uploads reserve quota and bind size, content type, owner, and expiry. Message
-creation checks the object length and consumes a single-use ticket. Workers
-inspect file signatures, scan plaintext through ClamAV, and create image/video
-derivatives. Only the exact scanned bytes are promoted to a clean,
-content-addressed key. A still-valid upload URL can overwrite its staging key,
-but cannot replace the clean object. Staging cleanup waits more than 16 minutes
-past PUT expiry; third-party upload clients must cap request duration at
-15 minutes too.
+An upload ticket reserves quota and yields a 15-minute PUT signed for the exact
+length and media type. Committing a message or asset verifies the object and
+consumes the single-use ticket. Workers ignore the declared MIME type, check
+file signatures, scan plaintext with ClamAV, and produce WebP image variants,
+blurhash/phash metadata, and video posters. Only the exact scanned bytes are
+promoted to a clean, content-addressed key. A still-valid upload URL can
+overwrite its staging key but not the clean object. Staging cleanup waits more
+than 16 minutes past PUT expiry, so third-party upload clients must also cap
+requests at 15 minutes. Infected and deleted objects are removed and their
+quota released.
 
-Optional PhotoDNA checks plaintext images before promotion. On a match, delivery
-is blocked, the exact scanned bytes are encrypted and verified under `evidence/`
-in the attachments bucket, and staff review the case to confirm removal or dismiss
-the finding. If storage is unavailable, the encrypted bytes wait in PostgreSQL
-until the per-minute evidence job copies them out. Dismissal releases held
-content through normal processing; tombstones and digest revocation start only
-on confirmation. A confirmed removal that can't finish is retried every minute.
-Decoder or local policy rejections remove that upload without permanently
-blocking its digest. E2EE attachments contain only ciphertext and bypass content
-scanning; clients must make that tradeoff clear before encryption is activated.
+Optional PhotoDNA checks plaintext images before promotion. On a match,
+delivery is blocked, the scanned bytes are encrypted and verified under
+`evidence/` in the attachments bucket, and staff confirm removal or dismiss the
+finding. If storage is down, the encrypted bytes wait in PostgreSQL for the
+per-minute evidence job. Dismissal sends held content through normal
+processing. Tombstones and digest revocation start only on confirmation, and a
+confirmed removal that can't finish is retried every minute. Decoder or local
+policy rejections remove the upload without blocking its digest. E2EE
+attachments are ciphertext and skip scanning, and clients must make that clear
+before encryption is turned on.
 
-Media reads recheck channel access. Remote fetches use signed fixed federation
-paths, validate and scan bytes locally, and obey cache and concurrency limits.
-An origin-signed deletion removes its cached variants. Message deletion queues
-original/derivative cleanup and quota release; storage failure must remain
-retryable. The [operator guide](operator.md) covers limits and storage repair.
+Message media reads recheck channel access, then return a `private, no-store`
+redirect to a 60-second signed link. Profile, guild, and emoji assets are
+addressed by content hash, and their redirects may be cached publicly for
+60 seconds and point to a five-minute link. Remote reads use one fixed signed
+federation path, are authorized by the origin, and are rescanned locally before
+going into a bounded S3 cache. LRU/TTL jobs and origin-signed `media.delete`
+tombstones evict cached copies. Message deletion queues cleanup and quota
+release, and storage failures stay retryable. The [operator guide](operator.md)
+covers limits and storage repair.
 
-Webhook messages retain their webhook attribution. Tokens are shown only at
-creation or rotation, stored as digests, and invalidated by rotation/revocation.
-See [bot recipes](bot-api-quickstart.md#sdk-recipes) for sending and managing them.
+Incoming webhook secrets are random `kwh_` tokens, shown only at creation or
+rotation and stored as SHA-256 digests. Rotation or revocation invalidates
+them. Execution is home-only and rate-limited. Messages show the webhook as
+sender in local and federated payloads; the creator is kept only as the audit
+principal. See [bot recipes](bot-api-quickstart.md#sdk-recipes).
 
 ### Attachment spoilers
 
-Clients mark spoilers with a `SPOILER_` filename prefix and must conceal their
-media and download controls until revealed, including embeds and forwarded
-attachments. Forum thumbnails omit spoiler images. This is presentation, not
-access control; older clients do not conceal spoilers, so deploy backend and
-client updates together. Encrypted files keep the prefix in the authenticated
-private manifest filename; their public upload name stays `encrypted-file`.
+Clients mark spoilers with a `SPOILER_` filename prefix and must hide the media
+and download controls until revealed, including in embeds and forwards. Forum
+thumbnails omit spoiler images. This is presentation, not access control.
+Older clients don't hide spoilers, so deploy backend and client updates
+together. Encrypted files keep the prefix in the private manifest filename;
+their public upload name stays `encrypted-file`.
 
 `PATCH /api/v1/attachments/{id}/spoiler` accepts `{"spoiler": true}` or `false`
 for the uploader's queued plaintext message attachment, before finalization or
-message/response binding. It locks against finalization and rejects encrypted
-uploads and non-message assets. Clients must block Send while this update is
-pending or failed. Mobile applies the prefix before uploading on Send.
+binding. It locks against finalization and rejects encrypted uploads and
+non-message assets. Clients must block Send while the update is pending or
+failed. Mobile applies the prefix before uploading on Send.
+
+## Security invariants
+
+- Bootstrap creates one durable self identity, and the configured domain must
+  always match it. The Ed25519 private key is AES-256-GCM encrypted with the
+  instance secret.
+- The home instance rechecks permissions for every federated write.
+- A verified federation origin may act only for its own users.
+- Key rotation keeps old verification keys, and envelopes are signed
+  separately, so stored events stay auditable.
+- Originals are private and uploads are exact-length. No plaintext bytes,
+  local or remote, are served before local magic validation and malware
+  scanning. E2EE ciphertext is served unscanned.

@@ -1,7 +1,7 @@
 Runtime sources of LiveKit Flutter 2.13.2 from pub.dev (upstream SHA-256
 `c63211bd5073b308417de2b048809c156f50cb5bda02713150478742be2a1bc1`). See the included Apache-2.0 license.
 
-Kaede retains pre-negotiation sender encryption, separate backup cryptors,
+Kaede keeps pre-negotiation sender encryption, separate backup cryptors,
 shared capture clones, and exact proven scalability modes. An awaited
 `VideoPublishOptions.configureEncodings` hook caps the computed RTP ladder before
 negotiation. These changes live in `lib/src/options.dart`,

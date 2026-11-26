@@ -34,6 +34,7 @@ final class PushRegistration {
     required String token,
     required Future<bool> Function() register,
     bool force = false,
+    bool Function()? fullyRegistered,
   }) async {
     final pending = _pending;
     if (pending != null) {
@@ -41,7 +42,11 @@ final class PushRegistration {
       final result = await pending;
       if (sameRegistration) return result;
       return run(
-          session: session, token: token, register: register, force: force);
+          session: session,
+          token: token,
+          register: register,
+          force: force,
+          fullyRegistered: fullyRegistered);
     }
     if (!force &&
         _session == session &&
@@ -60,7 +65,11 @@ final class PushRegistration {
     _pending = operation;
     try {
       final registered = await operation;
-      if (registered) _renewAfter = _now().add(const Duration(days: 1));
+      if (registered) {
+        _renewAfter = _now().add(fullyRegistered?.call() == false
+            ? const Duration(minutes: 1)
+            : const Duration(days: 1));
+      }
       return registered;
     } on Object catch (error) {
       recordFailure(error);

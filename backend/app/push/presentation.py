@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from app.chat.presence_control import notifications_suppressed_by_presence
 from app.db.models import Message
 
 
@@ -13,7 +14,7 @@ def notification_previews_enabled(preferences: Mapping[str, object]) -> bool:
 
 def relationship_alerts_enabled(preferences: Mapping[str, object]) -> bool:
     return preferences.get("relationships", True) is not False and (
-        preferences.get("presence_preference") != "dnd"
+        not notifications_suppressed_by_presence(preferences)
     )
 
 

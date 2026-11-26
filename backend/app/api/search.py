@@ -199,6 +199,7 @@ async def federated_search_messages(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     settings: Settings = Depends(get_settings),
+    score_format: str | None = None,
 ) -> dict[str, object]:
     if not settings.search_enabled:
         raise HTTPException(status_code=404, detail={"code": "KAED_FED_SEARCH_UNSUPPORTED"})
@@ -229,7 +230,8 @@ async def federated_search_messages(
                 actor,
                 request,
                 dm_authority=settings.domain if request.scope == "dms" else None,
-            )
+            ),
+            decimal_scores=score_format == "decimal",
         )
     except SearchUnavailable as exc:
         raise HTTPException(

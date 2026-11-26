@@ -63,7 +63,7 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
     async def test_full_pairing_and_persistence_and_unpair(self):
         ref, guild_ref = k.EntityRef.parse('456@chat.example'), k.EntityRef.parse('10@chat.example')
         channel = Obj(ref=ref, guild_ref=guild_ref, type=0, e2ee_required=False, permissions=3072, name='general')
-        remote = Obj(id=123, name='general', category=None, permissions_for=lambda me: Obj(view_channel=True, send_messages=True))
+        remote = Obj(id=123, name='general', category=None, permissions_for=lambda member: Obj(view_channel=True, send_messages=True, manage_channels=member == 'manager'), send=AsyncMock())
         guild = Obj(id=20, name='Discord server', me=object(), text_channels=[remote])
         remote.guild = guild
         self.bridge.guilds = [guild]
@@ -71,6 +71,12 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
         self.bridge.get_channel = lambda identifier: remote if identifier == 123 else None
         self.kaede.fetch_channels.return_value = [channel]
         self.kaede.fetch_channel.return_value = channel
+        approval = Obj(content=f'!kaede-pair {guild_ref}', channel=remote, guild=guild, author='member')
+        await self.pairing.approve_from_discord(approval)
+        self.assertEqual(self.pairing.discord_channels(guild, guild_ref), [])
+        approval.author = 'manager'
+        await self.pairing.approve_from_discord(approval)
+        self.assertEqual(self.pairing.discord_channels(guild, k.EntityRef.parse('11@chat.example')), [])
         step = event()
         await self.commands['bridge-pair'][1](step)
         for _ in range(4):
@@ -79,6 +85,7 @@ class PairingTest(unittest.IsolatedAsyncioTestCase):
             await view.callbacks[view.rows[0].components[0].custom_id](step)
             step.defer_update.assert_awaited_once()
             step.defer.assert_not_awaited()
+        self.assertEqual(self.pairing.discord_channels(guild, guild_ref), [])
         final_view = step.edit_original_response.call_args.kwargs['view']
         self.assertEqual(final_view.to_components(), [])
         self.assertIsNone(final_view.timeout)

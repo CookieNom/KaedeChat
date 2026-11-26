@@ -38,6 +38,9 @@ class ErrorEnvelope(BaseModel):
     code: str
     message: str
     trace_id: str
+    active_client: str | None = None
+    suspended_until: str | None = None
+    turnstile_required: bool | None = None
     permissions: str | None = None
     retry_after_ms: int | None = None
     max_bytes: int | None = None
@@ -130,6 +133,23 @@ def http_exception_response(request: Request, exc: StarletteHTTPException) -> JS
         if isinstance(permissions, str):
             extensions["permissions"] = permissions
         retry_after_ms = exc.detail.get("retry_after_ms")
+        seconds = exc.detail.get("retry_after")
+        if retry_after_ms is None and type(seconds) is int and 0 <= seconds <= 86_400:
+            retry_after_ms = seconds * 1000
+        client = exc.detail.get("active_client")
+        if code == "VOICE_ACTIVE_ELSEWHERE" and client in ("desktop", "mobile", "web", "bot"):
+            extensions["active_client"] = client
+        challenge = exc.detail.get("turnstile_required")
+        if code in {
+            "INVALID_CREDENTIALS",
+            "TURNSTILE_REQUIRED",
+            "TURNSTILE_INVALID",
+            "TURNSTILE_UNAVAILABLE",
+        } and isinstance(challenge, bool):
+            extensions["turnstile_required"] = challenge
+        until = exc.detail.get("suspended_until")
+        if code == "ACCOUNT_SUSPENDED" and isinstance(until, str) and len(until) <= 64:
+            extensions["suspended_until"] = until
         if (
             isinstance(retry_after_ms, int)
             and not isinstance(retry_after_ms, bool)

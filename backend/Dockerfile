@@ -36,5 +36,7 @@ COPY scripts scripts
 RUN chmod -R a=rX app migrations scripts && chmod a=r alembic.ini
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin kaede
 ENV PATH="/opt/venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ARG KAEDE_SOFTWARE_VERSION=development
+ENV KAEDE_SOFTWARE_VERSION=${KAEDE_SOFTWARE_VERSION}
 USER kaede
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "1048576", "--no-access-log"]

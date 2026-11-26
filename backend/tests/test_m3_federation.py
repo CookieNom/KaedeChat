@@ -709,7 +709,10 @@ async def test_interactive_request_does_not_take_background_drain_lock(
     session = SimpleNamespace(scalar=AsyncMock())
     monkeypatch.setattr("app.federation.client.lock_block_policy_shared", AsyncMock())
     monkeypatch.setattr("app.federation.client.matching_block", AsyncMock(return_value=None))
-    monkeypatch.setattr("app.federation.client.ensure_peer", AsyncMock())
+    discovered_peer = SimpleNamespace(capabilities=["dm-group-inviter-proof/1"])
+    monkeypatch.setattr(
+        "app.federation.client.ensure_peer", AsyncMock(return_value=discovered_peer)
+    )
     monkeypatch.setattr(
         "app.federation.client.federation_signing_headers",
         AsyncMock(return_value={"Authorization": "test"}),
@@ -730,11 +733,26 @@ async def test_interactive_request_does_not_take_background_drain_lock(
         query=None,
         request_timeout=10,
         hop=1,
+        required_capability="dm-group-inviter-proof/1",
     )
 
     assert target == "/_kaede/v1/guilds/1/proxy-reaction"
     session.scalar.assert_not_awaited()
     await prepared_client.aclose()
+    discovered_peer.capabilities.clear()
+    with pytest.raises(FederationNetworkError, match="dm-group-inviter-proof/1"):
+        await _prepare_signed_request(
+            cast(Any, session),
+            settings(),
+            "POST",
+            "beta.localhost",
+            "/_kaede/v1/dm/groups/authorize",
+            payload={},
+            query=None,
+            request_timeout=10,
+            hop=1,
+            required_capability="dm-group-inviter-proof/1",
+        )
 
 
 @pytest.mark.asyncio
@@ -1357,6 +1375,11 @@ async def test_delegated_profile_cannot_spoof_a_resolved_third_party_user() -> N
             claimed,
             authority_origin="beta.localhost",
         )
+
+    participant = await resolve_delegated_profile(
+        session, settings(), claimed, authority_origin="beta.localhost", participant_reference=True
+    )
+    assert participant is resolved_user and participant.username == "real_name"
 
 
 @pytest.mark.parametrize(
@@ -3423,10 +3446,18 @@ async def test_authenticated_origin_is_limited_before_nonce_allocation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", ['{"op":"ping"}', "{" + '"padding":"x",' * 1000])
-async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
+@pytest.mark.parametrize(
+    ("raw", "event_limit"),
+    [
+        ('{"op":"ping"}', False),
+        ("{" + '"padding":"x",' * 1000, False),
+        ('{"op":"events","id":"1","events":[{}]}', True),
+    ],
+)
+async def test_hot_link_frame_and_event_rate_limits_close_the_socket(
     monkeypatch: pytest.MonkeyPatch,
     raw: str,
+    event_limit: bool,
 ) -> None:
     class FakeSession:
         async def __aenter__(self) -> object:
@@ -3470,7 +3501,7 @@ async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
         async def close(self, *, code: int) -> None:
             self.closed.append(code)
 
-    parse = Mock()
+    parse = Mock(wraps=federation_api.strict_json_loads)
     monkeypatch.setattr(
         federation_api,
         "authenticate_federation_websocket",
@@ -3480,6 +3511,11 @@ async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
     monkeypatch.setattr(
         federation_api,
         "enforce_federation_link_frame_rate_limit",
+        AsyncMock(side_effect=None if event_limit else HTTPException(status_code=429)),
+    )
+    monkeypatch.setattr(
+        federation_api,
+        "enforce_origin_event_rate_limit",
         AsyncMock(side_effect=HTTPException(status_code=429)),
     )
     monkeypatch.setattr(federation_api, "strict_json_loads", parse)
@@ -3489,7 +3525,10 @@ async def test_hot_link_rate_limit_closes_before_parsing_any_frame(
     await federation_api.federation_link(cast(Any, websocket))
 
     assert websocket.closed == [4429]
-    parse.assert_not_called()
+    if event_limit:
+        parse.assert_called_once_with(raw)
+    else:
+        parse.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -4037,12 +4076,14 @@ async def test_snapshot_visibility_for_2001_members_has_bounded_query_count() ->
     class BulkSession:
         def __init__(self) -> None:
             self.calls = 0
-            self.rows = [members]
+
+        async def execute(self, _statement: object) -> object:
+            self.calls += 1
+            return SimpleNamespace(all=lambda: [(member, "human", None) for member in members])
 
         async def scalars(self, _statement: object) -> list[object]:
-            rows = self.rows[self.calls] if self.calls < len(self.rows) else []
             self.calls += 1
-            return rows
+            return []
 
     session = BulkSession()
     visible = await visible_guild_channels_for_origin(
@@ -4055,6 +4096,66 @@ async def test_snapshot_visibility_for_2001_members_has_bounded_query_count() ->
 
     assert visible == [channel]
     assert 0 < session.calls <= 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("account_type", "member_of_private", "expected"),
+    [
+        ("human", False, {20}),
+        ("human", True, {20, 21}),
+        ("bot", True, set()),
+    ],
+)
+async def test_snapshot_thread_visibility_uses_parent_membership_and_bot_grants(
+    account_type, member_of_private, expected
+):
+    domain, peer = "alpha.localhost", "beta.localhost"
+    guild = SimpleNamespace(id=10, origin_domain=domain, owner_id=99, owner_domain=domain)
+    role = SimpleNamespace(id=10, origin_domain=domain, permissions=1 << 10)
+
+    def channel(id, typ, parent=None):
+        return SimpleNamespace(
+            id=id,
+            origin_domain=domain,
+            type=typ,
+            parent_id=parent,
+            parent_domain=domain if parent else None,
+            permissions_synced=False,
+            guild_id=10,
+            guild_domain=domain,
+            unavailable=False,
+        )
+
+    channels = [channel(20, 0), channel(21, 12, 20), channel(22, 0), channel(23, 11, 22)]
+    member = SimpleNamespace(
+        user_id=1, user_domain=peer, timeout_indefinite=False, timeout_until=None
+    )
+    overwrite = SimpleNamespace(
+        channel_id=22,
+        channel_domain=domain,
+        target_id=10,
+        target_domain=domain,
+        target_type="role",
+        allow=0,
+        deny=1 << 10,
+    )
+    rows = [[], [overwrite]]
+    if account_type == "bot":
+        rows.append([SimpleNamespace(bot_user_id=1, channel_restrictions=["999"])])
+    rows.append([SimpleNamespace(thread_id=21, user_id=1)] if member_of_private else [])
+    session = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [(member, account_type, None)])),
+        scalars=AsyncMock(side_effect=rows),
+    )
+    visible = await visible_guild_channels_for_origin(
+        cast(Any, session),
+        cast(Any, guild),
+        peer,
+        loaded_channels=cast(Any, channels),
+        loaded_roles=cast(Any, [role]),
+    )
+    assert {item.id for item in visible} == expected
 
 
 @pytest.mark.asyncio
