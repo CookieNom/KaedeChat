@@ -17,14 +17,23 @@ release workflow don't build it.
 You'll need Node 22, pnpm 10.34, Rust 1.97.1, the Tauri CLI, and the native
 libraries for your platform (see [Linux](#linux) for the longest list).
 
-Desktop builds also need a custom WebRTC archive with HEVC enabled, because
-stock WebRTC prebuilts don't include it. Extract the matching
-`kaede-desktop-webrtc` CI artifact for your OS and architecture into
-`desktop/native/webrtc`, then run this from the repository root:
-`python3 desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc`.
-Export the `LK_CUSTOM_WEBRTC` and (on Windows and Linux) `CUDA_HOME` paths it
-prints before running Cargo or the desktop Make targets. To rebuild the
-archive, see the [native codec instructions](../docs/av1-e2ee/README.md#desktop-native-artifacts).
+Desktop builds use Kaede's HEVC-enabled WebRTC package from GitHub Container
+Registry (GHCR). Install Python 3.12 or newer and put ORAS CLI 1.4.0 on your
+`PATH`. Public packages allow anonymous pulls. For a private package, run
+`oras login ghcr.io --username YOUR_USERNAME` and enter a token with
+`read:packages` access at the password prompt.
+
+From the repository root, install the pinned package for your OS and architecture
+and prepare the matching LiveKit SDK and platform headers.
+
+```sh
+python desktop/tool/webrtc_registry.py pull
+python desktop/tool/prepare_codecs.py --cuda --artifact desktop/native/webrtc
+```
+
+The archive goes in `desktop/native/webrtc`. Export the printed
+`LK_CUSTOM_WEBRTC` path and, on Windows and Linux, `CUDA_HOME` before running
+Cargo or the desktop Make targets.
 
 ```sh
 pnpm --dir frontend install --frozen-lockfile

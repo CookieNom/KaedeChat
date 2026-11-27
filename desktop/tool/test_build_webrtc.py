@@ -45,7 +45,7 @@ class DesktopWebRTCBuildTest(unittest.TestCase):
                     patch.dict(os.environ),
                     patch.object(build, 'triple', return_value=target),
                     patch.object(build, 'prepare_sdk', return_value=work / 'sdk'),
-                    patch.object(build, 'fingerprint', return_value='fixture'),
+                    patch.object(build, 'native_fingerprint', return_value='fixture'),
                     patch.object(build, 'verify_artifact'),
                     patch.object(build, 'run', side_effect=run),
                     patch.object(build.subprocess, 'check_output', side_effect=[

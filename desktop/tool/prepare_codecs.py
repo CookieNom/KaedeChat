@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -28,6 +29,9 @@ PATCHES = [
     ROOT / 'desktop/patches/livekit-frame-keys.patch',
     ROOT / 'desktop/patches/livekit-windows-voice-startup.patch',
 ]
+WEBRTC_PATCH = ROOT / 'desktop/patches/webrtc-hevc.patch'
+BUILD_SCRIPTS = {'linux': 'build_linux.sh', 'mac': 'build_macos.sh', 'win': 'build_windows.cmd'}
+XCODE_VERSION = '26.3'
 
 
 def run(*args, cwd):
@@ -36,9 +40,38 @@ def run(*args, cwd):
 
 def fingerprint():
     digest = hashlib.sha256(SOURCES.read_bytes())
-    for path in [Path(__file__), Path(__file__).with_name("build_webrtc.py"), *PATCHES, ROOT / 'desktop/patches/webrtc-hevc.patch']:
+    for path in [Path(__file__), Path(__file__).with_name('build_webrtc.py'), *PATCHES, WEBRTC_PATCH]:
         digest.update(path.name.encode())
         digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def native_fingerprint(target):
+    """Identify the archive on any host, before fetching the SDK or WebRTC."""
+    system, _ = target.split('-')
+    toolchain = {'linux': 'ubuntu-24.04', 'mac': f'macos-15/Xcode-{XCODE_VERSION}',
+                 'win': 'windows-2025/Visual Studio (latest)'}[system]
+    inputs = {name: PINS[name] for name in (
+        'sdk_repository', 'sdk_revision', 'webrtc_repository', 'webrtc_revision', 'depot_tools_revision',
+    )}
+    inputs.update(target=target, toolchain=toolchain, script=BUILD_SCRIPTS[system])
+    digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode())
+    for path in (Path(__file__).with_name('build_webrtc.py'), WEBRTC_PATCH):
+        # Git for Windows can use CRLF in the checkout.
+        digest.update(path.read_text(encoding='utf-8').encode())
+
+    # The pinned SDK supplies the upstream recipes. Our mixed SDK patches also
+    # modify Rust/C++ bindings that Cargo compiles separately from the archive.
+    directory = 'webrtc-sys/libwebrtc/'
+    other_scripts = {directory + name for os_name, name in BUILD_SCRIPTS.items() if os_name != system}
+    for patch in PATCHES:
+        for section in re.split(r'(?m)(?=^diff --git )', patch.read_text(encoding='utf-8')):
+            header = section.partition('\n')[0]
+            if directory not in header:
+                continue
+            if any(header == f'diff --git a/{name} b/{name}' for name in other_scripts):
+                continue
+            digest.update(section.encode())
     return digest.hexdigest()
 
 
@@ -137,11 +170,14 @@ def prepare_cuda():
     return destination
 
 
-def verify_artifact(path):
+def verify_artifact(path, *, expected_fingerprint=None):
     if not (path / 'kaede-build.json').is_file():
-        raise SystemExit('Missing custom WebRTC artifact. Restore the matching Desktop WebRTC CI artifact into desktop/native/webrtc or build it with desktop/tool/build_webrtc.py, then set LK_CUSTOM_WEBRTC to that directory.')
+        raise SystemExit('Missing custom WebRTC artifact. Restore the matching Desktop WebRTC package into desktop/native/webrtc or build it with desktop/tool/build_webrtc.py, then set LK_CUSTOM_WEBRTC to that directory.')
     manifest = json.loads((path / 'kaede-build.json').read_text())
-    if manifest != {'fingerprint': fingerprint(), 'target': triple(), 'webrtc_revision': PINS['webrtc_revision']}:
+    target = triple()
+    if expected_fingerprint is None:
+        expected_fingerprint = native_fingerprint(target)
+    if manifest != {'fingerprint': expected_fingerprint, 'target': target, 'webrtc_revision': PINS['webrtc_revision']}:
         raise SystemExit('Desktop WebRTC artifact does not match this source revision and target')
     args = [line.split('#', 1)[0].strip().split('=', 1)
             for line in (path / 'args.gn').read_text().splitlines()]
@@ -149,7 +185,7 @@ def verify_artifact(path):
             for key, value in [parts] if key.strip() == 'rtc_use_h265']
     if hevc != ['true']:
         raise SystemExit('Desktop WebRTC artifact was built without HEVC')
-    library = 'webrtc.lib' if triple().startswith('win-') else 'libwebrtc.a'
+    library = 'webrtc.lib' if target.startswith('win-') else 'libwebrtc.a'
     for required in [path / 'lib' / library, path / 'webrtc.ninja', path / 'desktop_capture.ninja', path / 'LICENSE.md']:
         if not required.is_file() or required.stat().st_size == 0:
             raise SystemExit(f'Missing WebRTC artifact file: {required}')

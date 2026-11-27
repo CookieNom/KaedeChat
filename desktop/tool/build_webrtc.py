@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from prepare_codecs import NATIVE, PINS, ROOT, fingerprint, prepare_sdk, run, triple, verify_artifact
+from prepare_codecs import BUILD_SCRIPTS, NATIVE, PINS, WEBRTC_PATCH, native_fingerprint, prepare_sdk, run, triple, verify_artifact
 
 
 def sync_dependencies(*command, cwd):
@@ -35,7 +35,7 @@ def main():
     target = triple()
     system, arch = target.split('-')
     sdk = prepare_sdk(args.source)
-    build_fingerprint = fingerprint()
+    build_fingerprint = native_fingerprint(target)
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
     if (work / 'src').exists():
@@ -76,17 +76,17 @@ def main():
     run(sys.executable, str(source / 'build/util/lastchange.py'), '--filter=',
         '--source-dir', str(source / 'build'),
         '-o', str(source / 'build/util/LASTCHANGE'), cwd=work)
-    patch = ROOT / 'desktop/patches/webrtc-hevc.patch'
+    patch = WEBRTC_PATCH
     run('git', 'apply', '--check', str(patch), cwd=source)
     run('git', 'apply', str(patch), cwd=source)
     scripts = sdk / 'webrtc-sys/libwebrtc'
-    script = {'linux': 'build_linux.sh', 'mac': 'build_macos.sh', 'win': 'build_windows.cmd'}[system]
+    script = BUILD_SCRIPTS[system]
     if system == 'win':
         run('cmd', '/c', str(scripts / script), '--arch', arch, '--profile', 'release', cwd=work)
     else:
         run('bash', str(scripts / script), '--arch', arch, '--profile', 'release', cwd=work)
     built = work / f'{target}-release'
-    if fingerprint() != build_fingerprint:
+    if native_fingerprint(target) != build_fingerprint:
         raise SystemExit('Codec sources changed during the build; rebuild from a stable checkout')
     (built / 'kaede-build.json').write_text(json.dumps({
         'fingerprint': build_fingerprint, 'target': target, 'webrtc_revision': PINS['webrtc_revision'],

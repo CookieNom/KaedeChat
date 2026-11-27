@@ -53,10 +53,16 @@ jobs:
   ci:
     name: Release CI
     needs: preflight
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/ci.yml
 
   desktop-linux:
     needs: [preflight, ci]
+    permissions:
+      contents: read
+      packages: read
     if: needs.preflight.outputs.desktop == 'true'
     name: Linux desktop
     runs-on: ubuntu-24.04
@@ -170,6 +176,9 @@ jobs:
 
   desktop-rpm:
     needs: [preflight, ci]
+    permissions:
+      contents: read
+      packages: read
     if: needs.preflight.outputs.desktop == 'true'
     name: RHEL 10 desktop RPM
     runs-on: ubuntu-24.04
@@ -241,6 +250,9 @@ jobs:
 
   desktop-windows:
     needs: [preflight, ci]
+    permissions:
+      contents: read
+      packages: read
     if: needs.preflight.outputs.desktop == 'true'
     name: Windows desktop
     runs-on: windows-2025
@@ -379,6 +391,9 @@ jobs:
 
   desktop-macos:
     needs: [preflight, ci]
+    permissions:
+      contents: read
+      packages: read
     if: needs.preflight.outputs.desktop == 'true'
     name: macOS desktop (${{ matrix.arch }})
     strategy:

@@ -1,0 +1,38 @@
+{
+  "linux-x64": {
+    "fingerprint": "fcc28864b13398f72e3a6a00d5ac982b78628e6e53347004179d24eb49dde8f2",
+    "digest": "sha256:b82b2d461155a7abc6b52390d355a452bdec442b13acc7d269e1e5d5c489fb0c",
+    "seed": {
+      "artifact_id": 15149122181,
+      "digest": "sha256:9d9b5d05beef0c056fc3f4d9c94b13a1b3fc673975de51115bbc9ee3865ae53b",
+      "fingerprint": "e9d30867877f06e3c5a80f9a1d27354f63b9c924591f68267c761d7acee267ed"
+    }
+  },
+  "mac-arm64": {
+    "fingerprint": "b601c360f79e712d3c037cbb1e107936d6071b08bd12262942d624b50e40bf23",
+    "digest": "sha256:ebfe97cdaa5cdd924897d299f446f4debf2f6b2b2939752a3313851591af847a",
+    "seed": {
+      "artifact_id": 15150071506,
+      "digest": "sha256:1a308651b1a26817a823de1c5f666325b51b9788916e36efa0a610426e60e798",
+      "fingerprint": "e9d30867877f06e3c5a80f9a1d27354f63b9c924591f68267c761d7acee267ed"
+    }
+  },
+  "mac-x64": {
+    "fingerprint": "410457893c415f4ef15abb341352836be07cc9d67a75360a7385f9d9d17fd136",
+    "digest": "sha256:38a08b61cdbbec26069fe37135881b8cc4f237d92a4c5ede5063f93abdbe7a08",
+    "seed": {
+      "artifact_id": 15151892591,
+      "digest": "sha256:d3bd56b8b7b3ee8c68ebc0c012194b426ea6eb0aabe575329bbe4a325ec555cf",
+      "fingerprint": "e9d30867877f06e3c5a80f9a1d27354f63b9c924591f68267c761d7acee267ed"
+    }
+  },
+  "win-x64": {
+    "fingerprint": "5334cdf67afb20595528279f8e999c3207d110e21232501786124147b57d3057",
+    "digest": "sha256:bf2db13cc1df3949323b9bed2dcf982f728a5c652d57831c91c8c52d0d4dc9a2",
+    "seed": {
+      "artifact_id": 15150686144,
+      "digest": "sha256:49862129e68cf073172e0841afeba16ba81d72440111a6ca215cad4f0c4beb8f",
+      "fingerprint": "452c60e1442beee60393e27f8816b35b432232ec7640cb28a60e28c16b96d326"
+    }
+  }
+}

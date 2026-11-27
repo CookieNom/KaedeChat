@@ -1,62 +1,80 @@
-name: Desktop WebRTC
+name: Publish desktop WebRTC
 
 on:
-  workflow_call:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/desktop-webrtc.yml
+      - desktop/tool/build_webrtc.py
+      - desktop/tool/codec_sources.json
+      - desktop/tool/prepare_codecs.py
+      - desktop/tool/webrtc_packages.json
+      - desktop/tool/webrtc_registry.py
+      - desktop/patches/*.patch
+      - docs/av1-e2ee/native-interop.patch
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  publish:
+    if: github.ref_type == 'branch'
+    permissions:
+      actions: read
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
+    concurrency:
+      group: desktop-webrtc-publish-${{ matrix.os }}
+      cancel-in-progress: false
     timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13.15"
-      - name: Prepare pinned SDK patches
-        shell: bash
-        run: python desktop/tool/prepare_codecs.py
-      - name: Restore H.265-enabled WebRTC
-        id: native
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
         with:
-          path: desktop/native/webrtc
-          key: kaede-desktop-codecs-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/tool/prepare_codecs.py', 'desktop/tool/build_webrtc.py', 'desktop/tool/codec_sources.json', 'desktop/patches/*.patch', 'docs/av1-e2ee/native-interop.patch') }}
+          version: 1.4.0
+      - name: Sign in to GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | oras login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Check for the matching WebRTC package
+        id: plan
+        run: python desktop/tool/webrtc_registry.py plan
+      - name: Publish the verified archive from the previous build
+        if: steps.plan.outputs.mode == 'seed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python desktop/tool/webrtc_registry.py seed
+          python desktop/tool/webrtc_registry.py pull
       - name: Linux build dependencies
-        if: steps.native.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        if: steps.plan.outputs.mode == 'build' && runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
           sudo apt-get update
           sudo apt-get install -y ninja-build pkg-config cpio rsync unzip xz-utils libglib2.0-dev libasound2-dev libpulse-dev libgbm-dev libudev-dev libxrandr-dev libxdamage-dev libxcomposite-dev libxfixes-dev libxext-dev libx11-dev
       - name: Select Xcode
-        if: runner.os == 'macOS'
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-      - name: Check codec source preparation
-        shell: bash
-        run: python -m unittest discover -s desktop/tool -p 'test_*.py'
-      - name: Test H.26x prefix and RTP normalization
-        if: runner.os == 'Linux'
+        if: steps.plan.outputs.mode == 'build' && runner.os == 'macOS'
+        working-directory: desktop/tool
         run: |
-          c++ -std=c++20 desktop/native/rust-sdks/webrtc-sys/src/av1_e2ee/h26x_frame_test.cpp -o "$RUNNER_TEMP/h26x-test"
-          "$RUNNER_TEMP/h26x-test"
+          version="$(python -c 'from prepare_codecs import XCODE_VERSION; print(XCODE_VERSION)')"
+          sudo xcode-select -s "/Applications/Xcode_${version}.app/Contents/Developer"
       - name: Build custom WebRTC
-        if: steps.native.outputs.cache-hit != 'true'
-        shell: bash
+        if: steps.plan.outputs.mode == 'build'
         run: python desktop/tool/build_webrtc.py --work-dir "$RUNNER_TEMP/kaede-desktop-webrtc"
-      - name: Verify build manifest and preserve archive symlinks
-        shell: bash
-        run: |
-          python desktop/tool/prepare_codecs.py --artifact desktop/native/webrtc
-          tar -cf - -C desktop/native/webrtc . > "$RUNNER_TEMP/desktop-webrtc.tar"
-      - uses: ./.github/actions/upload-artifact
-        with:
-          name: kaede-desktop-webrtc-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/desktop-webrtc.tar
-          if-no-files-found: error
+      - name: Verify and publish the new WebRTC package
+        if: steps.plan.outputs.mode == 'build'
+        run: python desktop/tool/webrtc_registry.py publish

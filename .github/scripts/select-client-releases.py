@@ -47,7 +47,8 @@ def affected_clients(path):
                     ".github/scripts/", "desktop/.cargo/", ".cargo/",
                     "desktop/crates/kaede-e2ee/", "desktop/crates/kaede-e2ee-ffi/")):
         return set(CLIENTS)
-    if path.startswith(("desktop/", "frontend/")):
+    if path == "docs/av1-e2ee/native-interop.patch" or path.startswith((
+            "desktop/", "frontend/", ".github/actions/prepare-desktop-codecs/")):
         return {"desktop"}
     if path.startswith("mobile/android/"):
         return {"android"}

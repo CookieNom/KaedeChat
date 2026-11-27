@@ -20,9 +20,9 @@ one GitHub Release:
 
 Each client package has a SHA-256 `.sha256` file beside it. Linux and macOS
 updater signatures have checksums too, but `latest.json` and the Windows `.sig`
-don't. The publish job downloads only `kaede-chat-*` artifacts. The native
-WebRTC build inputs (`webrtc-android.tar`, `webrtc-ios.tar`, and each platform's
-`desktop-webrtc.tar`) stay as CI artifacts and aren't uploaded to the release.
+don't. The publish job downloads only `kaede-chat-*` artifacts. Desktop builds
+pull their pinned WebRTC packages from GitHub Container Registry. Mobile builds
+use the `webrtc-android.tar` and `webrtc-ios.tar` archives from the same CI run.
 
 ## Which clients build
 
@@ -37,7 +37,7 @@ Git errors fail preflight instead of quietly skipping builds.
 
 | Changed files | Release builds |
 | --- | --- |
-| `frontend/` or shipping `desktop/` code | All desktop platforms together |
+| `frontend/`, shipping `desktop/` code, `.github/actions/prepare-desktop-codecs/`, or `docs/av1-e2ee/native-interop.patch` | All desktop platforms together |
 | `mobile/android/` | Android |
 | `mobile/ios/` | iOS, when `IOS_RELEASE_ENABLED=true` |
 | Shared `mobile/` files, including Dart, assets, pubspec, and tools | Android and enabled iOS |
@@ -48,7 +48,7 @@ Git errors fail preflight instead of quietly skipping builds.
 
 Matching errs on the side of building: the shared lockfile,
 `desktop-release.yml`, and `.github/scripts/` rebuild every consumer. Other CI
-files don't select a client. CI still runs for every tag. If nothing is selected
+files outside the table don't select a client. CI still runs for every tag. If nothing is selected
 (after applying the iOS flag), no GitHub Release or store upload is created.
 
 Unchanged apps keep their downloads under their earlier release tags. A
@@ -91,6 +91,11 @@ workflow used for main and pull requests. Signed builds start only after CI
 succeeds. CI also checks the Podfile checksum and pinned Rust toolchain, lints
 workflow syntax, and compiles an unsigned iOS release with the release Xcode
 SDK. Dependency installation keeps the committed Cargo, Dart, and Pod locks.
+
+Desktop builds resolve each architecture's WebRTC archive from
+`desktop/tool/webrtc_packages.json`. Keep every GHCR package tag referenced by
+a supported client release so its build can be reproduced. Publish and pin
+changed native inputs before merging them. [Codec publishing instructions](../../docs/av1-e2ee/README.md#publishing-a-desktop-webrtc-update)
 
 Push the code to main and wait for its CI to pass. Then run:
 
