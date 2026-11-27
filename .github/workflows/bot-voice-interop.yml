@@ -45,6 +45,7 @@ jobs:
       - name: Prepare Linux native dependencies
         if: steps.native.outputs.cache-hit != 'true'
         run: |
+          sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh"
           sudo sh desktop/install-clang.sh
           sudo apt-get install -y cmake protobuf-compiler pkg-config libc++-21-dev libc++abi-21-dev libglib2.0-dev libssl-dev libasound2-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxdamage-dev libxcomposite-dev libgl-dev libdrm-dev libgbm-dev libxkbcommon-dev
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal

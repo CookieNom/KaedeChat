@@ -45,7 +45,7 @@ jobs:
         run: |
           # Native WebRTC fetches its own Android SDK; reclaim unused runner SDKs.
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
-          sudo apt-get update
+          sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh"
           sudo apt-get install -y ninja-build pkg-config python3-setuptools rsync unzip xz-utils libglib2.0-dev
       - name: Select Xcode
         if: runner.os == 'macOS'

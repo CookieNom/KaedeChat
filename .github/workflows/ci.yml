@@ -87,7 +87,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12.13" }
       - name: Install backend native dependencies
-        run: sudo apt-get update && sudo apt-get install -y libvips42
+        run: sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh" && sudo apt-get install -y libvips42
       - run: uv lock --check
       - run: uv sync --locked
       - run: uv run ruff check .
@@ -321,7 +321,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/prepare-desktop-codecs
       - name: Install Linux desktop dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake file libpulse-dev libxcb1-dev libasound2-dev libayatana-appindicator3-dev libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev libva-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
+        run: sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh" && sudo apt-get install -y cmake file libpulse-dev libxcb1-dev libasound2-dev libayatana-appindicator3-dev libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev libva-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
       - name: Install Clang 21 for libwebrtc
         if: runner.os == 'Linux'
         run: |
@@ -380,7 +380,7 @@ jobs:
           "$RUNNER_TEMP/h26x-test"
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake file pulseaudio libpulse-dev libxcb1-dev libasound2-dev libayatana-appindicator3-dev libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev libva-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
+        run: sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh" && sudo apt-get install -y cmake file pulseaudio libpulse-dev libxcb1-dev libasound2-dev libayatana-appindicator3-dev libdbus-1-dev libgtk-3-dev librsvg2-dev libssl-dev libudev-dev libva-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget
       - name: Install Clang 21 for libwebrtc
         if: runner.os == 'Linux'
         run: |
@@ -462,7 +462,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12.13" }
       - name: Install backend native dependencies
-        run: sudo apt-get update && sudo apt-get install -y libvips42
+        run: sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh" && sudo apt-get install -y libvips42
       - run: uv lock --check
       - run: uv sync --locked
       - run: uv run alembic upgrade head

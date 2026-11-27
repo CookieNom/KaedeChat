@@ -64,7 +64,7 @@ jobs:
         if: steps.plan.outputs.mode == 'build' && runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
-          sudo apt-get update
+          sudo bash "$GITHUB_WORKSPACE/.github/scripts/update-runner-apt.sh"
           sudo apt-get install -y ninja-build pkg-config cpio rsync unzip xz-utils libglib2.0-dev libasound2-dev libpulse-dev libgbm-dev libudev-dev libxrandr-dev libxdamage-dev libxcomposite-dev libxfixes-dev libxext-dev libx11-dev
       - name: Select Xcode
         if: steps.plan.outputs.mode == 'build' && runner.os == 'macOS'
