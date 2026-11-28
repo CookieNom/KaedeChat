@@ -4302,7 +4302,15 @@ mod tests {
     async fn screen_preview_replays_on_reattach_and_stop_supersedes_queued_frames()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::{VideoFrameSource, VoiceVideoFrame, VoiceVideoFrames, mpsc, watch};
+        use futures_util::FutureExt;
 
+        let next = |reader: &mut VoiceVideoFrames, include_preview| {
+            reader
+                .recv(include_preview)
+                .now_or_never()
+                .flatten()
+                .ok_or("expected a ready frame")
+        };
         let (remote_tx, remote) = mpsc::channel(1);
         let (preview_tx, preview) = watch::channel(None);
         let mut reader = VoiceVideoFrames { remote, preview };
@@ -4315,13 +4323,10 @@ mod tests {
             removed: false,
         };
         preview_tx.send(Some(local.clone()))?;
-        assert_eq!(
-            reader.recv(true).await.ok_or("video stream closed")?.rgba,
-            local.rgba
-        );
+        assert_eq!(next(&mut reader, true)?.rgba, local.rgba);
         reader.replay_preview();
         assert_eq!(
-            reader.recv(true).await.ok_or("video stream closed")?.source,
+            next(&mut reader, true)?.source,
             VideoFrameSource::LocalScreen
         );
 
@@ -4340,8 +4345,8 @@ mod tests {
             removed: true,
             ..local
         }))?;
-        let remote = reader.recv(false).await.ok_or("video stream closed")?;
-        let removal = reader.recv(true).await.ok_or("video stream closed")?;
+        let remote = next(&mut reader, false)?;
+        let removal = next(&mut reader, true)?;
         assert_eq!(remote.participant, "peer");
         assert!(!remote.removed);
         assert_eq!(removal.source, VideoFrameSource::LocalScreen);

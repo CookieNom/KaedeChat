@@ -1209,6 +1209,20 @@
   {/if}
 {/snippet}
 
+{#snippet prioritySpeakers()}
+  {#if activePriorityCards.length}
+    <div class="priority-speaker-roster" role="status">
+      <Icon name="megaphone" size={17} />
+      <span>
+        {$t('ui_value0_value1_speaking_with_priority_bc61d2c3', {
+          value0: String(activePriorityCards.map((participant) => participant.name).join(', ')),
+          value1: String(activePriorityCards.length === 1 ? ' is' : ' are')
+        })}
+      </span>
+    </div>
+  {/if}
+{/snippet}
+
 {#snippet cameraTile(tile: VoiceTile)}
   <article class:priority-speaker={view.prioritySpeakers.has(tile.identity)} class="video-tile">
     {#if view.prioritySpeakers.has(tile.identity)}
@@ -1237,6 +1251,7 @@
   class="voice-panel"
   bind:this={panel}
   class:presenting
+  class:multiple-screens={screens.length > 1}
   class:idle={presenting && !controlsVisible && !soundboardOpen}
   onpointerenter={revealControls}
   onpointermove={revealControls}
@@ -1397,6 +1412,7 @@
       {:else if videoDetached}
         <p>Video is open in its own window.</p>
       {:else if presenting && panel}
+        {@render prioritySpeakers()}
         <SharedScreens
           {panel}
           {screens}
@@ -1408,19 +1424,7 @@
         />
       {:else if cameras.length > 0}
         <div class="video-grid">
-          {#if activePriorityCards.length}
-            <div class="priority-speaker-roster" role="status">
-              <Icon name="megaphone" size={17} />
-              <span>
-                {$t('ui_value0_value1_speaking_with_priority_bc61d2c3', {
-                  value0: String(
-                    activePriorityCards.map((participant) => participant.name).join(', ')
-                  ),
-                  value1: String(activePriorityCards.length === 1 ? ' is' : ' are')
-                })}
-              </span>
-            </div>
-          {/if}
+          {@render prioritySpeakers()}
           {#each cameras as tile (tile.key)}
             {@render cameraTile(tile)}
           {/each}
@@ -1560,7 +1564,7 @@
       </button>
       <button
         class:active={view.screen}
-        class="control-button"
+        class="control-button share-control"
         disabled={Boolean(view.screenPending) || (!view.screen && !view.canStream)}
         aria-pressed={view.screen}
         aria-label={view.screenPending
@@ -2458,10 +2462,11 @@
     grid-template-rows: minmax(0, 1fr) auto;
     background: #08090b;
   }
-  .voice-panel.presenting:popover-open,
+  .voice-panel.presenting[data-window-fullscreen],
   .voice-panel.presenting:fullscreen {
     position: fixed;
     inset: 0;
+    z-index: 999;
     width: 100%;
     height: 100%;
     max-width: none;
@@ -2495,6 +2500,38 @@
     background: linear-gradient(to bottom, rgb(0 0 0 / 85%), transparent);
     pointer-events: none;
   }
+  .presenting .priority-speaker-roster {
+    position: absolute;
+    z-index: 1;
+    top: 3.75rem;
+    left: 0.7rem;
+    max-width: calc(100% - 1.4rem);
+  }
+  .presenting .window-action,
+  .presenting .voice-dock,
+  .presenting .voice-heading-actions :global(.end-call) {
+    border-color: rgb(255 255 255 / 16%);
+    background: rgb(24 25 29 / 94%);
+    color: #fff;
+  }
+  .presenting .voice-heading-actions :global(.end-call) {
+    color: #ffb1ae;
+  }
+  .presenting .window-action:hover,
+  .presenting .voice-heading-actions :global(.end-call:hover) {
+    background: #35373c;
+  }
+  .presenting .voice-dock .control-button:not(.active, .off, .danger) {
+    color: white;
+    background: #35373c;
+  }
+  .presenting .voice-dock .control-button:not(.active, .off, .danger):hover:not(:disabled) {
+    background: #45484f;
+  }
+  .presenting .share-control.active {
+    color: white;
+    background: var(--pine);
+  }
   .presenting .voice-status strong {
     color: white;
   }
@@ -2517,7 +2554,7 @@
     bottom: 0;
     margin: 0 0 0.55rem;
   }
-  .presenting.idle:not(:has(:focus-visible, :global(.audio-panel:popover-open)))
+  .presenting.idle:not(:has(:focus-visible, :global(.audio-menu > button[aria-expanded='true'])))
     :is(
       .voice-heading,
       .voice-dock,
@@ -2528,7 +2565,7 @@
     opacity: 0;
     pointer-events: none;
   }
-  .presenting.idle:not(:has(:focus-visible, :global(.audio-panel:popover-open)))
+  .presenting.idle:not(:has(:focus-visible, :global(.audio-menu > button[aria-expanded='true'])))
     :is(.voice-heading-actions, :global(.screen-tools)) {
     pointer-events: none;
   }
@@ -2554,6 +2591,23 @@
     }
   }
 
+  @container (max-width: 38rem) {
+    .presenting.multiple-screens:not(:fullscreen, [data-window-fullscreen]) .voice-stage {
+      margin-bottom: 3.9rem;
+    }
+    .presenting.multiple-screens .voice-heading {
+      flex-wrap: nowrap;
+    }
+    .presenting.multiple-screens .voice-status {
+      flex: 1;
+    }
+    .presenting.multiple-screens .voice-status strong {
+      white-space: nowrap;
+    }
+    .presenting.multiple-screens .voice-heading-actions {
+      flex-wrap: nowrap;
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
     .primary,
     .participant-card,

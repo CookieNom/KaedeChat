@@ -291,6 +291,11 @@
   .screen-grid:has(+ .camera-strip) .screen-caption {
     bottom: 0.5rem;
   }
+  @container share-stage (min-width: 42rem) {
+    .screen-grid:not(.multiple) .screen-caption {
+      bottom: 1rem;
+    }
+  }
   @container share-stage (max-width: 38rem) and (max-aspect-ratio: 7/4) {
     .screen-grid.multiple {
       grid-template-columns: minmax(0, 1fr);
@@ -307,7 +312,17 @@
       grid-column: auto;
       grid-row: 2;
     }
-    .multiple .screen-tile:not(:last-child) .screen-caption {
+    .multiple:not(.focused) .screen-tile:not(:last-child) .screen-caption,
+    .focused .selected .screen-caption {
+      bottom: 0.45rem;
+    }
+    .focused .thumbnail .screen-caption {
+      top: 0.35rem;
+      bottom: auto;
+    }
+  }
+  @container share-stage (max-width: 38rem) {
+    .multiple .screen-caption {
       bottom: 0.45rem;
     }
   }
