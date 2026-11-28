@@ -3315,9 +3315,16 @@
               channelRef={channel ? entityRef(channel) : undefined}
             >
               {#snippet headerActions()}
-                <button class="end-call" disabled={callBusy} onclick={() => callAction('end')}
-                  >{$t('ui_end_call_for_everyone_1dc035bc')}</button
+                <button
+                  class="end-call"
+                  aria-label={$t('ui_end_call_for_everyone_1dc035bc')}
+                  title={$t('ui_end_call_for_everyone_1dc035bc')}
+                  disabled={callBusy}
+                  onclick={() => callAction('end')}
                 >
+                  <Icon name="phone-off" size={19} />
+                  <span>{$t('ui_end_call_for_everyone_1dc035bc')}</span>
+                </button>
               {/snippet}
             </VoiceDock>
           {/key}

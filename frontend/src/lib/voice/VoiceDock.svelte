@@ -2462,7 +2462,7 @@
     grid-template-rows: minmax(0, 1fr) auto;
     background: #08090b;
   }
-  .voice-panel.presenting[data-window-fullscreen],
+  .voice-panel.presenting:global([data-window-fullscreen]),
   .voice-panel.presenting:fullscreen {
     position: fixed;
     inset: 0;
@@ -2513,6 +2513,9 @@
     border-color: rgb(255 255 255 / 16%);
     background: rgb(24 25 29 / 94%);
     color: #fff;
+  }
+  .voice-heading-actions :global(.end-call > svg) {
+    display: none;
   }
   .presenting .voice-heading-actions :global(.end-call) {
     color: #ffb1ae;
@@ -2592,7 +2595,7 @@
   }
 
   @container (max-width: 38rem) {
-    .presenting.multiple-screens:not(:fullscreen, [data-window-fullscreen]) .voice-stage {
+    .presenting.multiple-screens:not(:fullscreen, :global([data-window-fullscreen])) .voice-stage {
       margin-bottom: 3.9rem;
     }
     .presenting.multiple-screens .voice-heading {
@@ -2601,8 +2604,21 @@
     .presenting.multiple-screens .voice-status {
       flex: 1;
     }
-    .presenting.multiple-screens .voice-status strong {
-      white-space: nowrap;
+    .presenting .voice-heading-actions :global(.end-call) {
+      display: grid;
+      place-items: center;
+      width: 2.5rem;
+      min-height: 2.5rem;
+      padding: 0;
+      border-radius: 9px;
+      color: white;
+      background: var(--danger);
+    }
+    .presenting .voice-heading-actions :global(.end-call > svg) {
+      display: block;
+    }
+    .presenting .voice-heading-actions :global(.end-call > span) {
+      display: none;
     }
     .presenting.multiple-screens .voice-heading-actions {
       flex-wrap: nowrap;

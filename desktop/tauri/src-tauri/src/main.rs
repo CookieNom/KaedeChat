@@ -56,9 +56,7 @@ use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
-#[cfg(target_os = "windows")]
-use tokio::sync::oneshot;
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
 
 type NativeSession = SessionManager<SystemCredentialVault, EmbeddedTurnstile>;
 
