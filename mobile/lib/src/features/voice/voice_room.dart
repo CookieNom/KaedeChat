@@ -27,19 +27,24 @@ import 'package:kaede_mobile/src/theme/kaede_theme.dart';
 import 'package:livekit_client/livekit_client.dart';
 
 // One presentation per source, regardless of the number of codec variants.
-List<({Participant participant, TrackSource source})> _voiceVideoTiles(
-  List<Participant> participants,
-) =>
-    [
-      for (final participant in participants) ...[
-        (participant: participant, source: TrackSource.camera),
-        if (participant.videoTrackPublications.any((p) =>
-            p.source == TrackSource.screenShareVideo &&
-            !p.muted &&
-            p.track != null))
-          (participant: participant, source: TrackSource.screenShareVideo),
-      ],
-    ];
+List<({Participant participant, TrackSource source})> voiceVideoTiles(
+  List<Participant> participants, {
+  bool directCall = false,
+}) {
+  final tiles = <({Participant participant, TrackSource source})>[];
+  final shares = <({Participant participant, TrackSource source})>[];
+  for (final participant in participants) {
+    tiles.add((participant: participant, source: TrackSource.camera));
+    if (participant.videoTrackPublications.any((p) =>
+        p.source == TrackSource.screenShareVideo &&
+        !p.muted &&
+        (directCall || p.track != null))) {
+      (directCall ? shares : tiles).add(
+          (participant: participant, source: TrackSource.screenShareVideo));
+    }
+  }
+  return [...shares, ...tiles];
+}
 
 String voiceParticipantLabel({
   required String liveName,
@@ -301,7 +306,8 @@ final class _VoiceRoomState extends ConsumerState<VoiceRoom> {
         canSetVoiceChannelStatusNow(channel, joined: joined);
     final reconnecting = thisRoom && session.reconnecting;
     final participants = joined ? session.participants : const <Participant>[];
-    final videoTiles = _voiceVideoTiles(participants);
+    final videoTiles =
+        voiceVideoTiles(participants, directCall: callRef != null);
     final voiceElapsed = voiceElapsedLabel(_voiceStartedAt);
     final roomSummary = channel.type == ChannelType.stage && !_stageLoaded
         ? 'Loading Stage…'
@@ -1659,7 +1665,7 @@ final class _StageParticipantRoster extends StatelessWidget {
     List<Participant> items,
   ) {
     if (items.isEmpty) return SizedBox.shrink();
-    final videoTiles = _voiceVideoTiles(items);
+    final videoTiles = voiceVideoTiles(items);
     return Padding(
       padding: EdgeInsets.only(bottom: 16),
       child: Column(
@@ -1772,6 +1778,14 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
       identity: identity,
       knownName: widget.knownName,
     );
+    final screenShare = widget.source == TrackSource.screenShareVideo;
+    Widget waitingForScreen(BuildContext context) => Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(L10n.of(context).voice_screen_waiting,
+                textAlign: TextAlign.center),
+          ),
+        );
     return GestureDetector(
       onTap: widget.participant is RemoteParticipant
           ? () => _showParticipantControls(context, identity, name)
@@ -1793,7 +1807,10 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
           fit: StackFit.expand,
           children: [
             if (track is VideoTrack)
-              VideoTrackRenderer(track)
+              VideoTrackRenderer(track,
+                  placeholderBuilder: screenShare ? waitingForScreen : null)
+            else if (screenShare)
+              waitingForScreen(context)
             else
               Center(
                 child: CircleAvatar(
@@ -1816,12 +1833,21 @@ final class _ParticipantTileState extends State<_ParticipantTile> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (widget.source == TrackSource.screenShareVideo) ...[
+                    if (screenShare) ...[
                       Icon(Icons.screen_share_outlined,
                           color: Colors.white, size: 16),
                       SizedBox(width: 6),
                     ],
-                    Text(name, style: TextStyle(color: Colors.white)),
+                    Flexible(
+                      child: Text(
+                        screenShare
+                            ? L10n.of(context).voice_shared_screen(name)
+                            : name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    ),
                     if (widget.participant is RemoteParticipant) ...[
                       SizedBox(width: 6),
                       Icon(Icons.more_horiz_rounded,

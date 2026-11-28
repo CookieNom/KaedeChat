@@ -55,7 +55,8 @@ import type { KaedeMlsClient } from './wasm/kaede_e2ee';
 export const MLS_PROTOCOL = 'mls10';
 export const MLS_SUITE = 'MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519';
 const KEY_PACKAGE_BATCH = 20;
-const VAULT_LEASE_ATTEMPTS = 8;
+// Allow a final attempt after an abandoned 120-second server lease expires.
+const VAULT_LEASE_WAIT_MS = 125_000;
 
 interface DeviceRegistration {
   id: string;
@@ -486,7 +487,7 @@ function restoreMlsState(
 }
 
 function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolveWait) => window.setTimeout(resolveWait, milliseconds));
+  return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
 }
 
 function parseControlCursor(value: string): readonly [bigint, string] {
@@ -520,24 +521,26 @@ function controlCursorAfter(candidate: string, previous: string | null): boolean
 }
 
 async function acquireAccountVaultLease(): Promise<AccountVaultLease> {
-  for (let attempt = 0; attempt < VAULT_LEASE_ATTEMPTS; attempt += 1) {
+  const generation = activeGeneration;
+  const deadline = performance.now() + VAULT_LEASE_WAIT_MS;
+  let backoff = 1_000;
+  for (;;) {
+    if (generation !== activeGeneration) throw new Error('The encryption session changed.');
     try {
       return await api<AccountVaultLease>('/e2ee/vault/lease', {
         method: 'POST',
         body: '{}'
       });
     } catch (caught) {
-      if (
-        !(caught instanceof ApiError) ||
-        caught.code !== 'E2EE_ACCOUNT_VAULT_BUSY' ||
-        attempt === VAULT_LEASE_ATTEMPTS - 1
-      ) {
-        throw caught;
-      }
-      await wait(150 + attempt * 100 + Math.floor(Math.random() * 100));
+      if (!(caught instanceof ApiError) || caught.code !== 'E2EE_ACCOUNT_VAULT_BUSY') throw caught;
+      const remaining = deadline - performance.now();
+      const retryAfter = caught.retryAfterMs ?? 0;
+      if (remaining <= 0 || retryAfter > remaining) throw caught;
+      const delay = Math.max(retryAfter, backoff) + Math.floor(Math.random() * 100);
+      await wait(Math.min(delay, remaining));
+      backoff = Math.min(backoff * 2, 5_000);
     }
   }
-  throw new Error('The encryption vault is busy. Try again.');
 }
 
 async function releaseAccountVaultLease(leaseToken: string): Promise<void> {

@@ -1,0 +1,61 @@
+diff --git a/webrtc-sys/build.rs b/webrtc-sys/build.rs
+--- a/webrtc-sys/build.rs
++++ b/webrtc-sys/build.rs
+@@ -152,6 +152,14 @@ fn main() {
+     );
+ 
+     for (key, value) in webrtc_sys_build::webrtc_defines() {
++        // webrtc.ninja defines _HAS_EXCEPTIONS=0 on Windows, while webrtc-sys
++        // compiles with /EHsc and links against cxx (built with _HAS_EXCEPTIONS=1).
++        // Keeping _HAS_EXCEPTIONS=0 causes an ODR mismatch on std::exception
++        // (stdext::exception vs std::exception) and std::runtime_error (16 vs 24
++        // bytes), corrupting stack locals and aborting in std::terminate() on throw.
++        if target_os == "windows" && key == "_HAS_EXCEPTIONS" {
++            continue;
++        }
+         let value = value.as_deref();
+         builder.define(key.as_str(), value);
+     }
+diff --git a/webrtc-sys/include/livekit/rtc_error.h b/webrtc-sys/include/livekit/rtc_error.h
+--- a/webrtc-sys/include/livekit/rtc_error.h
++++ b/webrtc-sys/include/livekit/rtc_error.h
+@@ -20,6 +20,12 @@
+ #include "rust/cxx.h"
+ #include "webrtc-sys/src/rtc_error.rs.h"
+ 
++#if defined(_MSC_VER)
++static_assert(
++    _HAS_EXCEPTIONS == 1,
++    "webrtc-sys must be compiled with _HAS_EXCEPTIONS=1 to match cxx");
++#endif
++
+ namespace livekit_ffi {
+ 
+ RtcError to_error(const webrtc::RTCError& error);
+diff --git a/webrtc-sys/src/rtp_transceiver.cpp b/webrtc-sys/src/rtp_transceiver.cpp
+--- a/webrtc-sys/src/rtp_transceiver.cpp
++++ b/webrtc-sys/src/rtp_transceiver.cpp
+@@ -88,13 +88,19 @@ void RtpTransceiver::set_direction(RtpTransceiverDirection direction) const {
+ }
+ 
+ RtpTransceiverDirection RtpTransceiver::current_direction() const {
+-  return static_cast<RtpTransceiverDirection>(
+-      transceiver_->current_direction().value());
++  auto dir = transceiver_->current_direction();
++  if (!dir.has_value()) {
++    throw std::runtime_error("transceiver has no current direction");
++  }
++  return static_cast<RtpTransceiverDirection>(*dir);
+ }
+ 
+ RtpTransceiverDirection RtpTransceiver::fired_direction() const {
+-  return static_cast<RtpTransceiverDirection>(
+-      transceiver_->fired_direction().value());
++  auto dir = transceiver_->fired_direction();
++  if (!dir.has_value()) {
++    throw std::runtime_error("transceiver has no fired direction");
++  }
++  return static_cast<RtpTransceiverDirection>(*dir);
+ }
+ 
+ void RtpTransceiver::stop_standard() const {

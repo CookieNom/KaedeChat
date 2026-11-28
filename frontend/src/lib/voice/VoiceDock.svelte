@@ -20,6 +20,7 @@
   import { chatEntities as entities } from '$lib/stores/entities.svelte';
   import { authenticatedGateway } from '$lib/gateway/runtime.svelte';
   import ScreenShareDialog from './ScreenShareDialog.svelte';
+  import SharedScreens from './SharedScreens.svelte';
   import type { MediaQualityPreferences } from './quality';
   import {
     loadSoundboardMedia,
@@ -36,6 +37,7 @@
     VoiceConnectionFence,
     VoiceSession,
     expectedVoicePolicy,
+    type VoiceTile,
     type VoiceToken
   } from './session';
 
@@ -108,7 +110,7 @@
   async function openVideoWindow(mode: 'pip' | 'popout' | 'close') {
     try {
       await nativeInvoke('native_voice_video_window', { mode });
-      voice.clearNativeVideoView();
+      if (mode !== 'close') voice.clearNativeVideoView();
       videoDetached = mode !== 'close';
     } catch (cause) {
       error = userErrorMessage(cause, 'Could not open the video window.');
@@ -119,7 +121,7 @@
     const timer = setInterval(() => {
       void nativeInvoke<boolean>('native_voice_video_detached')
         .then((value) => {
-          if (videoDetached !== value) voice.clearNativeVideoView();
+          if (!videoDetached && value) voice.clearNativeVideoView();
           videoDetached = value;
         })
         .catch(() => {});
@@ -272,6 +274,7 @@
       camera: voice.camera,
       cameraAvailable: voice.cameraAvailable,
       screen: voice.screen,
+      screenPending: voice.screenPending,
       canSpeak: voice.canSpeak,
       canStream: voice.canStream,
       pushToTalkRequired: voice.pushToTalkRequired,
@@ -279,6 +282,40 @@
       prioritySpeakers: voice.prioritySpeakers(),
       tiles: voice.tiles()
     };
+  });
+  const shareStatus = $derived(
+    !view.connected
+      ? ''
+      : view.screenPending === 'starting'
+        ? $t('voice_screen_share_starting')
+        : view.screenPending === 'stopping'
+          ? $t('voice_screen_share_stopping')
+          : view.screen
+            ? $t('voice_screen_share_active')
+            : ''
+  );
+  let panel = $state<HTMLElement>();
+  const screens = $derived(view.tiles.filter((tile) => tile.source === 'screen_share'));
+  const cameras = $derived(view.tiles.filter((tile) => tile.source !== 'screen_share'));
+  const presenting = $derived(
+    view.connected && !isStageChannel && !videoDetached && !takeoverPrompt && screens.length > 0
+  );
+  let controlsVisible = $state(false);
+  let controlsTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function hideControls() {
+    clearTimeout(controlsTimer);
+    controlsVisible = false;
+  }
+  function revealControls() {
+    if (!presenting) return;
+    clearTimeout(controlsTimer);
+    controlsVisible = true;
+    controlsTimer = setTimeout(hideControls, 5000);
+  }
+  $effect(() => {
+    if (presenting && panel?.matches(':hover')) revealControls();
+    return hideControls;
   });
   $effect(() => {
     const connected = view.connected;
@@ -1172,23 +1209,63 @@
   {/if}
 {/snippet}
 
+{#snippet cameraTile(tile: VoiceTile)}
+  <article class:priority-speaker={view.prioritySpeakers.has(tile.identity)} class="video-tile">
+    {#if view.prioritySpeakers.has(tile.identity)}
+      <span
+        class="priority-speaker-cue"
+        title={$t('ui_priority_speaker_415c3cdd')}
+        aria-label={$t('ui_priority_speaker_415c3cdd')}
+      >
+        <Icon name="megaphone" size={17} />
+      </span>
+    {/if}
+    <div class="video-host" use:attachVideo={tile}></div>
+    {#if !tile.local}
+      <ListeningVolumeMenu
+        name={tile.name}
+        voice={view.listeningVolume(tile.identity)}
+        stream={view.listeningVolume(tile.identity, true)}
+        onChange={(stream, value) => voice.setListeningVolume(tile.identity, stream, value)}
+      />
+    {/if}
+    <span class="video-tile-name">{tile.name}{tile.local ? $t('ui_you_9d84cd48') : ''}</span>
+  </article>
+{/snippet}
+
 <section
   class="voice-panel"
+  bind:this={panel}
+  class:presenting
+  class:idle={presenting && !controlsVisible && !soundboardOpen}
+  onpointerenter={revealControls}
+  onpointermove={revealControls}
+  onpointerdown={revealControls}
+  onpointerleave={(event) => {
+    if (event.pointerType !== 'touch') hideControls();
+  }}
   class:dm-takeover={Boolean(callRef && takeoverPrompt)}
   aria-label={$t('ui_voice_channel_52909660')}
 >
-  <header class="voice-heading">
+  <header class="voice-heading" class:sharing={Boolean(shareStatus)}>
     <div class="voice-status">
-      <span class:connected={view.connected} class="status-dot" aria-hidden="true"></span>
+      {#if shareStatus}
+        <span class="share-icon" aria-hidden="true"><Icon name="screen" size={23} /></span>
+      {:else}
+        <span class:connected={view.connected} class="status-dot" aria-hidden="true"></span>
+      {/if}
       <div>
-        <strong>
-          {isStageChannel
-            ? (stageInstance?.topic ?? $t('ui_stage_channel_7dda295e'))
-            : view.connected
-              ? $t('ui_voice_connected_a81da256')
-              : $t('ui_voice_channel_52909660')}
+        <strong aria-live="polite">
+          {shareStatus ||
+            (isStageChannel
+              ? (stageInstance?.topic ?? $t('ui_stage_channel_7dda295e'))
+              : view.connected
+                ? $t('ui_voice_connected_a81da256')
+                : $t('ui_voice_channel_52909660'))}
         </strong>
         <span>
+          {#if shareStatus && stageInstance?.topic}{stageInstance.topic} ·
+          {/if}
           {isStageChannel && !stageLoaded
             ? $t('ui_loading_stage_c5500254')
             : isStageChannel && !stageInstance
@@ -1202,9 +1279,31 @@
       </div>
     </div>
     <div class="voice-heading-actions">
+      {#if view.connected && view.screen}
+        <button
+          class="stop-sharing"
+          disabled={Boolean(view.screenPending)}
+          onclick={() => safely(() => voice.stopScreenShare())}
+          >{$t('ui_stop_sharing_b2c78147')}</button
+        >
+      {/if}
       {#if isNativeDesktop() && view.connected && (videoDetached || view.tiles.some((tile) => !tile.local && tile.source === 'screen_share'))}
-        <button class="secondary" onclick={() => openVideoWindow('pip')}>Picture in picture</button>
-        <button class="secondary" onclick={() => openVideoWindow('popout')}>Pop out video</button>
+        <button
+          class="secondary window-action"
+          title={$t('voice_screen_pip')}
+          aria-label={$t('voice_screen_pip')}
+          onclick={() => openVideoWindow('pip')}
+        >
+          {#if presenting}<Icon name="pip" size={19} />{:else}{$t('voice_screen_pip')}{/if}
+        </button>
+        <button
+          class="secondary window-action"
+          title={$t('voice_screen_popout')}
+          aria-label={$t('voice_screen_popout')}
+          onclick={() => openVideoWindow('popout')}
+        >
+          {#if presenting}<Icon name="popout" size={18} />{:else}{$t('voice_screen_popout')}{/if}
+        </button>
         {#if videoDetached}
           <button class="secondary" onclick={() => openVideoWindow('close')}
             >Return video to channel</button
@@ -1297,11 +1396,18 @@
         </div>
       {:else if videoDetached}
         <p>Video is open in its own window.</p>
-      {:else if view.tiles.length > 0}
-        <div
-          class="video-grid"
-          class:has-screen={view.tiles.some((tile) => tile.source === 'screen_share')}
-        >
+      {:else if presenting && panel}
+        <SharedScreens
+          {panel}
+          {screens}
+          {cameras}
+          {cameraTile}
+          listeningVolume={view.listeningVolume}
+          setVolume={(identity, stream, value) => voice.setListeningVolume(identity, stream, value)}
+          onError={(message) => (error = message)}
+        />
+      {:else if cameras.length > 0}
+        <div class="video-grid">
           {#if activePriorityCards.length}
             <div class="priority-speaker-roster" role="status">
               <Icon name="megaphone" size={17} />
@@ -1315,36 +1421,8 @@
               </span>
             </div>
           {/if}
-          {#each view.tiles as tile (tile.key)}
-            <article
-              class:screen-tile={tile.source === 'screen_share'}
-              class:priority-speaker={view.prioritySpeakers.has(tile.identity)}
-              class="video-tile"
-            >
-              {#if view.prioritySpeakers.has(tile.identity)}
-                <span
-                  class="priority-speaker-cue"
-                  title={$t('ui_priority_speaker_415c3cdd')}
-                  aria-label={$t('ui_priority_speaker_415c3cdd')}
-                >
-                  <Icon name="megaphone" size={17} />
-                </span>
-              {/if}
-              <div class="video-host" use:attachVideo={tile}></div>
-              {#if !tile.local}
-                <ListeningVolumeMenu
-                  name={tile.name}
-                  voice={view.listeningVolume(tile.identity)}
-                  stream={view.listeningVolume(tile.identity, true)}
-                  hasStream={tile.source === 'screen_share'}
-                  onChange={(stream, value) =>
-                    voice.setListeningVolume(tile.identity, stream, value)}
-                />
-              {/if}
-              <span class="video-tile-name"
-                >{tile.name}{tile.local ? $t('ui_you_9d84cd48') : ''}</span
-              >
-            </article>
+          {#each cameras as tile (tile.key)}
+            {@render cameraTile(tile)}
           {/each}
         </div>
       {:else}
@@ -1483,16 +1561,20 @@
       <button
         class:active={view.screen}
         class="control-button"
-        disabled={!view.canStream}
+        disabled={Boolean(view.screenPending) || (!view.screen && !view.canStream)}
         aria-pressed={view.screen}
-        aria-label={view.screen
-          ? $t('ui_stop_sharing_screen_f350f649')
-          : $t('ui_share_screen_5a271ba7')}
-        title={!view.canStream
-          ? $t('ui_you_do_not_have_permission_to_share_your_scre_d1e5b2c9')
+        aria-label={view.screenPending
+          ? shareStatus
           : view.screen
-            ? $t('ui_stop_sharing_b2c78147')
+            ? $t('ui_stop_sharing_screen_f350f649')
             : $t('ui_share_screen_5a271ba7')}
+        title={view.screenPending
+          ? shareStatus
+          : !view.canStream && !view.screen
+            ? $t('ui_you_do_not_have_permission_to_share_your_scre_d1e5b2c9')
+            : view.screen
+              ? $t('ui_stop_sharing_b2c78147')
+              : $t('ui_share_screen_5a271ba7')}
         onclick={() => {
           if (view.screen) void safely(() => voice.stopScreenShare());
           else screenShareOpen = true;
@@ -1603,9 +1685,8 @@
       {/if}
     </footer>
   {/if}
+  <ScreenShareDialog bind:open={screenShareOpen} onShare={startScreenShare} />
 </section>
-
-<ScreenShareDialog bind:open={screenShareOpen} onShare={startScreenShare} />
 
 <style>
   .rtc-region-choice {
@@ -1716,6 +1797,46 @@
     min-width: 0;
     align-items: center;
     gap: 0.7rem;
+  }
+
+  .voice-heading.sharing {
+    border-bottom-color: var(--pine);
+    background: var(--pine-soft);
+    row-gap: 0.5rem;
+  }
+
+  .sharing .share-icon {
+    display: grid;
+    width: 2.4rem;
+    height: 2.4rem;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 9px;
+    color: var(--on-pine);
+    background: var(--pine);
+  }
+
+  .sharing .voice-status strong {
+    color: var(--ink);
+    font-size: 1rem;
+    white-space: normal;
+  }
+
+  .stop-sharing {
+    min-height: 2.5rem;
+    border: 1px solid var(--pine);
+    border-radius: 9px;
+    padding: 0.45rem 0.8rem;
+    color: var(--on-pine);
+    background: var(--pine);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .stop-sharing:hover:not(:disabled) {
+    filter: brightness(1.08);
   }
 
   .voice-heading-actions {
@@ -1853,10 +1974,6 @@
     gap: 0.8rem;
   }
 
-  .video-grid.has-screen {
-    grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
-  }
-
   .priority-speaker-roster {
     display: flex;
     grid-column: 1 / -1;
@@ -1881,11 +1998,6 @@
     box-shadow: 0 12px 30px rgb(0 0 0 / 14%);
   }
 
-  .video-tile.screen-tile {
-    grid-row: span 2;
-    min-height: min(420px, 48vh);
-  }
-
   .video-tile.priority-speaker {
     border-color: var(--maple);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--maple) 55%, transparent);
@@ -1908,10 +2020,6 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-  }
-
-  .screen-tile .video-host :global(video) {
-    object-fit: contain;
   }
 
   .video-tile-name {
@@ -2326,16 +2434,12 @@
       max-width: 44vw;
     }
 
+    .sharing .voice-status > div > span {
+      max-width: none;
+    }
+
     .voice-stage {
       padding: 0.85rem;
-    }
-
-    .video-grid.has-screen {
-      grid-template-columns: 1fr;
-    }
-
-    .video-tile.screen-tile {
-      min-height: 260px;
     }
 
     .participant-grid {
@@ -2344,6 +2448,109 @@
 
     .voice-dock {
       margin-bottom: 0.75rem;
+    }
+  }
+
+  .voice-panel.presenting {
+    position: relative;
+    isolation: isolate;
+    container-type: inline-size;
+    grid-template-rows: minmax(0, 1fr) auto;
+    background: #08090b;
+  }
+  .voice-panel.presenting:popover-open,
+  .voice-panel.presenting:fullscreen {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+  }
+  .presenting .voice-stage {
+    display: block;
+    padding: 0;
+    overflow: hidden;
+    background: #08090b;
+  }
+  .presenting .voice-stage > .voice-error,
+  .presenting .voice-stage > .voice-permission-notice {
+    position: absolute;
+    z-index: 4;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .presenting .voice-heading {
+    position: absolute;
+    z-index: 2;
+    inset: 0 0 auto;
+    gap: 0.5rem;
+    border: 0;
+    padding: 0.6rem 0.85rem 1.2rem;
+    color: white;
+    background: linear-gradient(to bottom, rgb(0 0 0 / 85%), transparent);
+    pointer-events: none;
+  }
+  .presenting .voice-status strong {
+    color: white;
+  }
+  .presenting .voice-status > div > span {
+    color: #dedee2;
+  }
+  .presenting .voice-heading-actions {
+    pointer-events: auto;
+  }
+  .presenting .window-action {
+    display: grid;
+    place-items: center;
+    width: 2.5rem;
+    min-height: 2.5rem;
+    padding: 0;
+  }
+  .presenting .voice-dock {
+    position: absolute;
+    z-index: 2;
+    bottom: 0;
+    margin: 0 0 0.55rem;
+  }
+  .presenting.idle:not(:has(:focus-visible, :global(.audio-panel:popover-open)))
+    :is(
+      .voice-heading,
+      .voice-dock,
+      :global(.share-overlay),
+      :global(.camera-strip .video-tile-name),
+      :global(.camera-strip .audio-menu)
+    ) {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .presenting.idle:not(:has(:focus-visible, :global(.audio-panel:popover-open)))
+    :is(.voice-heading-actions, :global(.screen-tools)) {
+    pointer-events: none;
+  }
+  @container (max-width: 42rem) {
+    .presenting .voice-heading {
+      padding: 0.4rem 0.5rem 0.7rem;
+    }
+    .presenting .voice-status {
+      gap: 0.4rem;
+    }
+    .presenting .voice-status > div > span {
+      display: none;
+    }
+    .presenting .voice-heading-actions {
+      gap: 0.25rem;
+    }
+    .presenting .sharing .share-icon {
+      width: 1.85rem;
+      height: 1.85rem;
+    }
+    .presenting .voice-heading .stop-sharing {
+      display: none;
     }
   }
 

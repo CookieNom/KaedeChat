@@ -1,0 +1,59 @@
+diff --git a/webrtc-sys/include/livekit/peer_connection.h b/webrtc-sys/include/livekit/peer_connection.h
+--- a/webrtc-sys/include/livekit/peer_connection.h
++++ b/webrtc-sys/include/livekit/peer_connection.h
+@@ -93,7 +93,7 @@
+       std::shared_ptr<MediaStreamTrack> track,
+       const rust::Vec<rust::String>& stream_ids) const;
+ 
+-  void remove_track(std::shared_ptr<RtpSender> sender) const;
++  RtcError remove_track(std::shared_ptr<RtpSender> sender) const;
+ 
+   void get_stats(
+       rust::Box<PeerContext> ctx,
+diff --git a/webrtc-sys/src/peer_connection.cpp b/webrtc-sys/src/peer_connection.cpp
+--- a/webrtc-sys/src/peer_connection.cpp
++++ b/webrtc-sys/src/peer_connection.cpp
+@@ -205,10 +205,8 @@
+                                      peer_connection_);
+ }
+ 
+-void PeerConnection::remove_track(std::shared_ptr<RtpSender> sender) const {
+-  auto error = peer_connection_->RemoveTrackOrError(sender->rtc_sender());
+-  if (!error.ok())
+-    throw std::runtime_error(serialize_error(to_error(error)));
++RtcError PeerConnection::remove_track(std::shared_ptr<RtpSender> sender) const {
++  return to_error(peer_connection_->RemoveTrackOrError(sender->rtc_sender()));
+ }
+ 
+ void PeerConnection::get_stats(
+diff --git a/webrtc-sys/src/peer_connection.rs b/webrtc-sys/src/peer_connection.rs
+--- a/webrtc-sys/src/peer_connection.rs
++++ b/webrtc-sys/src/peer_connection.rs
+@@ -165,7 +165,7 @@
+             track: SharedPtr<MediaStreamTrack>,
+             stream_ids: &Vec<String>,
+         ) -> Result<SharedPtr<RtpSender>>;
+-        fn remove_track(self: &PeerConnection, sender: SharedPtr<RtpSender>) -> Result<()>;
++        fn remove_track(self: &PeerConnection, sender: SharedPtr<RtpSender>) -> RtcError;
+         fn get_stats(
+             self: &PeerConnection,
+             ctx: Box<PeerContext>,
+diff --git a/libwebrtc/src/native/peer_connection.rs b/libwebrtc/src/native/peer_connection.rs
+--- a/libwebrtc/src/native/peer_connection.rs
++++ b/libwebrtc/src/native/peer_connection.rs
+@@ -403,9 +403,12 @@
+     }
+ 
+     pub fn remove_track(&self, sender: RtpSender) -> Result<(), RtcError> {
+-        self.sys_handle
+-            .remove_track(sender.handle.sys_handle)
+-            .map_err(|e| unsafe { sys_err::ffi::RtcError::from(e.what()).into() })
++        let error = self.sys_handle.remove_track(sender.handle.sys_handle);
++        if error.ok() {
++            Ok(())
++        } else {
++            Err(error.into())
++        }
+     }
+ 
+     pub async fn get_stats(&self) -> Result<Vec<RtcStats>, RtcError> {

@@ -38,6 +38,12 @@
     | 'settings'
     | 'shield'
     | 'screen'
+    | 'focus'
+    | 'grid'
+    | 'fullscreen'
+    | 'exit-fullscreen'
+    | 'pip'
+    | 'popout'
     | 'sparkles'
     | 'trash'
     | 'threads'
@@ -188,6 +194,21 @@
   {:else if name === 'screen'}
     <rect x="3" y="4" width="18" height="14" rx="2" />
     <path d="M8 21h8M12 18v3M12 14V8M9 11l3-3 3 3" />
+  {:else if name === 'focus'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M16 4v16" />
+  {:else if name === 'grid'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M12 4v16" />
+  {:else if name === 'fullscreen'}
+    <path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" />
+  {:else if name === 'exit-fullscreen'}
+    <path d="M3 8h5V3m8 0v5h5M8 21v-5H3m18 0h-5v5" />
+  {:else if name === 'pip'}
+    <rect x="2" y="4" width="20" height="16" rx="2" />
+    <rect x="12" y="11" width="7" height="6" rx="1" />
+  {:else if name === 'popout'}
+    <path d="M13 4h7v7m0-7-9 9M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" />
   {:else if name === 'sparkles'}
     <path
       d="m12 3 1.4 4.1L17.5 8.5l-4.1 1.4L12 14l-1.4-4.1-4.1-1.4 4.1-1.4ZM19 15l.7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7Z"

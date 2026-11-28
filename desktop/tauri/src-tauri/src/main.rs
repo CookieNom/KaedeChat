@@ -144,7 +144,7 @@ struct NativeState {
     voice: Mutex<Option<VoiceHandle>>,
     input_test: Mutex<Option<InputTest>>,
     voice_target: RwLock<Option<InstalledVoiceTarget>>,
-    voice_video: Mutex<Option<mpsc::Receiver<kaede_voice::RemoteVideoFrame>>>,
+    voice_video: Mutex<Option<(kaede_voice::VoiceVideoFrames, bool)>>,
     voice_install: VoiceInstallFence,
     voice_restart: mpsc::UnboundedSender<VoiceRestartRequest>,
     voice_ui: RwLock<VoiceUiState>,
@@ -3334,7 +3334,7 @@ async fn join_native_voice_reserved(
         .commands
         .send(VoiceCommand::SetDeafened(voice_ui.deafened));
     *state.push_to_talk_sender.lock() = Some(handle.commands.clone());
-    *state.voice_video.lock().await = handle.video_frames.take();
+    *state.voice_video.lock().await = handle.video_frames.take().map(|frames| (frames, false));
     let previous = installed_voice.replace(handle);
     *state.voice_target.write().await = Some(InstalledVoiceTarget { generation, target });
     drop(installed_voice);
@@ -3408,6 +3408,7 @@ async fn native_voice_control(
 ) -> Result<(), NativeError> {
     let mut voice = state.voice.lock().await;
     let preferences = state.preferences.read().await.clone();
+    let mut screen_completion = None;
     let command = match control {
         VoiceControl::Mute => VoiceCommand::SetMuted(true),
         VoiceControl::Unmute => VoiceCommand::SetMuted(false),
@@ -3425,22 +3426,22 @@ async fn native_voice_control(
             enabled: false,
             device_id: None,
         },
-        VoiceControl::ScreenOn => VoiceCommand::SetScreenShare {
-            enabled: true,
-            source_id: preferences
-                .screen_source
-                .as_ref()
-                .map(|device| device.id.clone()),
-            settings: ScreenShareSettings {
-                audio_process,
-                ..screen_share_settings(&preferences)
-            },
-        },
-        VoiceControl::ScreenOff => VoiceCommand::SetScreenShare {
-            enabled: false,
-            source_id: None,
-            settings: screen_share_settings(&preferences),
-        },
+        VoiceControl::ScreenOn | VoiceControl::ScreenOff => {
+            let (completed, receiver) = oneshot::channel();
+            screen_completion = Some(receiver);
+            VoiceCommand::SetScreenShare {
+                enabled: matches!(control, VoiceControl::ScreenOn),
+                source_id: preferences
+                    .screen_source
+                    .as_ref()
+                    .map(|device| device.id.clone()),
+                settings: ScreenShareSettings {
+                    audio_process,
+                    ..screen_share_settings(&preferences)
+                },
+                completed,
+            }
+        }
     };
     if let Some(handle) = voice.as_mut() {
         handle.commands.send(command).map_err(|_| {
@@ -3457,6 +3458,19 @@ async fn native_voice_control(
             "VOICE_NOT_CONNECTED",
             "Join a voice channel before using voice controls.",
         ));
+    }
+    if let Some(completed) = screen_completion {
+        // A system picker can stay open while the user mutes or leaves the call.
+        drop(voice);
+        return completed
+            .await
+            .map_err(|_| {
+                NativeError::local(
+                    "SCREEN_SHARE_INTERRUPTED",
+                    "Screen sharing was interrupted.",
+                )
+            })?
+            .map_err(|message| NativeError::local("SCREEN_SHARE_FAILED", message));
     }
     let mut ui = state.voice_ui.write().await;
     match control {
@@ -3701,15 +3715,20 @@ async fn native_voice_next_video(
     state: State<'_, NativeState>,
 ) -> Result<tauri::ipc::Response, NativeError> {
     // Exactly one presentation drains the native frame queue.
-    if (window.label() == "voice-video") != app.get_webview_window("voice-video").is_some() {
+    let detached = window.label() == "voice-video";
+    if detached != app.get_webview_window("voice-video").is_some() {
         tokio::time::sleep(Duration::from_millis(250)).await;
         return Ok(tauri::ipc::Response::new(Vec::<u8>::new()));
     }
     let mut receiver = state.voice_video.lock().await;
-    let Some(receiver) = receiver.as_mut() else {
+    let Some((receiver, was_detached)) = receiver.as_mut() else {
         return Ok(tauri::ipc::Response::new(Vec::<u8>::new()));
     };
-    let Some(frame) = tokio::time::timeout(Duration::from_millis(250), receiver.recv())
+    if *was_detached && !detached {
+        receiver.replay_preview();
+    }
+    *was_detached = detached;
+    let Some(frame) = tokio::time::timeout(Duration::from_millis(250), receiver.recv(!detached))
         .await
         .ok()
         .flatten()
@@ -3729,7 +3748,7 @@ async fn native_voice_next_video(
     packet.extend_from_slice(&frame.height.to_le_bytes());
     packet.extend_from_slice(&participant_length.to_le_bytes());
     packet.push(u8::from(frame.removed));
-    packet.push(u8::from(frame.screen_share));
+    packet.push(frame.source as u8);
     packet.extend_from_slice(participant);
     packet.extend_from_slice(&frame.rgba);
     Ok(tauri::ipc::Response::new(packet))
@@ -4367,11 +4386,14 @@ fn main() {
                     let state = video_app.state::<NativeState>();
                     let voice = state.voice.lock().await;
                     if let Some(voice) = voice.as_ref() {
-                        let presentation = video_app.get_webview_window("voice-video")
-                            .or_else(|| video_app.get_webview_window("main"));
+                        let detached = video_app.get_webview_window("voice-video");
+                        let attached = detached.is_none();
+                        let presentation = detached.or_else(|| video_app.get_webview_window("main"));
                         let visible = presentation.is_some_and(|window|
                             window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true));
-                        let _ = voice.commands.send(VoiceCommand::SetVideoVisible(visible));
+                        let _ = voice.commands.send(VoiceCommand::SetVideoVisible {
+                            remote: visible, local_preview: attached && visible,
+                        });
                     } else if let Some(window) = video_app.get_webview_window("voice-video") {
                         let _ = window.close();
                     }

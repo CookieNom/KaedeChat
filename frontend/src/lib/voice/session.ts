@@ -105,6 +105,101 @@ interface NativeVideoFrame {
   rgba: Uint8ClampedArray;
 }
 
+interface DecodedNativeVideo {
+  participant: string;
+  source: Track.Source;
+  local: boolean;
+  removed: boolean;
+  image: NativeVideoFrame;
+}
+
+function videoTileOrder(left: VoiceTile, right: VoiceTile): number {
+  return (
+    Number(right.source === Track.Source.ScreenShare) -
+      Number(left.source === Track.Source.ScreenShare) ||
+    left.identity.localeCompare(right.identity)
+  );
+}
+
+// Frames and publication status arrive independently in the dock and the detached window.
+export class NativeVideoPresentation {
+  #frames = new Map<string, DecodedNativeVideo>();
+  #peers: NativeVoiceStatus['remote_participants'];
+  #localScreen = false;
+
+  setStatus(status: NativeVoiceStatus, localShareStarting = false): void {
+    const connected = status.state === 'connected' || status.state === 'media_error';
+    this.#peers = connected ? status.remote_participants : {};
+    // A static desktop may produce its only frame before the start command resolves.
+    if (!connected || status.screen || !localShareStarting) {
+      this.setLocalScreen(connected && status.screen === true);
+    }
+    for (const [key, frame] of this.#frames) {
+      if (frame.local || !this.#peers) continue;
+      const peer = this.#peers[frame.participant];
+      if (!peer || (frame.source === Track.Source.ScreenShare && !peer.screen))
+        this.#frames.delete(key);
+    }
+  }
+
+  setLocalScreen(active: boolean): void {
+    this.#localScreen = active;
+    if (!active) this.#frames.delete('local-screen');
+  }
+
+  clearFrames(): void {
+    this.#frames.clear();
+  }
+
+  applyFrame(frame: DecodedNativeVideo): void {
+    const key = frame.local ? 'local-screen' : `${frame.participant}:${frame.source}`;
+    if (frame.removed) this.#frames.delete(key);
+    else this.#frames.set(key, frame);
+  }
+
+  tiles(): VoiceTile[] {
+    const tiles: VoiceTile[] = [];
+    if (this.#localScreen) {
+      const frame = this.#frames.get('local-screen');
+      tiles.push({
+        key: 'local-screen',
+        name: 'You',
+        identity: frame?.participant ?? 'native-local',
+        source: Track.Source.ScreenShare,
+        nativeFrame: frame?.image,
+        local: true
+      });
+    }
+    for (const [identity, peer] of Object.entries(this.#peers ?? {})) {
+      if (!peer.screen) continue;
+      const key = `${identity}:${Track.Source.ScreenShare}`;
+      tiles.push({
+        key,
+        name: peer.name || identity,
+        identity,
+        source: Track.Source.ScreenShare,
+        nativeFrame: this.#frames.get(key)?.image,
+        local: false
+      });
+    }
+    for (const [key, frame] of this.#frames) {
+      // Older bridges only report frames. Keep their remote camera and screen tiles.
+      const peer = this.#peers?.[frame.participant];
+      if (frame.local || (this.#peers && (!peer || frame.source === Track.Source.ScreenShare)))
+        continue;
+      tiles.push({
+        key,
+        name: peer?.name || frame.participant,
+        identity: frame.participant,
+        source: frame.source,
+        local: false,
+        nativeFrame: frame.image
+      });
+    }
+    return tiles.sort(videoTileOrder);
+  }
+}
+
 export interface VoiceParticipant {
   key: string;
   identity: string;
@@ -383,6 +478,7 @@ export class VoiceSession extends EventTarget {
   camera = false;
   cameraAvailable = false;
   screen = false;
+  screenPending: 'starting' | 'stopping' | null = null;
   canSpeak = false;
   canStream = false;
   pushToTalkRequired = false;
@@ -392,10 +488,7 @@ export class VoiceSession extends EventTarget {
   #adaptiveVideo: AdaptiveVideoController | null = null;
   #nativePoll: ReturnType<typeof setInterval> | null = null;
   #nativeVideoGeneration = 0;
-  #nativeVideo = new Map<
-    string,
-    { identity: string; source: Track.Source; image: NativeVideoFrame }
-  >();
+  #nativeVideo = new NativeVideoPresentation();
   #nativeMuted = false;
   #nativeDeafened = false;
   #nativeSpeakingUntil = 0;
@@ -454,6 +547,10 @@ export class VoiceSession extends EventTarget {
       ...(e2ee ? { e2ee } : {})
     });
     const changed = () => this.#changed();
+    room.on(RoomEvent.TrackPublished, changed);
+    room.on(RoomEvent.TrackUnpublished, changed);
+    room.on(RoomEvent.TrackMuted, changed);
+    room.on(RoomEvent.TrackUnmuted, changed);
     room.on(RoomEvent.TrackSubscribed, changed);
     room.on(RoomEvent.TrackUnsubscribed, changed);
     room.on(RoomEvent.LocalTrackPublished, changed);
@@ -526,6 +623,7 @@ export class VoiceSession extends EventTarget {
     this.#pushToTalkDesired = false;
     await this.#pushToTalkQueue;
     const generation = ++this.#connectGeneration;
+    this.screenPending = null;
     const expected = expectedVoicePolicy(grant, channel);
     if (grant.e2ee && encryptionKey?.byteLength !== 32) {
       throw new Error('This encrypted call has no device media key.');
@@ -684,6 +782,8 @@ export class VoiceSession extends EventTarget {
   ): Promise<void> {
     if (!isNativeDesktop()) throw new Error('Native voice is unavailable.');
     if (this.connected || this.connecting) return;
+    const generation = ++this.#connectGeneration;
+    this.screenPending = null;
     this.connecting = true;
     this.pushToTalkRequired = false;
     this.error = '';
@@ -699,7 +799,7 @@ export class VoiceSession extends EventTarget {
         connectionId: grant.connection_id,
         grantHandle: grant.token
       });
-      await this.#startNativePolling();
+      if (generation !== this.#connectGeneration) return;
       this.encrypted = expectedPolicy.e2ee;
       this.#voiceMediaPolicy = {
         bitrate: expectedPolicy.bitrate,
@@ -708,16 +808,19 @@ export class VoiceSession extends EventTarget {
         video_quality_mode: expectedPolicy.video_quality_mode
       };
       this.moveSessionId = grant.move_session_id ?? null;
-      this.#startNativeVideoPolling();
+      await this.#startNativePolling();
     } catch (caught) {
+      if (generation !== this.#connectGeneration) return;
       this.error = userErrorMessage(
         caught,
         'Could not join voice. Check your microphone permission and try again.'
       );
       throw caught;
     } finally {
-      this.connecting = false;
-      this.#changed();
+      if (generation === this.#connectGeneration) {
+        if (!this.#nativePoll) this.connecting = false;
+        this.#changed();
+      }
     }
   }
 
@@ -745,12 +848,16 @@ export class VoiceSession extends EventTarget {
       const status = await nativeInvoke<NativeVoiceStatus>('native_voice_status');
       if (this.#nativePoll !== timer) return;
       const wasReconnecting = this.connecting;
+      const wasConnected = this.connected;
       this.connected = status.state === 'connected' || status.state === 'media_error';
       this.connecting = status.state === 'connecting' || status.state === 'reconnecting';
       this.canSpeak = status.can_speak ?? false;
       this.canStream = status.can_stream ?? false;
       this.camera = status.camera ?? false;
       this.screen = status.screen ?? false;
+      this.#nativeVideo.setStatus(status, this.screenPending === 'starting');
+      if (this.connected && !wasConnected) this.#startNativeVideoPolling();
+      if (!this.connected && wasConnected) ++this.#nativeVideoGeneration;
       this.videoDegraded = status.video_degraded ?? false;
       for (const [identity, volumes] of Object.entries(status.listening_volumes ?? {})) {
         this.#listeningVolumes.set(JSON.stringify([identity, false]), volumes[0]);
@@ -824,6 +931,7 @@ export class VoiceSession extends EventTarget {
       while (generation === this.#nativeVideoGeneration && this.connected) {
         try {
           const response = await nativeInvoke<ArrayBuffer | Uint8Array>('native_voice_next_video');
+          if (generation !== this.#nativeVideoGeneration) return;
           const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
           if (bytes.byteLength === 0) {
             await new Promise((resolve) => setTimeout(resolve, 50));
@@ -831,14 +939,9 @@ export class VoiceSession extends EventTarget {
           }
           const frame = decodeNativeVideoFrame(bytes);
           if (!frame) continue;
-          const key = `${frame.participant}:${frame.source}`;
-          if (frame.removed) this.#nativeVideo.delete(key);
-          else
-            this.#nativeVideo.set(key, {
-              identity: frame.participant,
-              source: frame.source,
-              image: frame.image
-            });
+          if (frame.local && !this.screen && this.screenPending !== 'starting' && !frame.removed)
+            continue;
+          this.#nativeVideo.applyFrame(frame);
           this.#changed();
         } catch {
           if (generation === this.#nativeVideoGeneration) {
@@ -1127,26 +1230,51 @@ export class VoiceSession extends EventTarget {
     preferences: MediaQualityPreferences,
     sourceId: string | null = null
   ): Promise<void> {
-    if (!this.connected || !this.canStream) return;
-    if (this.screen) return;
+    if (!this.connected || !this.canStream || this.screen || this.screenPending) return;
+    const generation = this.#connectGeneration;
+    this.screenPending = 'starting';
+    this.#changed();
     const previous = this.#mediaQuality;
-    this.#mediaQuality = { ...preferences };
-    saveMediaQuality(this.#mediaQuality);
-    if (isNativeDesktop()) {
-      await nativeInvoke('native_media_quality_set', {
-        screenProfile: preferences.screenProfile,
-        audioQuality: preferences.audioQuality,
-        shareSystemAudio: preferences.shareAudio,
-        sourceId
-      });
-      await nativeInvoke('native_voice_control', {
-        control: 'screen_on',
-        audioProcess: preferences.shareAudio ? (preferences.audioProcess ?? null) : null
-      });
-      this.screen = true;
-      this.#changed();
-      return;
+    try {
+      this.#mediaQuality = { ...preferences };
+      saveMediaQuality(this.#mediaQuality);
+      if (isNativeDesktop()) {
+        await nativeInvoke('native_media_quality_set', {
+          screenProfile: preferences.screenProfile,
+          audioQuality: preferences.audioQuality,
+          shareSystemAudio: preferences.shareAudio,
+          sourceId
+        });
+        if (generation !== this.#connectGeneration || !this.connected || !this.canStream) return;
+        await nativeInvoke('native_voice_control', {
+          control: 'screen_on',
+          audioProcess: preferences.shareAudio ? (preferences.audioProcess ?? null) : null
+        });
+      } else if (!(await this.#publishBrowserScreen(preferences, previous, sourceId))) return;
+      if (generation === this.#connectGeneration && this.connected) {
+        this.screen = true;
+        if (isNativeDesktop()) this.#nativeVideo.setLocalScreen(true);
+      }
+    } catch (error) {
+      if (generation === this.#connectGeneration) {
+        if (isNativeDesktop() && !this.screen) this.#nativeVideo.setLocalScreen(false);
+        throw new Error(userErrorMessage(error, 'Screen sharing could not start.'));
+      }
+    } finally {
+      if (generation === this.#connectGeneration) {
+        this.screenPending = null;
+        this.#changed();
+      }
     }
+  }
+
+  async #publishBrowserScreen(
+    preferences: MediaQualityPreferences,
+    previous: MediaQualityPreferences,
+    sourceId: string | null
+  ): Promise<boolean> {
+    const room = this.room;
+    const adaptive = this.#adaptiveVideo;
     if (previous.audioQuality !== preferences.audioQuality || previous.dtx !== preferences.dtx) {
       try {
         await this.#republishMicrophoneWithQuality();
@@ -1156,6 +1284,7 @@ export class VoiceSession extends EventTarget {
         throw caught;
       }
     }
+    if (this.room !== room || !this.connected || !this.canStream) return false;
     const preferredSurface =
       sourceId === 'browser:window'
         ? 'window'
@@ -1173,26 +1302,42 @@ export class VoiceSession extends EventTarget {
       name: managedTrackName(Track.Source.ScreenShare)
     };
     const publishInitial = (configured: TrackPublishOptions) =>
-      this.room.localParticipant.setScreenShareEnabled(true, capture, configured);
-    const publication = this.#adaptiveVideo
-      ? await this.#adaptiveVideo.publishInitial(Track.Source.ScreenShare, options, publishInitial)
+      room.localParticipant.setScreenShareEnabled(true, capture, configured);
+    const publication = adaptive
+      ? await adaptive.publishInitial(Track.Source.ScreenShare, options, publishInitial)
       : await publishInitial(options);
-    if (!publication) return;
-    if (publication) await this.#adaptiveVideo?.managePublished(publication, publish);
-    this.screen = true;
-    this.#changed();
+    if (!publication) return false;
+    if (room !== this.room || !this.connected || !this.canStream) {
+      await room.localParticipant.setScreenShareEnabled(false);
+      return false;
+    }
+    await adaptive?.managePublished(publication, publish);
+    return this.canStream && room.localParticipant.isScreenShareEnabled;
   }
 
   async stopScreenShare(): Promise<void> {
-    if (!this.connected || !this.screen) return;
-    if (isNativeDesktop()) {
-      await nativeInvoke('native_voice_control', { control: 'screen_off' });
-    } else {
-      await this.#adaptiveVideo?.stopSource(Track.Source.ScreenShare);
-      await this.room.localParticipant.setScreenShareEnabled(false);
-    }
-    this.screen = false;
+    if (!this.connected || !this.screen || this.screenPending) return;
+    const generation = this.#connectGeneration;
+    this.screenPending = 'stopping';
     this.#changed();
+    try {
+      if (isNativeDesktop()) {
+        await nativeInvoke('native_voice_control', { control: 'screen_off' });
+      } else {
+        const room = this.room;
+        await this.#adaptiveVideo?.stopSource(Track.Source.ScreenShare);
+        await room.localParticipant.setScreenShareEnabled(false);
+      }
+      if (generation === this.#connectGeneration) {
+        this.screen = false;
+        if (isNativeDesktop()) this.#nativeVideo.setLocalScreen(false);
+      }
+    } finally {
+      if (generation === this.#connectGeneration) {
+        this.screenPending = null;
+        this.#changed();
+      }
+    }
   }
 
   /**
@@ -1227,7 +1372,7 @@ export class VoiceSession extends EventTarget {
 
     try {
       if (revokeSpeak || requirePushToTalk) await this.#queuePushToTalkTransition();
-      if (revokeStream && this.screen) {
+      if (revokeStream && (this.screen || this.screenPending === 'starting')) {
         await this.#adaptiveVideo?.stopSource(Track.Source.ScreenShare);
         await this.room.localParticipant.setScreenShareEnabled(false);
         this.screen = false;
@@ -1294,6 +1439,8 @@ export class VoiceSession extends EventTarget {
 
   async disconnect(): Promise<void> {
     ++this.#microphoneGeneration;
+    const generation = ++this.#connectGeneration;
+    this.screenPending = null;
     const adaptiveVideo = this.#adaptiveVideo;
     this.#adaptiveVideo = null;
     this.videoDegraded = false;
@@ -1304,7 +1451,7 @@ export class VoiceSession extends EventTarget {
       if (this.#nativePoll) clearInterval(this.#nativePoll);
       this.#nativePoll = null;
       this.#nativeVideoGeneration += 1;
-      this.#nativeVideo.clear();
+      this.#nativeVideo = new NativeVideoPresentation();
       this.#nativeSpeakingUntil = 0;
       this.#nativeRemoteParticipants = [];
       this.#nativePrioritySpeakers.clear();
@@ -1326,7 +1473,6 @@ export class VoiceSession extends EventTarget {
       this.#changed();
       return;
     }
-    const generation = ++this.#connectGeneration;
     const activeRoom = this.room;
     const candidateRoom = this.#candidateRoom;
     const activeWorker = this.#e2eeWorker;
@@ -1361,32 +1507,31 @@ export class VoiceSession extends EventTarget {
   }
 
   clearNativeVideoView(): void {
-    this.#nativeVideo.clear();
+    this.#nativeVideo.clearFrames();
+    if (this.connected) this.#startNativeVideoPolling();
     this.#changed();
   }
 
   tiles(): VoiceTile[] {
     if (isNativeDesktop()) {
-      return [...this.#nativeVideo.entries()].map(([key, frame]) => ({
-        key: `native:${key}`,
-        identity: frame.identity,
-        name: frame.identity.split('@', 1)[0] || frame.identity,
-        source: frame.source,
-        nativeFrame: frame.image,
-        local: false
-      }));
+      return this.connected ? this.#nativeVideo.tiles() : [];
     }
-    const tiles: VoiceTile[] = [];
+    const tiles = new Map<string, VoiceTile>();
     const addParticipant = (participant: Participant, local: boolean) => {
       for (const publication of participant.trackPublications.values()) {
-        const track = publication.track;
-        if (!track || track.kind !== Track.Kind.Video) continue;
-        if (this.#adaptiveVideo && !this.#adaptiveVideo.isVisible(publication, local)) continue;
-        tiles.push({
-          key: `${participant.identity}:${publication.trackSid}`,
+        if (publication.kind !== Track.Kind.Video || publication.isMuted) continue;
+        const source = publication.source;
+        const track =
+          this.#adaptiveVideo && !this.#adaptiveVideo.isVisible(publication, local)
+            ? undefined
+            : publication.track;
+        const key = `${participant.identity}:${source === Track.Source.Unknown ? publication.trackSid : source}`;
+        if ((!track && source !== Track.Source.ScreenShare) || tiles.get(key)?.track) continue;
+        tiles.set(key, {
+          key,
           identity: participant.identity,
           name: participant.name || participant.identity,
-          source: publication.source,
+          source,
           track,
           local
         });
@@ -1396,11 +1541,7 @@ export class VoiceSession extends EventTarget {
     for (const participant of this.room.remoteParticipants.values()) {
       addParticipant(participant, false);
     }
-    return tiles.sort((left, right) => {
-      const leftScreen = left.source === Track.Source.ScreenShare ? 0 : 1;
-      const rightScreen = right.source === Track.Source.ScreenShare ? 0 : 1;
-      return leftScreen - rightScreen || left.identity.localeCompare(right.identity);
-    });
+    return [...tiles.values()].sort(videoTileOrder);
   }
 
   participants(): VoiceParticipant[] {
@@ -1526,47 +1667,58 @@ export function attachVideo(
   node: HTMLElement,
   tile: VoiceTile
 ): { update: (next: VoiceTile) => void; destroy: () => void } {
-  if (tile.nativeFrame) {
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d');
-    node.append(canvas);
-    const draw = (next: VoiceTile) => {
-      const frame = next.nativeFrame;
-      if (!frame || !context) return;
-      canvas.width = frame.width;
-      canvas.height = frame.height;
-      // Tauri may deserialize the frame onto a SharedArrayBuffer-backed view.
-      // ImageData deliberately accepts only an owned ArrayBuffer, so copy at
-      // this UI boundary instead of weakening the native frame type.
-      const pixels = new Uint8ClampedArray(frame.rgba.length);
-      pixels.set(frame.rgba);
-      context.putImageData(new ImageData(pixels, frame.width, frame.height), 0, 0);
-    };
-    draw(tile);
-    return { update: draw, destroy: () => canvas.remove() };
-  }
-  if (!tile.track) return { update: () => undefined, destroy: () => undefined };
-  const track = tile.track;
-  const media = track.attach();
-  media.autoplay = true;
-  if (media instanceof HTMLVideoElement) media.playsInline = true;
-  media.muted = tile.local;
-  node.append(media);
+  let canvas: HTMLCanvasElement | undefined;
+  let drawn: NativeVideoFrame | undefined;
+  let track: Track | undefined;
+  let media: HTMLMediaElement | undefined;
+  const update = (next: VoiceTile) => {
+    if (track !== next.track) {
+      if (media) {
+        track?.detach(media);
+        media.remove();
+        media = undefined;
+      }
+      track = next.track;
+      if (track) {
+        media = track.attach();
+        media.autoplay = true;
+        if (media instanceof HTMLVideoElement) media.playsInline = true;
+        media.muted = next.local;
+        node.append(media);
+      }
+    }
+    const frame = next.nativeFrame;
+    if (drawn === frame) return;
+    drawn = frame;
+    if (!frame) {
+      canvas?.remove();
+      canvas = undefined;
+      return;
+    }
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      node.append(canvas);
+    }
+    if (canvas.width !== frame.width) canvas.width = frame.width;
+    if (canvas.height !== frame.height) canvas.height = frame.height;
+    // ImageData requires owned ArrayBuffer storage, including for IPC-backed views.
+    const pixels = new Uint8ClampedArray(frame.rgba);
+    canvas.getContext('2d')?.putImageData(new ImageData(pixels, frame.width, frame.height), 0, 0);
+  };
+  update(tile);
   return {
+    update,
     destroy: () => {
-      track.detach(media);
-      media.remove();
-    },
-    update: () => undefined
+      if (media) {
+        track?.detach(media);
+        media.remove();
+      }
+      canvas?.remove();
+    }
   };
 }
 
-export function decodeNativeVideoFrame(
-  bytes: Uint8Array
-):
-  | { participant: string; source: Track.Source; removed: true; image: NativeVideoFrame }
-  | { participant: string; source: Track.Source; removed: false; image: NativeVideoFrame }
-  | null {
+export function decodeNativeVideoFrame(bytes: Uint8Array): DecodedNativeVideo | null {
   if (bytes.byteLength < 15) return null;
   const format = new TextDecoder().decode(bytes.subarray(0, 4));
   if (format !== 'KVD1' && format !== 'KVD2') return null;
@@ -1578,8 +1730,8 @@ export function decodeNativeVideoFrame(
   const identityLength = view.getUint16(12, true);
   const removed = view.getUint8(14) === 1;
   const sourceByte = format === 'KVD2' ? view.getUint8(15) : 0;
-  if (sourceByte > 1) return null;
-  const source = sourceByte === 1 ? Track.Source.ScreenShare : Track.Source.Camera;
+  if (sourceByte > 2) return null;
+  const source = sourceByte === 0 ? Track.Source.Camera : Track.Source.ScreenShare;
   const imageOffset = headerSize + identityLength;
   if (imageOffset > bytes.byteLength) return null;
   const participant = new TextDecoder().decode(bytes.subarray(headerSize, imageOffset));
@@ -1588,11 +1740,16 @@ export function decodeNativeVideoFrame(
   return {
     participant,
     source,
+    local: sourceByte === 2,
     removed,
     image: {
       width,
       height,
-      rgba: new Uint8ClampedArray(bytes.slice(imageOffset).buffer)
+      rgba: new Uint8ClampedArray(
+        bytes.buffer,
+        bytes.byteOffset + imageOffset,
+        bytes.byteLength - imageOffset
+      )
     }
   };
 }

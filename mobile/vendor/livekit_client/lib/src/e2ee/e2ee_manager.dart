@@ -87,7 +87,6 @@ class E2EEManager {
           }
         })
         ..on<TrackSubscribedEvent>((event) async {
-          final codec = event.publication.mimeType.split('/')[1];
           if (event.publication.encryptionType == EncryptionType.kNone) {
             // no need to setup frame cryptor
             return;
@@ -98,7 +97,11 @@ class E2EEManager {
             sid: event.publication.sid,
           );
           if (kIsWeb) {
-            await frameCryptor.updateCodec(codec.toLowerCase());
+            // The SFU can announce a track before it knows the negotiated codec.
+            final mime = event.publication.mimeType.split('/');
+            if (mime.length == 2 && mime.last.isNotEmpty) {
+              await frameCryptor.updateCodec(mime.last.toLowerCase());
+            }
           }
           frameCryptor.onFrameCryptorStateChanged = (trackId, state) {
             if (kDebugMode) {
@@ -187,12 +190,21 @@ class E2EEManager {
       );
       return frameCryptor;
     } catch (_) {
-      // A later negotiation must never send this track without its cryptor.
-      await sender.replaceTrack(null);
-      final cryptor = _frameCryptors.remove(key);
-      await cryptor?.dispose();
+      await discardUnpublishedSender(sender: sender, identity: identity, sid: sid);
       rethrow;
     }
+  }
+
+  @internal
+  Future<void> discardUnpublishedSender({
+    required RTCRtpSender sender,
+    required String identity,
+    required String sid,
+  }) async {
+    // Detach first so a later negotiation cannot send unprotected media.
+    await sender.replaceTrack(null);
+    final cryptor = _frameCryptors.remove((identity: identity, sid: sid, endpoint: sender.senderId));
+    await cryptor?.dispose();
   }
 
   Future<FrameCryptor> _addRtpReceiver({

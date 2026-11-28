@@ -211,12 +211,9 @@
       <article>
         <span class="download-icon">{@render deviceIcon(true)}</span>
         <h3>iOS</h3>
-        <p>
-          Use Kaede on your iPhone or iPad in the browser. You can add a shortcut to your Home
-          Screen from Safari’s Share menu. It opens the website and doesn’t work offline.
-        </p>
-        <a class="primary-button" href={resolve('login')}
-          >Open Kaede on iOS <Icon name="chevron-right" size={18} /></a
+        <p>Download Kaede Chat for your iPhone to keep up with your communities on the go.</p>
+        <a class="primary-button" href="https://apps.apple.com/us/app/kaede-chat/id6808771548"
+          >Download on the App Store <Icon name="chevron-right" size={18} /></a
         >
         <details>
           <summary>Looking for the iOS app file?</summary>

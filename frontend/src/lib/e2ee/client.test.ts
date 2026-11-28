@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { beforeAll, expect, it, vi } from 'vitest';
+import { ApiError } from '$lib/api/errors';
 import type { Channel, Message, UserSummary } from '$lib/chat/types';
 import { buildTimeline } from '$lib/chat/timeline';
 import {
@@ -171,6 +172,7 @@ async function senderClient(recoverActivation: boolean) {
   io.state.mockResolvedValue(confirmedDeviceState(state, '1', vault.digest, chainRoot));
   io.checkpoint.mockResolvedValue({ revision: '1', digest: vault.digest, chainRoot });
   let activationAttempts = 0;
+  let leaseBusyUntil = 0;
   io.api.mockImplementation(async (path: string, options?: RequestInit) => {
     if (path === '/safety/content-status') return { items: [] };
     if (path === '/e2ee/devices')
@@ -186,7 +188,12 @@ async function senderClient(recoverActivation: boolean) {
           }
         ]
       };
-    if (path === '/e2ee/vault/lease') return { lease_token: 'test-lease', vault };
+    if (path === '/e2ee/vault/lease') {
+      if (Date.now() < leaseBusyUntil) {
+        throw new ApiError('E2EE_ACCOUNT_VAULT_BUSY', 'Vault busy', 409, { retry_after_ms: 2_000 });
+      }
+      return { lease_token: 'test-lease', vault };
+    }
     if (path === '/e2ee/vault/lease/release') return;
     if (path.endsWith(`/operations/${operationId}`)) {
       return { operation_id: operationId, kind: 'activate', status: 'prepared' };
@@ -231,8 +238,66 @@ async function senderClient(recoverActivation: boolean) {
   }
   const client = await KaedeE2EEClient.initialize(user);
   expect(activationAttempts).toBe(recoverActivation ? 3 : 0);
-  return { client, controls, other, key, getVault: () => vault };
+  return {
+    client,
+    controls,
+    other,
+    key,
+    getVault: () => vault,
+    holdLease(milliseconds: number) {
+      leaseBusyUntil = Date.now() + milliseconds;
+    }
+  };
 }
+
+const directMessage = { ...channel, type: 1, guild_id: null, guild_domain: null } satisfies Channel;
+
+it('sends an encrypted DM when a previous vault lease expires', async () => {
+  const { client, other, getVault, holdLease } = await senderClient(false);
+  vi.useFakeTimers();
+  try {
+    holdLease(120_000);
+    io.api.mockClear();
+    const sending = client.encryptMessage(directMessage, 'Hello', { rich: {} });
+    await vi.advanceTimersByTimeAsync(1_999);
+    const earlyRequests = io.api.mock.calls.length;
+    const [envelope] = await Promise.all([sending, vi.runAllTimersAsync()]);
+    expect(earlyRequests).toBe(1);
+    const acquisitions = io.api.mock.calls.filter(([path]) => path === '/e2ee/vault/lease');
+    expect(acquisitions.length).toBeLessThanOrEqual(61);
+    expect(getVault().revision).toBe('2');
+    const received = other.process(
+      fromBase64url(channel.encryption_group_id),
+      fromBase64url(envelope.ciphertext)
+    );
+    try {
+      expect(JSON.parse(decodeUtf8(received.application!)).data.content).toBe('Hello');
+    } finally {
+      received.free();
+    }
+  } finally {
+    vi.useRealTimers();
+    await client.close();
+    other.free();
+  }
+});
+
+it('surfaces sustained vault contention without changing the encrypted DM state', async () => {
+  const { client, other, getVault, holdLease } = await senderClient(false);
+  vi.useFakeTimers();
+  try {
+    holdLease(Infinity);
+    const result = expect(client.encryptMessage(directMessage, 'Hello')).rejects.toMatchObject({
+      code: 'E2EE_ACCOUNT_VAULT_BUSY'
+    });
+    await Promise.all([result, vi.runAllTimersAsync()]);
+    expect(getVault().revision).toBe('1');
+  } finally {
+    vi.useRealTimers();
+    await client.close();
+    other.free();
+  }
+});
 
 it('exports the peer media key after room rotation and rejects an unexpected MLS epoch', async () => {
   const { client, other, controls } = await senderClient(false);

@@ -28,6 +28,8 @@ PATCHES = [
     ROOT / 'docs/av1-e2ee/native-interop.patch',
     ROOT / 'desktop/patches/livekit-frame-keys.patch',
     ROOT / 'desktop/patches/livekit-windows-voice-startup.patch',
+    ROOT / 'desktop/patches/livekit-remove-track-error.patch',
+    ROOT / 'desktop/patches/livekit-windows-exceptions.patch',
 ]
 WEBRTC_PATCH = ROOT / 'desktop/patches/webrtc-hevc.patch'
 BUILD_SCRIPTS = {'linux': 'build_linux.sh', 'mac': 'build_macos.sh', 'win': 'build_windows.cmd'}

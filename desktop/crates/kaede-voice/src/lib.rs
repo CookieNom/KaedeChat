@@ -52,7 +52,7 @@ use livekit::{
             DesktopFrame,
         },
         rtp_parameters::RtpEncodingParameters,
-        video_frame::{I420Buffer, VideoFormatType, VideoFrame, VideoRotation},
+        video_frame::{I420Buffer, VideoBuffer, VideoFormatType, VideoFrame, VideoRotation},
         video_source::{RtcVideoSource, VideoResolution, native::NativeVideoSource},
         video_stream::native::NativeVideoStream,
     },
@@ -66,7 +66,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time,
 };
@@ -255,17 +255,56 @@ pub enum VoiceStatus {
     Failed(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum VideoFrameSource {
+    RemoteCamera = 0,
+    RemoteScreen = 1,
+    LocalScreen = 2,
+}
+
+impl VideoFrameSource {
+    fn remote(screen_share: bool) -> Self {
+        if screen_share {
+            Self::RemoteScreen
+        } else {
+            Self::RemoteCamera
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
-pub struct RemoteVideoFrame {
+pub struct VoiceVideoFrame {
     pub participant: String,
-    pub screen_share: bool,
+    pub source: VideoFrameSource,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
     pub removed: bool,
 }
 
-#[derive(Clone, Debug)]
+pub struct VoiceVideoFrames {
+    remote: mpsc::Receiver<VoiceVideoFrame>,
+    preview: watch::Receiver<Option<VoiceVideoFrame>>,
+}
+
+impl VoiceVideoFrames {
+    pub async fn recv(&mut self, include_preview: bool) -> Option<VoiceVideoFrame> {
+        tokio::select! {
+            frame = self.remote.recv() => frame,
+            Ok(()) = self.preview.changed(), if include_preview => self.preview.borrow_and_update().clone(),
+        }
+    }
+
+    /// A reattached main window needs the latest frame even on a static desktop.
+    pub fn replay_preview(&mut self) {
+        if self.preview.borrow().is_some() {
+            self.preview.mark_changed();
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum VoiceCommand {
     SetVolume {
         identity: String,
@@ -273,7 +312,10 @@ pub enum VoiceCommand {
         volume: f32,
     },
     SetMuted(bool),
-    SetVideoVisible(bool),
+    SetVideoVisible {
+        remote: bool,
+        local_preview: bool,
+    },
     SetDeafened(bool),
     SetPushToTalk(bool),
     SetPriorityPushToTalk(bool),
@@ -285,6 +327,7 @@ pub enum VoiceCommand {
         enabled: bool,
         source_id: Option<String>,
         settings: ScreenShareSettings,
+        completed: oneshot::Sender<Result<(), String>>,
     },
     Leave,
 }
@@ -397,7 +440,7 @@ pub struct VoiceHandle {
     /// audio-device failure requires rebuilding that graph.
     pub grant_stale: watch::Receiver<bool>,
     pub priority_speakers: watch::Receiver<BTreeSet<String>>,
-    pub video_frames: Option<mpsc::Receiver<RemoteVideoFrame>>,
+    pub video_frames: Option<VoiceVideoFrames>,
     pub input_level: Option<Arc<CaptureGate>>,
     /// Opaque broker correlation for a federated guild voice session.
     /// Replacement grants must carry the same value as the active handle.
@@ -555,6 +598,7 @@ pub async fn join(
     // A modest buffer gives several simultaneous tracks a fair chance to publish
     // without retaining a large amount of decoded RGBA data.
     let (video_tx, video_rx) = mpsc::channel(16);
+    let (preview_tx, preview_rx) = watch::channel(None);
     let mut processor_chain = ProcessorChain::default();
     processor_chain.push(Box::new(SpeechProcessor::from_settings(&media.capture)));
     tracing::info!(
@@ -668,6 +712,7 @@ pub async fn join(
         priority_speaker_access,
         grant.video_quality_mode,
         video_tx,
+        preview_tx,
         priority_speakers_tx,
         grant_stale_tx,
         processor_chain,
@@ -680,7 +725,10 @@ pub async fn join(
         status: status_rx,
         grant_stale: grant_stale_rx,
         priority_speakers: priority_speakers_rx,
-        video_frames: Some(video_rx),
+        video_frames: Some(VoiceVideoFrames {
+            remote: video_rx,
+            preview: preview_rx,
+        }),
         input_level,
         move_session_id,
         status_control,
@@ -969,7 +1017,8 @@ async fn run_room(
     initially_deafened: bool,
     mut priority_speaker_access: LocalPrioritySpeakerAccess,
     video_quality_mode: u8,
-    video_frames: mpsc::Sender<RemoteVideoFrame>,
+    video_frames: mpsc::Sender<VoiceVideoFrame>,
+    preview_frames: watch::Sender<Option<VoiceVideoFrame>>,
     priority_speakers: watch::Sender<BTreeSet<String>>,
     grant_stale: watch::Sender<bool>,
     mut processor_chain: ProcessorChain,
@@ -995,6 +1044,7 @@ async fn run_room(
     video_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut subscriptions = BTreeSet::new();
     let mut video_visible = true;
+    let (preview_visible, _) = watch::channel(video_visible);
     let mut budget = VideoBudget::default();
     let mut upload = UploadPressure::default();
     let mut encode_headroom = EncodeHeadroom::default();
@@ -1390,9 +1440,14 @@ async fn run_room(
                     Some(VoiceCommand::SetVolume { identity, stream, volume }) => {
                         playback_mixer.set_volume(&identity, stream, volume);
                     }
-                    Some(VoiceCommand::SetVideoVisible(visible)) => {
-                        if video_visible == visible { continue; }
-                        video_visible = visible;
+                    Some(VoiceCommand::SetVideoVisible { remote, local_preview }) => {
+                        preview_visible.send_if_modified(|previous| {
+                            if *previous == local_preview { return false; }
+                            *previous = local_preview;
+                            true
+                        });
+                        if video_visible == remote { continue; }
+                        video_visible = remote;
                         reconcile_video_subscriptions(&room, &mut subscriptions, &receiver_health, video_visible, &video_peers);
                     }
                     Some(VoiceCommand::SetMuted(muted)) => {
@@ -1500,17 +1555,26 @@ async fn run_room(
                             }
                         }
                     }
-                    Some(VoiceCommand::SetScreenShare { enabled, source_id, settings }) => {
+                    Some(VoiceCommand::SetScreenShare { enabled, source_id, settings, completed }) => {
                         if enabled && !can_stream {
-                            send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(),
-                                "You do not have permission to share your screen in this channel.".to_owned());
+                            let message = "You do not have permission to share your screen in this channel.";
+                            let _ = completed.send(Err(message.to_owned()));
+                            send_media_error(&status, &room, can_speak, can_stream, screen_share.as_ref(), camera.as_ref(), message.to_owned());
                             continue;
                         }
-                        let result = if enabled && screen_share.is_none() && screen_start.is_none() {
+                        if enabled && screen_start.is_some() {
+                            let _ = completed.send(Err("Screen sharing is already starting.".to_owned()));
+                            continue;
+                        }
+                        let result = if enabled && screen_share.is_none() {
                             let room = &room;
                             let send_budget = send_budget.clone();
+                            let preview_frames = preview_frames.clone();
+                            let visible = preview_visible.subscribe();
                             screen_start = Some(Box::pin(async move {
-                                publish_screen_share(room, source_id.as_deref(), settings, send_budget).await
+                                let result = publish_screen_share(room, source_id.as_deref(), settings, send_budget, preview_frames, visible).await;
+                                let _ = completed.send(result.as_ref().map(|_| ()).map_err(VoiceError::user_message));
+                                result
                             }));
                             continue;
                         } else if !enabled {
@@ -1519,6 +1583,7 @@ async fn run_room(
                         } else {
                             Ok(())
                         };
+                        let _ = completed.send(result.as_ref().copied().map_err(VoiceError::user_message));
                         match result {
                             Ok(()) => {
                                 let _ = status.send(VoiceStatus::Connected {
@@ -1610,14 +1675,8 @@ async fn run_room(
                             while let Some(frame) = stream.next().await {
                                 let width = frame.buffer.width();
                                 let height = frame.buffer.height();
-                                let Some(size) = width.checked_mul(height).and_then(|pixels| pixels.checked_mul(4)).and_then(|bytes| usize::try_from(bytes).ok()) else { continue };
-                                let mut rgba = vec![0_u8; size];
-                                let (Ok(width_i32), Ok(height_i32)) = (i32::try_from(width), i32::try_from(height)) else {
-                                    tracing::warn!(width, height, "remote video dimensions exceed decoder limits");
-                                    continue;
-                                };
-                                frame.buffer.to_argb(VideoFormatType::RGBA, &mut rgba, width.saturating_mul(4), width_i32, height_i32);
-                                let _ = video_frames.try_send(RemoteVideoFrame { participant: participant.clone(), screen_share, width, height, rgba, removed: false });
+                                let Some(rgba) = frame_rgba(frame.buffer.as_ref()) else { continue };
+                                let _ = video_frames.try_send(VoiceVideoFrame { participant: participant.clone(), source: VideoFrameSource::remote(screen_share), width, height, rgba, removed: false });
                             }
                         });
                         video_readers.insert(key, (sid, reader));
@@ -1626,8 +1685,8 @@ async fn run_room(
                         let key = (participant.identity().to_string(), publication.source() == TrackSource::Screenshare);
                         if video_readers.get(&key).is_some_and(|(sid, _)| *sid == publication.sid().to_string()) {
                             if let Some((_, reader)) = video_readers.remove(&key) { reader.abort(); }
-                            let _ = video_frames.try_send(RemoteVideoFrame {
-                                participant: key.0, screen_share: key.1,
+                            let _ = video_frames.try_send(VoiceVideoFrame {
+                                participant: key.0, source: VideoFrameSource::remote(key.1),
                                 width: 0, height: 0, rgba: Vec::new(), removed: true,
                             });
                         }
@@ -1741,7 +1800,7 @@ async fn run_room(
                         for screen_share in [false, true] {
                             if let Some((_, reader)) = video_readers.remove(&(identity.clone(), screen_share)) {
                                 reader.abort();
-                                let _ = video_frames.try_send(RemoteVideoFrame { participant: identity.clone(), screen_share, width: 0, height: 0, rgba: Vec::new(), removed: true });
+                                let _ = video_frames.try_send(VoiceVideoFrame { participant: identity.clone(), source: VideoFrameSource::remote(screen_share), width: 0, height: 0, rgba: Vec::new(), removed: true });
                             }
                         }
                         set_priority_speaker(&priority_speakers, &identity, false);
@@ -2963,7 +3022,98 @@ impl Drop for CaptureStartupGuard {
     }
 }
 
+fn frame_rgba(buffer: &dyn VideoBuffer) -> Option<Vec<u8>> {
+    let (width, height) = (buffer.width(), buffer.height());
+    let (Ok(w), Ok(h)) = (i32::try_from(width), i32::try_from(height)) else {
+        tracing::warn!(width, height, "video dimensions exceed decoder limits");
+        return None;
+    };
+    let stride = width.checked_mul(4)?;
+    let mut bytes = vec![0; usize::try_from(stride.checked_mul(height)?).ok()?];
+    // libyuv names packed formats in register order. ABGR produces RGBA bytes.
+    buffer.to_argb(VideoFormatType::ABGR, &mut bytes, stride, w, h);
+    Some(bytes)
+}
+
+fn screen_preview_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let (max_width, max_height) = if width >= height {
+        (960, 540)
+    } else {
+        (540, 960)
+    };
+    bounded_dimensions(width, height, max_width, max_height)
+}
+
+struct ScreenPreview {
+    reader: JoinHandle<()>,
+    frames: watch::Sender<Option<VoiceVideoFrame>>,
+    participant: String,
+}
+
+impl ScreenPreview {
+    fn start(
+        mut stream: NativeVideoStream,
+        participant: String,
+        frames: watch::Sender<Option<VoiceVideoFrame>>,
+        mut visible: watch::Receiver<bool>,
+    ) -> Self {
+        let output = frames.clone();
+        let identity = participant.clone();
+        let reader = tokio::spawn(async move {
+            // The SDK sink retains only the newest input frame between samples.
+            loop {
+                if visible.wait_for(|shown| *shown).await.is_err() {
+                    break;
+                }
+                let Some(frame) = stream.next().await else {
+                    break;
+                };
+                if !*visible.borrow() {
+                    continue;
+                }
+                let (width, height) =
+                    screen_preview_dimensions(frame.buffer.width(), frame.buffer.height());
+                let scaled = frame
+                    .buffer
+                    .to_i420()
+                    .scale(width.cast_signed(), height.cast_signed());
+                let Some(rgba) = frame_rgba(scaled.as_ref()) else {
+                    continue;
+                };
+                let _ = output.send_replace(Some(VoiceVideoFrame {
+                    participant: identity.clone(),
+                    source: VideoFrameSource::LocalScreen,
+                    width,
+                    height,
+                    rgba,
+                    removed: false,
+                }));
+                time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+        Self {
+            reader,
+            frames,
+            participant,
+        }
+    }
+
+    async fn stop(self) {
+        self.reader.abort();
+        let _ = self.reader.await;
+        let _ = self.frames.send_replace(Some(VoiceVideoFrame {
+            participant: self.participant,
+            source: VideoFrameSource::LocalScreen,
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+            removed: true,
+        }));
+    }
+}
+
 struct PublishedVideo {
+    preview: Option<ScreenPreview>,
     send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
     budget_source: String,
     audio: Option<screen_audio::PublishedAudio>,
@@ -3000,6 +3150,8 @@ async fn publish_screen_share(
     source_id: Option<&str>,
     settings: ScreenShareSettings,
     send_budget: Arc<tokio::sync::Mutex<VideoSendBudget>>,
+    preview_frames: watch::Sender<Option<VoiceVideoFrame>>,
+    preview_visible: watch::Receiver<bool>,
 ) -> Result<PublishedVideo, VoiceError> {
     let settings = ScreenShareSettings {
         width: settings.width.clamp(640, 3840),
@@ -3019,6 +3171,10 @@ async fn publish_screen_share(
         "kaede.video.v1:screen_share:vp8",
         RtcVideoSource::Native(source.clone()),
     );
+    // Subscribe to the capture source before its first frame. The published track
+    // can be replaced during codec negotiation while this local sink stays attached.
+    let preview_track = LocalVideoTrack::create_video_track("screen preview", track.rtc_source());
+    let preview_stream = NativeVideoStream::new(preview_track.rtc_track());
     let stop = Arc::new(AtomicBool::new(false));
     let budget_source = track.rtc_track().id();
     let mut startup_guard = CaptureStartupGuard {
@@ -3144,6 +3300,12 @@ async fn publish_screen_share(
         None
     };
     let video = PublishedVideo {
+        preview: Some(ScreenPreview::start(
+            preview_stream,
+            room.local_participant().identity().to_string(),
+            preview_frames,
+            preview_visible,
+        )),
         send_budget,
         budget_source,
         audio,
@@ -3485,6 +3647,7 @@ async fn publish_camera(
         return Err(error);
     }
     let video = PublishedVideo {
+        preview: None,
         send_budget,
         budget_source,
         audio: None,
@@ -3715,6 +3878,9 @@ async fn stop_published_video(
         return Ok(());
     };
     publication.stop.store(true, Ordering::Release);
+    if let Some(preview) = publication.preview.take() {
+        preview.stop().await;
+    }
     if let Some(audio) = publication.audio.take() {
         audio.publisher.abort();
         let _ = audio.publisher.await;
@@ -4131,6 +4297,73 @@ mod tests {
         local_priority_speaker_metadata_transition, local_voice_grant_rotation, media_room_options,
         participant_can_priority_speak, priority_speaker_transition, video_publish_options,
     };
+
+    #[tokio::test]
+    async fn screen_preview_replays_on_reattach_and_stop_supersedes_queued_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{VideoFrameSource, VoiceVideoFrame, VoiceVideoFrames, mpsc, watch};
+
+        let (remote_tx, remote) = mpsc::channel(1);
+        let (preview_tx, preview) = watch::channel(None);
+        let mut reader = VoiceVideoFrames { remote, preview };
+        let local = VoiceVideoFrame {
+            participant: "self".to_owned(),
+            source: VideoFrameSource::LocalScreen,
+            width: 2,
+            height: 2,
+            rgba: vec![255; 16],
+            removed: false,
+        };
+        preview_tx.send(Some(local.clone()))?;
+        assert_eq!(
+            reader.recv(true).await.ok_or("video stream closed")?.rgba,
+            local.rgba
+        );
+        reader.replay_preview();
+        assert_eq!(
+            reader.recv(true).await.ok_or("video stream closed")?.source,
+            VideoFrameSource::LocalScreen
+        );
+
+        remote_tx
+            .send(VoiceVideoFrame {
+                participant: "peer".to_owned(),
+                source: VideoFrameSource::RemoteScreen,
+                ..local.clone()
+            })
+            .await?;
+        preview_tx.send(Some(local.clone()))?;
+        preview_tx.send(Some(VoiceVideoFrame {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+            removed: true,
+            ..local
+        }))?;
+        let remote = reader.recv(false).await.ok_or("video stream closed")?;
+        let removal = reader.recv(true).await.ok_or("video stream closed")?;
+        assert_eq!(remote.participant, "peer");
+        assert!(!remote.removed);
+        assert_eq!(removal.source, VideoFrameSource::LocalScreen);
+        assert!(removal.removed);
+        assert!(removal.rgba.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn video_surface_receives_opaque_rgba_bytes() {
+        let mut red = super::I420Buffer::new(2, 2);
+        let (y, u, v) = red.data_mut();
+        y.fill(82);
+        u.fill(90);
+        v.fill(240);
+        let rgba = super::frame_rgba(red.as_ref()).unwrap_or_default();
+        assert_eq!(rgba.len(), 16);
+        assert!(
+            rgba.chunks_exact(4)
+                .all(|pixel| pixel[0] >= 250 && pixel[1] < 5 && pixel[2] < 5 && pixel[3] == 255)
+        );
+    }
 
     #[test]
     fn receiver_detects_decode_stall_and_resets_evidence_across_gaps() {
@@ -5224,6 +5457,9 @@ mod tests {
         assert_eq!(bounded_dimensions(3440, 1440, 1920, 1080), (1920, 802));
         assert_eq!(bounded_dimensions(1279, 719, 1920, 1080), (1278, 718));
         assert_eq!(bounded_dimensions(1, 1, 1280, 720), (2, 2));
+        assert_eq!(super::screen_preview_dimensions(2560, 1440), (960, 540));
+        assert_eq!(super::screen_preview_dimensions(1440, 2560), (540, 960));
+        assert_eq!(super::screen_preview_dimensions(1600, 1200), (720, 540));
     }
 
     #[cfg(target_os = "linux")]

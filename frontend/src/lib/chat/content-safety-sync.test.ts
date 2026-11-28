@@ -1,14 +1,18 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/errors';
 import type { Message, UserSummary } from './types';
-const network = vi.hoisted(() => ({ api: vi.fn(), purge: vi.fn().mockResolvedValue(undefined) }));
+const network = vi.hoisted(() => ({
+  api: vi.fn(),
+  purge: vi.fn().mockResolvedValue(undefined),
+  messages: [] as Message[]
+}));
 vi.mock('$lib/api/client', async (original) => ({
   ...(await original<typeof import('$lib/api/client')>()),
   api: network.api
 }));
 vi.mock('$lib/e2ee/client', () => ({ purgeSafetyE2EEState: network.purge }));
 vi.mock('$lib/stores/entities.svelte', () => ({
-  chatEntities: { messages: { values: [], replace: vi.fn() } }
+  chatEntities: { messages: { values: network.messages, replace: vi.fn() } }
 }));
 import {
   applyContentSafetyUpdate,
@@ -19,6 +23,7 @@ import {
 import { stripNetworkClientState } from '$lib/api/network-boundary';
 afterEach(() => {
   vi.clearAllMocks();
+  network.messages.length = 0;
 });
 const user = { id: '1', origin_domain: 'home.example' } as UserSummary;
 
@@ -57,6 +62,28 @@ it('does not finish synchronization before durable encrypted cache cleanup compl
   expect(contentSafety.ready).toBe(false);
   release();
   await pending;
+  expect(contentSafety.ready).toBe(true);
+});
+
+it('checks saved messages and uploaded attachments while a failed send is still in the timeline', async () => {
+  network.messages.push(
+    {
+      id: 'pending-local-send',
+      origin_domain: '',
+      failed: true,
+      attachments: [{ id: '54', origin_domain: 'home.example' }]
+    } as Message,
+    { id: '83', origin_domain: 'remote.example', queued: true } as Message
+  );
+  network.api.mockResolvedValue({ items: [], next_cursor: '0', has_more: false });
+  await syncContentSafety(user);
+  expect(network.api).toHaveBeenCalledWith('/safety/content-status', {
+    method: 'POST',
+    body: JSON.stringify({
+      message_refs: ['83@remote.example'],
+      attachment_refs: ['54@home.example']
+    })
+  });
   expect(contentSafety.ready).toBe(true);
 });
 

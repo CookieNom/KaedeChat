@@ -4942,6 +4942,15 @@
   "encryption_component_unavailable": "This version of Kaede cannot open end-to-end encryption. Update the app to use encrypted messages and calls.",
   "encrypted_voice_setup_failed": "Kaede couldn’t open the encryption keys for this call. Open the encrypted conversation and try joining again.",
   "voice_encryption_changed": "Call encryption changed. Rejoin to use the current settings.",
+  "voice_shared_screen": "{name}’s screen",
+  "@voice_shared_screen": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "voice_screen_waiting": "Waiting for screen video…",
   "ui_voice_connection_interrupted_reconnecting_6458068c": "Voice connection interrupted. Reconnecting…",
   "@ui_voice_connection_interrupted_reconnecting_6458068c": {
     "description": "Interface text in lib/src/features/voice/voice_session.dart"

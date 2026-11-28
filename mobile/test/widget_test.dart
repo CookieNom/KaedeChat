@@ -26,6 +26,12 @@ import 'package:kaede_mobile/src/platform/system_call_service.dart';
 import 'package:kaede_mobile/src/protocol/generated.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'package:mocktail/mocktail.dart';
+
+class _CallParticipant extends Mock implements RemoteParticipant {}
+
+class _ScreenPublication extends Mock
+    implements RemoteTrackPublication<RemoteVideoTrack> {}
 
 void main() {
   test('friend lookup errors explain how to correct the username', () {
@@ -2451,6 +2457,33 @@ void main() {
         isNull,
       );
     });
+  });
+
+  test('a DM shows one announced share first while its video is pending', () {
+    final first = _CallParticipant();
+    final sharing = _CallParticipant();
+    final baseline = _ScreenPublication();
+    final alternate = _ScreenPublication();
+    when(() => first.videoTrackPublications).thenReturn([]);
+    for (final publication in [baseline, alternate]) {
+      when(() => publication.source).thenReturn(TrackSource.screenShareVideo);
+      when(() => publication.muted).thenReturn(false);
+    }
+    when(() => sharing.videoTrackPublications)
+        .thenReturn([baseline, alternate]);
+    final participants = [first, sharing];
+    final cameras = [
+      (participant: first, source: TrackSource.camera),
+      (participant: sharing, source: TrackSource.camera),
+    ];
+    expect(voiceVideoTiles(participants, directCall: true), [
+      (participant: sharing, source: TrackSource.screenShareVideo),
+      ...cameras,
+    ]);
+    for (final publication in [baseline, alternate]) {
+      when(() => publication.muted).thenReturn(true);
+    }
+    expect(voiceVideoTiles(participants, directCall: true), cameras);
   });
 
   group('voice participant labels', () {

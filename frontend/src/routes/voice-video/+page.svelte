@@ -1,22 +1,42 @@
 <script lang="ts">
   import ListeningVolumeMenu from '$lib/voice/ListeningVolumeMenu.svelte';
   import { onMount } from 'svelte';
-  import { SvelteMap } from 'svelte/reactivity';
   import { isNativeDesktop, nativeInvoke, type NativeVoiceStatus } from '$lib/platform/native';
-  import { attachVideo, decodeNativeVideoFrame, type VoiceTile } from '$lib/voice/session';
+  import { t } from '$lib/ui/locale';
+  import {
+    attachVideo,
+    decodeNativeVideoFrame,
+    NativeVideoPresentation,
+    type VoiceTile
+  } from '$lib/voice/session';
 
-  const tiles = new SvelteMap<string, VoiceTile>();
+  let tiles = $state.raw<VoiceTile[]>([]);
   let volumes = $state<Record<string, [number, number]>>({});
   onMount(() => {
     if (!isNativeDesktop()) return;
     let stopped = false;
-    const volumePoll = setInterval(() => {
-      void nativeInvoke<NativeVoiceStatus>('native_voice_status')
-        .then((status) => {
-          if (!stopped) volumes = status.listening_volumes ?? {};
-        })
-        .catch(() => {});
-    }, 500);
+    const presentation = new NativeVideoPresentation();
+    const updateTiles = () => {
+      tiles = presentation.tiles().filter((tile) => !tile.local);
+    };
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const status = await nativeInvoke<NativeVoiceStatus>('native_voice_status');
+        if (stopped) return;
+        presentation.setStatus(status);
+        updateTiles();
+        volumes = status.listening_volumes ?? {};
+      } catch {
+        // Keep the current view until the next successful poll.
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const volumePoll = setInterval(() => void poll(), 500);
     void (async () => {
       while (!stopped) {
         try {
@@ -28,17 +48,10 @@
             await new Promise((resolve) => setTimeout(resolve, 50));
             continue;
           }
-          const key = `${frame.participant}:${frame.source}`;
-          if (frame.removed) tiles.delete(key);
-          else
-            tiles.set(key, {
-              key,
-              identity: frame.participant,
-              name: frame.participant,
-              source: frame.source,
-              nativeFrame: frame.image,
-              local: false
-            });
+          if (!frame.local) {
+            presentation.applyFrame(frame);
+            updateTiles();
+          }
         } catch {
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
@@ -53,10 +66,15 @@
 
 <svelte:head><title>Kaede · Call video</title></svelte:head>
 <main>
-  {#each [...tiles.values()] as tile (tile.key)}
+  {#each tiles as tile (tile.key)}
     <div class="tile">
       <div class="video" use:attachVideo={tile}></div>
-      <span>{tile.name}</span>
+      {#if !tile.nativeFrame}<p class="waiting">{$t('voice_screen_waiting')}</p>{/if}
+      <span
+        >{tile.source === 'screen_share'
+          ? $t('voice_screen_remote', { name: tile.name })
+          : tile.name}</span
+      >
       <ListeningVolumeMenu
         name={tile.name}
         voice={volumes[tile.identity]?.[0] ?? 1}
@@ -97,6 +115,13 @@
     width: 100%;
     height: 100%;
     object-fit: contain;
+  }
+  .waiting {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    pointer-events: none;
   }
   span {
     position: absolute;

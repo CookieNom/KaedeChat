@@ -434,9 +434,12 @@ export function syncContentSafety(user: UserSummary): Promise<void> {
     }
     const { chatEntities } = await import('$lib/stores/entities.svelte');
     if (requestedGeneration !== generation) return;
+    const timeline = chatEntities.messages.values;
     await reconcileSafetyReferences(
-      chatEntities.messages.values.map(entityRef),
-      chatEntities.messages.values.flatMap((message) => (message.attachments ?? []).map(entityRef))
+      timeline
+        .filter((message) => message.origin_domain !== '' || !message.id.startsWith('pending-'))
+        .map(entityRef),
+      timeline.flatMap((message) => (message.attachments ?? []).map(entityRef))
     );
     const { purgeSafetyE2EEState } = await import('$lib/e2ee/client');
     do {

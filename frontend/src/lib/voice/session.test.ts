@@ -1,5 +1,5 @@
 import * as callSounds from './call-sounds';
-import { webCameraDefaults } from './quality';
+import { DEFAULT_MEDIA_QUALITY, webCameraDefaults } from './quality';
 import {
   ExternalE2EEKeyProvider,
   RoomEvent,
@@ -12,6 +12,8 @@ import type { Channel } from '$lib/chat/types';
 
 import {
   decodeNativeVideoFrame,
+  attachVideo,
+  NativeVideoPresentation,
   expectedVoicePolicy,
   isUsableVoiceToken,
   VoiceConnectionFence,
@@ -85,6 +87,7 @@ it('updates the desktop DM roster and speech indicator as native room status cha
   const status = {
     state: 'connected',
     can_speak: true,
+    screen: true,
     speech_frames: 0,
     input_level: 0,
     remote_participants: { '2@chat.example': peer } as Record<string, typeof peer>
@@ -103,6 +106,7 @@ it('updates the desktop DM roster and speech indicator as native room status cha
       expect.objectContaining({ grantHandle: handle, connectionId: grant().connection_id })
     );
     expect(voice.participants()[0].speaking).toBe(false);
+    expect(voice.screen).toBe(true);
     expect(voice.participants()).toHaveLength(2);
     expect(voice.participants()[1]).toEqual({
       ...peer,
@@ -111,9 +115,14 @@ it('updates the desktop DM roster and speech indicator as native room status cha
       local: false
     });
     status.remote_participants = {};
+    // Closing the shared window ends capture outside the in-call controls.
+    status.state = 'media_error';
+    status.screen = false;
     status.speech_frames++;
     await vi.advanceTimersByTimeAsync(75);
     expect(voice.participants()).toHaveLength(1);
+    expect(voice.connected).toBe(true);
+    expect(voice.screen).toBe(false);
     expect(voice.participants()[0].speaking).toBe(true);
     await vi.advanceTimersByTimeAsync(400);
     expect(voice.participants()[0].speaking).toBe(false);
@@ -125,6 +134,45 @@ it('updates the desktop DM roster and speech indicator as native room status cha
     expect(cue).toHaveBeenLastCalledWith('leave');
     cue.mockRestore();
   }
+});
+
+it('reports native screen sharing after publication and preserves picker errors for retry', async () => {
+  let commandResult = deferred<void>();
+  const commandSent = deferred<void>();
+  const invoke = vi.fn((command: string) => {
+    if (command !== 'native_voice_control') return Promise.resolve();
+    commandSent.resolve();
+    return commandResult.promise;
+  });
+  vi.stubGlobal('window', { __TAURI__: { core: { invoke } } });
+  const voice = new VoiceSession(() => new FakeVoiceRoom() as unknown as Room);
+  voice.connected = true;
+  voice.canStream = true;
+
+  const failed = voice.startScreenShare(DEFAULT_MEDIA_QUALITY);
+  await voice.startScreenShare(DEFAULT_MEDIA_QUALITY);
+  await commandSent.promise;
+  expect(invoke.mock.calls.filter(([name]) => name === 'native_voice_control')).toHaveLength(1);
+  expect(voice.screenPending).toBe('starting');
+  expect(voice.screen).toBe(false);
+  commandResult.reject({ message: 'Screen recording permission was denied.' });
+  await expect(failed).rejects.toThrow('Screen recording permission was denied.');
+  expect(voice.screenPending).toBeNull();
+
+  commandResult = deferred<void>();
+  const start = voice.startScreenShare(DEFAULT_MEDIA_QUALITY);
+  commandResult.resolve();
+  await start;
+  expect(voice.screen).toBe(true);
+  commandResult = deferred<void>();
+  const stop = voice.stopScreenShare();
+  await voice.stopScreenShare();
+  expect(voice.screenPending).toBe('stopping');
+  expect(voice.screen).toBe(true);
+  commandResult.resolve();
+  await stop;
+  expect(voice.screen).toBe(false);
+  expect(voice.screenPending).toBeNull();
 });
 
 describe('voice connection generation fence', () => {
@@ -851,6 +899,47 @@ describe('native camera and share frame identity', () => {
     return bytes;
   }
 
+  it('starts fetching frames when a native join finishes and ignores an old room response', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-19T12:00:00Z'));
+    let state = 'connecting';
+    const pendingFrame = deferred<Uint8Array>();
+    const nextFrame = vi
+      .fn()
+      .mockResolvedValueOnce(packet('KVD2', 2))
+      .mockReturnValueOnce(pendingFrame.promise)
+      .mockResolvedValue(new Uint8Array());
+    vi.stubGlobal('window', {
+      __TAURI__: {
+        core: {
+          invoke: async (command: string) => {
+            if (command === 'native_voice_status')
+              return { state, screen: true, remote_participants: {} };
+            if (command === 'native_voice_next_video') return nextFrame();
+          }
+        }
+      }
+    });
+    const voice = new VoiceSession(() => new FakeVoiceRoom() as unknown as Room);
+    await voice.connectNative('2', true, grant(), plaintextChannel);
+    try {
+      expect(voice.connecting).toBe(true);
+      expect(nextFrame).not.toHaveBeenCalled();
+      state = 'connected';
+      await vi.advanceTimersByTimeAsync(75);
+      expect(voice.tiles()[0]).toMatchObject({ local: true, nativeFrame: { width: 1 } });
+      state = 'reconnecting';
+      await vi.advanceTimersByTimeAsync(75);
+      pendingFrame.resolve(packet('KVD2', 2));
+      await vi.advanceTimersByTimeAsync(1);
+      state = 'connected';
+      await vi.advanceTimersByTimeAsync(75);
+      expect(voice.tiles().map((tile) => tile.nativeFrame)).toEqual([undefined]);
+    } finally {
+      await voice.disconnect();
+    }
+  });
+
   it('distinguishes camera and share while accepting the previous native frame format', () => {
     expect(decodeNativeVideoFrame(packet('KVD1'))).toMatchObject({
       participant: 'alice',
@@ -864,9 +953,92 @@ describe('native camera and share frame identity', () => {
       participant: 'alice',
       source: Track.Source.ScreenShare
     });
-    expect(decodeNativeVideoFrame(packet('KVD2', 2))).toBeNull();
+    expect(decodeNativeVideoFrame(packet('KVD2', 2))).toMatchObject({
+      source: Track.Source.ScreenShare,
+      local: true
+    });
+    expect(decodeNativeVideoFrame(packet('KVD2', 3))).toBeNull();
     expect(decodeNativeVideoFrame(packet('KVD2').slice(0, 15))).toBeNull();
   });
+
+  it('keeps published shares visible between frames and clears ended shares in both views', () => {
+    const video = new NativeVideoPresentation();
+    const alice = {
+      name: 'Alice Maple',
+      speaking: false,
+      microphone: true,
+      camera: true,
+      screen: true
+    };
+    video.applyFrame(decodeNativeVideoFrame(packet('KVD2', 2))!);
+    video.setStatus({ state: 'connected', screen: false, remote_participants: {} }, true);
+    expect(video.tiles()).toEqual([]);
+    video.setLocalScreen(true);
+    expect(video.tiles()[0]?.nativeFrame?.width).toBe(1);
+    video.clearFrames();
+    video.setStatus({ state: 'connected', screen: true, remote_participants: { alice } });
+    const waiting = video.tiles();
+    expect(waiting.map((tile) => [tile.name, tile.local, tile.nativeFrame])).toEqual([
+      ['Alice Maple', false, undefined],
+      ['You', true, undefined]
+    ]);
+    // The remote and local packets deliberately share an identity; only the native
+    // discriminator is trusted to mark a frame local.
+    for (const source of [0, 1, 2])
+      video.applyFrame(decodeNativeVideoFrame(packet('KVD2', source))!);
+    expect(video.tiles()).toHaveLength(3);
+    for (const tile of waiting) {
+      expect(video.tiles().find((item) => item.key === tile.key)?.nativeFrame?.width).toBe(1);
+    }
+    const removal = packet('KVD2', 1);
+    removal[14] = 1;
+    video.applyFrame(decodeNativeVideoFrame(removal)!);
+    expect(
+      video.tiles().find((item) => !item.local && item.source === Track.Source.ScreenShare)
+        ?.nativeFrame
+    ).toBeUndefined();
+    alice.screen = false;
+    video.setStatus({ state: 'connected', screen: false, remote_participants: { alice } });
+    video.applyFrame(decodeNativeVideoFrame(packet('KVD2', 2))!);
+    expect(video.tiles()).toEqual([
+      expect.objectContaining({ source: Track.Source.Camera, name: 'Alice Maple' })
+    ]);
+    video.setStatus({ state: 'disconnected' });
+    expect(video.tiles()).toEqual([]);
+  });
+});
+
+it('keeps a browser share tile while the selected publication and track change', () => {
+  const room = new FakeVoiceRoom();
+  const voice = new VoiceSession(() => room as unknown as Room);
+  const publications = room.localParticipant.trackPublications;
+  const share = { kind: Track.Kind.Video, source: Track.Source.ScreenShare, isMuted: false };
+  publications.set('baseline', { ...share, trackSid: 'baseline' });
+  const [pending] = voice.tiles();
+  expect(pending).toMatchObject({ local: true, source: Track.Source.ScreenShare });
+  expect(pending.track).toBeUndefined();
+  const track = (id: string) => ({
+    kind: Track.Kind.Video,
+    attach: vi.fn(() => ({ id, remove: vi.fn() })),
+    detach: vi.fn()
+  });
+  const first = track('vp8');
+  const second = track('av1');
+  vi.stubGlobal('HTMLVideoElement', class {});
+  const host = { append: vi.fn() } as unknown as HTMLElement;
+  const render = attachVideo(host, pending);
+  publications.set('baseline', { ...share, trackSid: 'baseline', track: first });
+  publications.set('alternate', { ...share, trackSid: 'alternate', track: second });
+  expect(voice.tiles()).toHaveLength(1);
+  render.update(voice.tiles()[0]);
+  expect(first.attach).toHaveBeenCalledOnce();
+  publications.delete('baseline');
+  expect(voice.tiles()[0].key).toEqual(pending.key);
+  render.update(voice.tiles()[0]);
+  expect(first.detach).toHaveBeenCalledWith(first.attach.mock.results[0].value);
+  expect(second.attach).toHaveBeenCalledOnce();
+  render.destroy();
+  expect(second.detach).toHaveBeenCalledOnce();
 });
 
 it.each(['deafen', 'revoke'] as const)(

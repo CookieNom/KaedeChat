@@ -805,6 +805,7 @@ fn install_voice(
                     enabled,
                     source_id,
                     settings: kaede_voice::ScreenShareSettings::default(),
+                    completed: tokio::sync::oneshot::channel().0,
                 });
         }
     });
@@ -1056,7 +1057,7 @@ async fn activate_voice_handle(
         let video_weak = weak.clone();
         tokio::spawn(async move {
             let mut tiles = HashMap::<String, (Vec<u8>, u32, u32)>::new();
-            while let Some(frame) = video_frames.recv().await {
+            while let Some(frame) = video_frames.recv(true).await {
                 let participant = frame.participant;
                 let removed = frame.removed;
                 let rgba = frame.rgba;

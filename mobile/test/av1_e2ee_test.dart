@@ -114,8 +114,9 @@ void main() {
       when(() => remoteVideo.receiver).thenReturn(receiver);
       final remotePublication = _RemotePublication();
       when(() => remotePublication.sid).thenReturn('remote-video');
+      // A desktop publication can arrive before the SFU knows its codec.
       when(() => remotePublication.mimeType)
-          .thenReturn('video/${codec.toUpperCase()}');
+          .thenReturn(codec == 'av1' ? '' : 'video/${codec.toUpperCase()}');
       when(() => remotePublication.encryptionType)
           .thenReturn(EncryptionType.kGcm);
       room.events.emit(TrackSubscribedEvent(

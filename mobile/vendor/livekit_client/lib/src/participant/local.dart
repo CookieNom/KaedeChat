@@ -181,6 +181,8 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
     final List<rtc.RTCRtpEncoding> encodings = [encoding];
 
     final shouldStopOnFailure = !track.isActive;
+    final e2ee = room.e2eeManager;
+    Future<void> Function()? discardSender;
     try {
       // Start capture before signaling so create-time audio processing failures
       // abort publish without creating a server-side publication.
@@ -194,7 +196,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         muted: track.muted,
         stream: buildStreamId(publishOptions, track.source),
         disableDtx: !publishOptions.dtx,
-        disableRed: room.e2eeManager != null ? true : publishOptions.red ?? true,
+        disableRed: e2ee != null ? true : publishOptions.red ?? true,
         encryption: room.roomOptions.lkEncryptionType,
       );
 
@@ -210,6 +212,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
           options,
           encodings,
         );
+        if (e2ee != null) {
+          final sender = track.sender!;
+          await e2ee.addRtpSender(sender: sender, identity: identity, sid: req.cid);
+          discardSender = () => e2ee.discardUnpublishedSender(sender: sender, identity: identity, sid: req.cid);
+        }
         await room.engine.negotiate();
         return lk_models.TrackInfo();
       }
@@ -223,19 +230,7 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
         trackInfo = rets[0];
       } else {
         trackInfo = await room.engine.addTrack(req);
-
-        final transceiverInit = rtc.RTCRtpTransceiverInit(
-          direction: rtc.TransceiverDirection.SendOnly,
-          sendEncodings: encodings,
-        );
-        // addTransceiver cannot pass in a kind parameter due to a bug in flutter-webrtc (web)
-        track.transceiver = await room.engine.publisher?.pc.addTransceiver(
-          track: track.mediaStreamTrack,
-          kind: rtc.RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: transceiverInit,
-        );
-
-        await room.engine.negotiate();
+        await negotiate(publishOptions);
       }
 
       logger.fine('publishAudioTrack engine.addTrack response: ${trackInfo}');
@@ -266,6 +261,11 @@ class LocalParticipant extends Participant<LocalTrackPublication> {
 
       return pub;
     } catch (error) {
+      try {
+        await discardSender?.call();
+      } catch (cleanupError) {
+        logger.warning('failed to detach unpublished audio sender: $cleanupError');
+      }
       if (shouldStopOnFailure) {
         try {
           await track.stop();
